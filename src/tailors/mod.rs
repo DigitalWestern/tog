@@ -535,11 +535,15 @@ pub trait Tailor: Sync {
     /// fails or would change the lock is an error. Either way the check
     /// publishes nothing: `tog attest` publishes every ecosystem's record
     /// together (`record::publish_receipts`) only after all checks passed.
+    /// `host` lends what an edit borrows from its command (the `tog x`
+    /// cache a pinned package manager lives in), asked only once a tool
+    /// will run.
     fn attest_lock(
         &self,
         _ctx: &Context,
         _project: &ProjectRoot,
         _toolchain: &Selected,
+        _host: &dyn EditHost,
         _door: &mut ResolutionDoor<'_>,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
         Err(io::Error::new(

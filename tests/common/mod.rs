@@ -103,6 +103,12 @@ pub fn open_store(temp: &TempDir) -> tog::kernel::store::Store {
 /// release check `doctor` makes points at a file that does not exist so the
 /// suite stays offline. `TOG_SANDBOX_TESTS` passes through: CI sets it to
 /// make a sandbox that cannot start a failure rather than a skip.
+///
+/// Keep `home` out of the project: tog's default signing key path is
+/// `$HOME/.tog/signing.key`, and a resolution door refuses to run when
+/// that path lies under a root it mounts (the project, the store), whether
+/// or not a key is there. `temp/project` beside `temp/home` is the layout
+/// that works; `home == project` is refused by every confined ecosystem.
 pub fn command(cwd: &Path, home: &Path, store: &Path) -> Command {
     command_for(Path::new(env!("CARGO_BIN_EXE_tog")), cwd, home, store)
 }

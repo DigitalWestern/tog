@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use crate::kernel::context::project_dir;
 pub(crate) use crate::tailors::{
-    CachedTool, DepSpec, EditHost, EditVerb, ManifestEdit, PackageRegistry, Tailor,
+    CachedTool, DepSpec, EditVerb, ManifestEdit, PackageRegistry, Tailor,
 };
 
 /// The ecosystems `tog add` can choose, in registry order, each with the
@@ -333,6 +333,30 @@ pub(crate) fn input_files() -> String {
         .map(|tailor| tailor.input_files())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// What an edit or a lock check borrows from its command: toolchain
+/// selection outside a sync, and the `tog x` cache a pinned package
+/// manager lives in.
+pub(crate) struct CommandHost {
+    pub platform: Platform,
+}
+
+impl crate::tailors::EditHost for CommandHost {
+    fn toolchain(&self, dir: &Path, ecosystem: &str) -> io::Result<Selected> {
+        selected_toolchain(self.platform, dir, ecosystem)
+    }
+
+    fn cached_tool(
+        &self,
+        ecosystem: &str,
+        project: &Path,
+        package: &str,
+        version: &str,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<CachedTool> {
+        crate::commands::x::realize_cached_tool(project, ecosystem, package, version, door)
+    }
 }
 
 #[cfg(test)]

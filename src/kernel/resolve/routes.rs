@@ -365,6 +365,16 @@ pub trait RegistryProtocol: Sync {
     fn rewrite(&self, _url: &Url, body: Vec<u8>, _base: &ProxyAddress) -> io::Result<Vec<u8>> {
         Ok(body)
     }
+
+    /// Whether a percent-encoded `/` (`%2f`) may appear inside a path
+    /// segment of this protocol. npm spells a scoped package's packument
+    /// `/@scope%2fname`, so its route says yes. The kernel still refuses
+    /// `.` and `..` on either side of the encoded slash, an encoded `\` or
+    /// NUL, and every double encoding; the protocol's own grammar decides
+    /// where the encoded slash may stand.
+    fn encoded_slash(&self) -> bool {
+        false
+    }
 }
 
 /// A mirror route: a protocol and the endpoints it may reach.
@@ -414,7 +424,7 @@ impl Route {
     /// Where `path` goes, after the kernel's grammar check and the origin
     /// check on the protocol's answer.
     pub fn resolve(&self, path: &str) -> Result<Upstream, String> {
-        check_route_path(path)?;
+        check_route_path_with(path, self.protocol.encoded_slash())?;
         let upstream = self
             .protocol
             .upstream(&self.endpoints, path)
@@ -487,7 +497,12 @@ fn scrub_echo(text: &str, path: &str, protocol: &dyn RegistryProtocol) -> String
 /// an absolute path, no empty, `.`, or `..` segment (percent-encoded or
 /// not), no percent-encoded `/`, `\`, or NUL, no backslash, and no URL
 /// inside it. The query is not restricted beyond well-formed escapes.
-pub fn check_route_path(path_and_query: &str) -> Result<(), String> {
+///
+/// `encoded_slash` is set for a protocol that accepts a percent-encoded `/`
+/// inside a segment ([`RegistryProtocol::encoded_slash`]): the encoded
+/// slash then counts as a segment boundary for the `.`, `..`, and empty
+/// segment rules, so `/@s%2f..` is refused like `/@s/..`.
+pub fn check_route_path_with(path_and_query: &str, encoded_slash: bool) -> Result<(), String> {
     // The path is not echoed (its query may hold a secret); the caller
     // names the request with its redacted URL.
     let refuse = |why: &str| Err(format!("mirror path refused: {why}"));
@@ -516,7 +531,7 @@ pub fn check_route_path(path_and_query: &str) -> Result<(), String> {
     }
     let lower = path.to_ascii_lowercase();
     for encoded in ["%2f", "%5c", "%00"] {
-        if lower.contains(encoded) {
+        if lower.contains(encoded) && !(encoded == "%2f" && encoded_slash) {
             return refuse("a percent-encoded /, \\, or NUL");
         }
     }
@@ -528,13 +543,20 @@ pub fn check_route_path(path_and_query: &str) -> Result<(), String> {
             return refuse("a double percent-encoding");
         }
     }
-    let segments: Vec<&str> = path[1..].split('/').collect();
+    // With the encoded slash allowed, it bounds segments like a real one,
+    // so an encoded `..` cannot hide behind it.
+    let segmented = if encoded_slash {
+        lower.replace("%2f", "/")
+    } else {
+        lower.clone()
+    };
+    let segments: Vec<&str> = segmented[1..].split('/').collect();
     for (index, segment) in segments.iter().enumerate() {
         let last = index + 1 == segments.len();
         if segment.is_empty() && !last {
             return refuse("an empty segment");
         }
-        let decoded = segment.to_ascii_lowercase().replace("%2e", ".");
+        let decoded = segment.replace("%2e", ".");
         if decoded == "." || decoded == ".." {
             return refuse("a . or .. segment");
         }
@@ -681,7 +703,7 @@ mod tests {
             "/a%25b",
             "/a%2541",
         ] {
-            assert_eq!(check_route_path(good), Ok(()), "{good}");
+            assert_eq!(check_route_path_with(good, false), Ok(()), "{good}");
         }
         for (bad, why) in [
             ("a/b", "absolute path"),
@@ -706,7 +728,31 @@ mod tests {
             ("/a%2500", "double"),
             ("/a%2525", "double"),
         ] {
-            let error = check_route_path(bad).unwrap_err();
+            let error = check_route_path_with(bad, false).unwrap_err();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
+    }
+
+    /// A protocol that takes an encoded slash (npm's `/@scope%2fname`)
+    /// gets it in either case, and nothing else changes: the encoded slash
+    /// bounds a segment, so `..` or an empty segment behind it is still
+    /// refused, and `\`, NUL, and every double encoding stay refused.
+    #[test]
+    fn an_encoded_slash_is_a_segment_boundary_when_a_protocol_allows_it() {
+        for good in ["/@types%2fnode", "/@Types%2Fnode", "/@s%2fn/-/n-1.0.0.tgz"] {
+            assert_eq!(check_route_path_with(good, true), Ok(()), "{good}");
+            assert!(check_route_path_with(good, false).is_err(), "{good}");
+        }
+        for (bad, why) in [
+            ("/@s%2f..", ". or .."),
+            ("/@s%2f%2e%2e/x", ". or .."),
+            ("/@s%2f.%2fx", ". or .."),
+            ("/@s%2f%2fx", "empty segment"),
+            ("/a%5cb", "percent-encoded"),
+            ("/a%00", "percent-encoded"),
+            ("/a%252Fb", "double"),
+        ] {
+            let error = check_route_path_with(bad, true).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");
         }
     }

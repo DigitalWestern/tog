@@ -12,7 +12,11 @@ use common::{assert_frozen_never_writes_the_lock, assert_ok, tog, TempDir};
 #[ignore]
 fn package_json_script_runs_inside_projected_env() {
     let temp = TempDir::new("run-scripts");
-    let project = &temp.0;
+    // The project sits beside HOME, not at it: tog's default signing key
+    // path is $HOME/.tog/signing.key, and a resolution door refuses to
+    // mount any root that path lies under.
+    let project = &temp.0.join("project");
+    std::fs::create_dir(project).unwrap();
     std::fs::write(
         project.join("package.json"),
         r#"{"name":"fx","version":"1.0.0","scripts":{"pretest":"echo $npm_lifecycle_event > out.txt","test":"echo $npm_lifecycle_event >> out.txt && echo $INIT_CWD >> out.txt && echo $npm_package_name >> out.txt && node -e \"process.exit(process.argv[1]==='fail'?3:0)\"","posttest":"echo $npm_lifecycle_event >> out.txt"}}"#,

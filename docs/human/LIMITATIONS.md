@@ -29,9 +29,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   another bundle than the lock names is `stale`. It does not prove the signer's sync was
   honest or safe to run: it does not cover the doors that run unsandboxed with network
   (`add`/`remove`/`update`, where the ecosystem's own tool edits the manifest and lock, and
-  missing-lock generation during `sync`/`plan`, where uv, npm, bundler, mix resolve
-  with network; Go and Cargo resolve confined through tog's proxy instead, and `attest`
-  re-checks their locks), nor does it re-verify store bytes, re-check object metadata, or judge what
+  missing-lock generation during `sync`/`plan`, where uv, bundler, mix resolve
+  with network; Go, Cargo, and Node (npm, pnpm) resolve confined through tog's proxy
+  instead, and `attest` re-checks their locks), nor does it re-verify store bytes, re-check
+  object metadata, or judge what
   `tog run`/`x` executed. A job that runs untrusted project code must not hold a signing
   key. The machine policy is whatever `TOG_POLICY` or `$HOME` selects: the gate's
   workflow, environment, binary, and machine policy must be controlled outside the
@@ -125,15 +126,33 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the
   declarative file to add. Reading those sources means running project code, which is
   exactly what frozen promises not to do.
-- **`add` / `remove` / `update` delegate to store tools with network, unsandboxed** (uv, npm,
-  pnpm, bundler, mix) — the same trust boundary as missing-lockfile generation. Go and Cargo
-  run theirs in the sandbox with no network of their own, through tog's resolution proxy.
+- **`add` / `remove` / `update` delegate to store tools with network, unsandboxed** (uv,
+  bundler, mix) — the same trust boundary as missing-lockfile generation. Go, Cargo, and
+  Node (npm and the pinned pnpm) run theirs in the sandbox with no network of their own,
+  through tog's resolution proxy.
   Refusal rows: Poetry/PDM, setup.py, `requirements/` dirs, Elixir add/remove, Yarn, .NET.
+- **A Node `file:` or `link:` dependency outside the project is refused** by every door
+  (edits, a missing lock, `attest`), naming the manifest and the path: the confined npm or
+  pnpm reads the project alone, and a resolution record names files inside the project only.
+  Move it inside the project, or depend on it from a registry. A scoped registry in `.npmrc`
+  and a direct-URL tarball are fetched through interception and recorded as
+  `unattested-index`, which the company policy denies.
 - **pnpm edits require a root `packageManager` field** with an exact pinned version.
   Membership is the `pnpm-lock.yaml` `importers` list and nothing else. **A member added since
   the last `pnpm install` is not in the lock and cannot be distinguished from a deliberate
   exclusion**, so edits refuse loudly with two remedies: `pnpm install` at the root, or a
   `.tog` directory in it.
+- **pnpm patches are resolution inputs only when `package.json` names them.** The patch
+  files `pnpm.patchedDependencies` lists are in the resolution basis and the record, so a
+  patch edited after signing reads as a change. The same setting in `pnpm-workspace.yaml`
+  (pnpm 10) is not read: tog reads that file's `packages` alone.
+- **An npm workspace member is edited at the root.** `tog add` in a member whose root
+  `package.json` names it in `workspaces` runs npm in the member with the root as the lock
+  root, so the root's `package-lock.json` (created there if it has none) and resolution record
+  are what change. A pnpm member whose root has `pnpm-workspace.yaml` naming it but no
+  `pnpm-lock.yaml` yet is placed at the root the same way. A member with a lock or a `.tog`
+  directory of its own is its own root. A sync run in a member (npm or pnpm) that has no lock
+  of its own refuses, naming the root: run `tog` there.
 - **Yarn classic edits remain a refusal** (no lockfile-only edit mode); run the Yarn command
   tog names. Yarn Berry is not imported (cache-zip checksums are not tarball integrity
   values).
@@ -245,8 +264,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
   replacement after commit is undetected.
-- **Delegated planning runs unsandboxed with user privileges** (uv, npm, bundler):
-  a hostile manifest executes code at PLAN time. Go's and Cargo's run in the sandbox.
+- **Delegated planning runs unsandboxed with user privileges** (uv, bundler):
+  a hostile manifest executes code at PLAN time. Go's, Cargo's, and Node's run in the
+  sandbox.
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
@@ -358,6 +378,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
   (install optional packages for other platforms too) is not read: an optional package for
   another platform is always left out.
+- **A `pnpm-workspace.yaml` whose `packages` tog cannot read refuses sync, edits, and
+  `attest`** (an anchor, an alias, a block scalar, a mapping item): a resolution record names
+  every workspace member's `package.json`, so a members list tog cannot read would leave a
+  member uncovered. The refusal comes in preflight, before anything is realized; write
+  `packages` as a plain list of patterns.
 - **A pnpm lock is checked against the manifests, but not through `.pnpmfile.cjs`.** Before
   planning, tog refuses a `pnpm-lock.yaml` that is missing a workspace member
   `pnpm-workspace.yaml` names, or whose importers disagree with a package.json, applying the

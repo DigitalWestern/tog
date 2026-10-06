@@ -42,7 +42,12 @@ static LOOKUP: Mutex<Option<Arc<ResolutionFilesLookup>>> = Mutex::new(None);
 /// Install the lookup for this process. The command layer calls it once,
 /// before any verb that writes a project closure; the first install wins,
 /// like the object-kind rows. A process that never installs one (`tog x`,
-/// whose closures describe cache roots, not projects) joins nothing.
+/// whose closures describe cache roots, not projects) joins nothing, and
+/// a cache root written by any other process (the pinned pnpm a dependency
+/// edit realizes) joins nothing either: the command marks it
+/// (`comforter::mark_cache_root`) before realizing, and
+/// [`join_for_closure`] compares the closure's directory with that set.
+/// Nothing a project commits can make it a cache root.
 pub fn install_resolution_files(lookup: Arc<ResolutionFilesLookup>) {
     let mut slot = LOOKUP
         .lock()
@@ -231,6 +236,14 @@ pub(crate) fn join_for_closure(
         .as_object_mut()
         .expect("the closure writer validated the body object");
     object.remove("resolution");
+    // A `tog x` cache root is not a project: no door leaves a record in it
+    // (an `x` door writes none), so joining it would only record
+    // `unrecorded-resolution` against its own lock, in the process that
+    // realized it for an edit or a lock check. The command marked it by
+    // canonical path; a file in the directory proves nothing.
+    if crate::comforter::is_cache_root(project.path()) {
+        return Ok(());
+    }
     let Some(lookup) = lookup() else {
         return Ok(());
     };
@@ -343,6 +356,17 @@ fn check_basis(
         if changed.len() == 1 { "it" } else { "them" },
         if changed.len() == 1 { "it" } else { "them" },
     )))
+}
+
+/// [`check_basis`] for a tailor's own test of the basis it computes.
+#[cfg(test)]
+pub(crate) fn check_basis_for_test(
+    project: &ProjectRoot,
+    ecosystem: &str,
+    files: &ResolutionFiles,
+    basis: &Digests,
+) -> io::Result<()> {
+    check_basis(project, ecosystem, files, basis)
 }
 
 /// The paths whose digests differ between `left` and `right`, including a
@@ -1348,6 +1372,38 @@ mod tests {
             closure["body"]["exceptions"],
             json!([exception(UNCONFINED_RESOLUTION, "host")])
         );
+    }
+
+    /// A `tog x` cache root this process marked joins nothing: under a
+    /// policy denying `unrecorded-resolution`, publishing its closure
+    /// succeeds with no record and no exception. A project is a project
+    /// whatever it commits: with a `.tog/x.json` in it and no mark, the
+    /// same publish is still joined and still refused.
+    #[test]
+    fn only_a_marked_cache_root_joins_nothing() {
+        let temp = project("join-x-root");
+        let denying = Policy {
+            deny: [policy::UNRECORDED_RESOLUTION.to_string()].into(),
+            ..Policy::default()
+        };
+        let _writer = Writer::new(denying, Vec::new());
+        crate::comforter::clear_cache_roots_for_test();
+        let (_store_dir, store) = test_store("join-x-root");
+        // A committed request record forges nothing.
+        fs::create_dir_all(temp.0.join(".tog")).unwrap();
+        fs::write(temp.0.join(".tog/x.json"), r#"{"state":"ready"}"#).unwrap();
+        let refused = publish(&temp.0, &store).unwrap_err().to_string();
+        assert!(refused.contains("unrecorded-resolution"), "{refused}");
+        // The command's mark, by canonical path, does.
+        let marked = project("join-x-root-marked");
+        crate::comforter::mark_cache_root(&marked.0).unwrap();
+        let closure = publish(&marked.0, &store).unwrap();
+        assert!(closure["body"].get("resolution").is_none());
+        assert_eq!(closure["body"]["exceptions"], json!([]));
+        // Another path, even one beside it, is not marked.
+        let other = project("join-x-root-other");
+        assert!(publish(&other.0, &store).is_err());
+        crate::comforter::clear_cache_roots_for_test();
     }
 
     #[test]
