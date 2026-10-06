@@ -15,6 +15,7 @@ pub mod pyselect;
 pub mod registry_tool;
 pub mod run_refusal;
 pub mod tailor;
+mod unpack;
 pub mod wheel;
 
 use crate::kernel::activity::StoreActivity;

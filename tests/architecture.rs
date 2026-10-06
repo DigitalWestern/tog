@@ -2109,3 +2109,80 @@ fn the_http_client_scan_sees_every_spelling() {
         assert!(http_client_sites(text).is_empty(), "flagged: {text}");
     }
 }
+
+/// Whether `relative` may name `kernel::archive`: the kernel itself, a
+/// tailor's `unpack.rs`, and `tog self-update`. heavy.yml's `gate` watches
+/// exactly these, so a change to how anything extracts runs the heavy
+/// suite against real archives (#325).
+fn may_name_archive(relative: &str) -> bool {
+    if relative.starts_with("src/kernel/") || relative == "src/commands/selfupdate.rs" {
+        return true;
+    }
+    relative
+        .strip_prefix("src/tailors/")
+        .and_then(|rest| rest.strip_suffix("/unpack.rs"))
+        .is_some_and(|tailor| !tailor.is_empty() && !tailor.contains('/'))
+}
+
+/// The production paths of `text` (the source of `relative`) into
+/// `kernel::archive`.
+fn archive_sites(relative: &str, text: &str) -> Vec<String> {
+    let module = module_path(Path::new(relative.trim_start_matches("src/")));
+    crate_paths(non_test(text), &module)
+        .into_iter()
+        .filter(|path| path.len() >= 2 && path[0] == "kernel" && path[1] == "archive")
+        .map(|path| path.join("::"))
+        .collect()
+}
+
+#[test]
+fn archive_calls_live_where_the_heavy_gate_looks() {
+    let mut violations = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || may_name_archive(&relative) {
+            continue;
+        }
+        for path in archive_sites(&relative, &text) {
+            violations.push(format!("{relative}: crate::{path}"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "kernel::archive named outside src/kernel/, src/tailors/<tailor>/unpack.rs \
+         and src/commands/selfupdate.rs; move the call into the tailor's unpack.rs \
+         (heavy.yml watches those files):\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn the_archive_scan_sees_every_spelling() {
+    let caught = [
+        "fn a() { crate::kernel::archive::list(p, c); }",
+        "use crate::kernel::archive::{self, Compression};",
+        "use crate::kernel::{archive, store};",
+        "use super::super::kernel::archive::Entry;",
+    ];
+    for text in caught {
+        assert!(
+            !archive_sites("src/tailors/go/mod.rs", text).is_empty(),
+            "{text}"
+        );
+    }
+    let missed = [
+        "fn a() { crate::kernel::fetch::download(u); }",
+        "// see archive::list",
+        "#[cfg(test)]\nmod tests { use crate::kernel::archive::list; }",
+    ];
+    for text in missed {
+        assert!(
+            archive_sites("src/tailors/go/mod.rs", text).is_empty(),
+            "{text}"
+        );
+    }
+    assert!(may_name_archive("src/tailors/go/unpack.rs"));
+    assert!(may_name_archive("src/kernel/provider/rust.rs"));
+    assert!(!may_name_archive("src/tailors/go/mod.rs"));
+    assert!(!may_name_archive("src/tailors/go/x/unpack.rs"));
+    assert!(!may_name_archive("src/commands/sync.rs"));
+}

@@ -8,6 +8,7 @@ pub mod objects;
 pub mod resolve;
 pub mod rustfmt;
 pub mod tailor;
+mod unpack;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;

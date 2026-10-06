@@ -31,6 +31,7 @@ mod bins;
 mod plan;
 mod project;
 mod realize;
+mod unpack;
 
 use bins::*;
 pub use plan::*;
@@ -388,14 +389,7 @@ pub fn realize_runtime(
     let staged = store
         .stage_with_activity(activity)
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
-    crate::kernel::archive::extract_with_activity_and_options(
-        activity,
-        &tarball,
-        &staged,
-        &crate::kernel::archive::ExtractOptions::platform_build(1),
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract node tarball: {e}")))?;
+    unpack::extract_node_dist(activity, &tarball, &staged)?;
     validate_node_layout(&staged)?;
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{

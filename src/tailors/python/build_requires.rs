@@ -108,14 +108,8 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
 }
 
 fn tar_entries(path: &Path, activity: Option<&StoreActivity>) -> io::Result<Vec<ArchiveEntry>> {
-    use crate::kernel::archive::Compression;
-    let listed = match activity {
-        Some(activity) => {
-            crate::kernel::archive::list_with_activity(activity, path, Compression::Gzip)
-        }
-        None => crate::kernel::archive::list(path, Compression::Gzip),
-    }
-    .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
+    let listed = super::unpack::list_sdist(path, activity)
+        .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
     listed
         .into_iter()
         .map(|entry| {
@@ -202,13 +196,8 @@ fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<
             // 16 MiB covers any real manifest; anything larger is refused
             // rather than buffered.
             const MEMBER_CAP: u64 = 16 << 20;
-            let bytes = crate::kernel::archive::read_member(
-                path,
-                crate::kernel::archive::Compression::Gzip,
-                member,
-                MEMBER_CAP,
-            )
-            .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
+            let bytes = super::unpack::read_sdist_member(path, member, MEMBER_CAP)
+                .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
             Ok(bytes)
         }
         ArchiveKind::Zip => {
@@ -530,37 +519,17 @@ fn extract_sdist_inner(
             // The listing validates every member before the delegated tar
             // writes anything. The same check runs in inspect_sdist, but
             // extract_sdist is also used directly in the Rust planning path.
-            use crate::kernel::archive::Compression;
-            let listed = match activity {
-                Some(activity) => {
-                    crate::kernel::archive::list_with_activity(activity, path, Compression::Gzip)
-                }
-                None => crate::kernel::archive::list(path, Compression::Gzip),
-            }
-            .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", path.display())))?;
+            let listed = super::unpack::list_sdist(path, activity).map_err(|e| {
+                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+            })?;
             // Keep the name-shape check the inspect path applies, so a
             // direct extract refuses exactly what inspection would refuse.
             for entry in &listed {
                 clean_entry(&entry.name)?;
             }
-            match activity {
-                Some(activity) => crate::kernel::archive::extract_validated_with_activity(
-                    activity,
-                    path,
-                    destination,
-                    1,
-                    Compression::Gzip,
-                    &listed,
-                ),
-                None => crate::kernel::archive::extract_validated(
-                    path,
-                    destination,
-                    1,
-                    Compression::Gzip,
-                    &listed,
-                ),
-            }
-            .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", path.display())))?;
+            super::unpack::extract_sdist(path, destination, activity, &listed).map_err(|e| {
+                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+            })?;
         }
         ArchiveKind::Zip => {
             let file = File::open(path)?;
