@@ -343,6 +343,11 @@ mod tests {
             listed_sha256(&format!("{}g *{zip}\n", &good[..63]), zip),
             None
         );
+        // sha256sum's own text-mode format: two spaces before the name.
+        assert_eq!(
+            listed_sha256(&format!("{good}  {zip}\n"), zip),
+            Some(good.clone())
+        );
         assert_eq!(listed_sha256("", zip), None);
     }
 
