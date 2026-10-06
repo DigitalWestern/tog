@@ -151,7 +151,9 @@ Rules the Linux port settled, which apply to any future platform:
   static archive and pkg-config file out of the compiler's and linker's
   default search paths and out of pkg-config. Other shared libraries the
   host's tools load move to a `.tog-host-runtime` subdirectory that `ld`
-  never searches, reached through `LD_LIBRARY_PATH`. Library subdirectories
+  never searches, named there by the sandbox's own loader cache
+  (`kernel/ldcache.rs`: the host's `/etc/ld.so.cache`, rewritten), which
+  the loader searches after a program's own RUNPATH. Library subdirectories
   holding development files are curated the same way. Each curated host
   directory is bound once at `/.tog-host-files`, and the files the view
   keeps are symlinks into it, so setting the view up costs a few hundred

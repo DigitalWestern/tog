@@ -181,9 +181,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   paths and from pkg-config in that sandbox. Other host shared libraries stay loadable so
   the compiler and linker themselves run: they are moved into a `.tog-host-runtime`
   subdirectory of their library directory, which `ld` does not search, and reached through
-  `LD_LIBRARY_PATH`. That variable outranks a program's own `DT_RUNPATH`: a program a gem
-  bundles and runs during its build, relying on its RUNPATH for a library with the same
-  soname as a relocated host library, loads the host copy instead. A library subdirectory
+  the sandbox's own copy of the loader cache (`/etc/ld.so.cache`), which names them there.
+  The loader searches that cache after a program's own `DT_RUNPATH`, so a program a gem
+  bundles and runs during its build loads its own copy of a library before the host's
+  (#332). A library subdirectory
   with headers, static or libtool archives, `pkgconfig` or `cmake` under it
   (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`), or that
   tog cannot list, is curated the same way, so an explicit `-I` or `-L` into it finds no

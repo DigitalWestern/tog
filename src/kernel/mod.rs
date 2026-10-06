@@ -16,6 +16,7 @@ pub mod gc;
 pub mod gitsrc;
 pub mod hostfallback;
 pub mod hostview;
+pub(crate) mod ldcache;
 pub mod objmeta;
 pub mod pep440;
 pub mod platform;

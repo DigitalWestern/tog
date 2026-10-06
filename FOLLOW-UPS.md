@@ -89,7 +89,6 @@ None open.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:
   - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
-  - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.
   - #331 hostview: kept library subdirectories are bound whole (accepted unless a gem hits it).
   - #333 ruby: host-fallback fingerprint is stat-based, not content-based (accepted).
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the

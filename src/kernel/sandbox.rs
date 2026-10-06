@@ -238,37 +238,6 @@ pub struct Sandbox<'a> {
     pub host_view: HostView,
 }
 
-/// The caller's environment, as `--setenv` arguments. A `RuntimeOnly`
-/// view's runtime subdirectories (`hostview::RUNTIME_SUBDIR`) reach the
-/// dynamic loader only through `LD_LIBRARY_PATH`: they are its value when
-/// the caller sets none, and follow the caller's own value when it does.
-fn push_caller_envs(
-    args: &mut Vec<OsString>,
-    envs: &[(String, String)],
-    library_path: &[PathBuf],
-) -> io::Result<()> {
-    let view_path = (!library_path.is_empty())
-        .then(|| std::env::join_paths(library_path))
-        .transpose()
-        .map_err(io::Error::other)?;
-    let caller_sets_it = envs.iter().any(|(key, _)| key == "LD_LIBRARY_PATH");
-    if let (Some(view_path), false) = (&view_path, caller_sets_it) {
-        push_setenv(args, "LD_LIBRARY_PATH", view_path);
-    }
-    for (key, value) in envs {
-        match &view_path {
-            Some(view_path) if key == "LD_LIBRARY_PATH" => {
-                let mut joined = OsString::from(value);
-                joined.push(":");
-                joined.push(view_path);
-                push_setenv(args, key, joined);
-            }
-            _ => push_setenv(args, key, value),
-        }
-    }
-    Ok(())
-}
-
 impl Sandbox<'_> {
     /// `HostView::RuntimeOnly` gets this same profile for now: a Darwin
     /// build compiles against the Xcode or Command Line Tools SDK, which is
@@ -545,18 +514,26 @@ impl Sandbox<'_> {
             OsString::from("--clearenv"),
         ];
         args.extend(system_root_args(Path::new("/"))?);
-        let (skeleton, library_path) = match self.host_view {
-            HostView::Full => (None, Vec::new()),
+        let (skeleton, ld_cache) = match self.host_view {
+            HostView::Full => (None, None),
             HostView::RuntimeOnly => {
                 let view = crate::kernel::hostview::runtime_only_mounts(&write)?;
                 args.extend(view.mounts);
-                (Some(view.skeleton), view.library_path)
+                (Some(view.skeleton), Some(view.ld_cache))
             }
         };
 
         for item in HOST_ETC_ENTRIES {
-            if Path::new(item).exists() {
-                push_bind(&mut args, "--ro-bind", item, item);
+            match &ld_cache {
+                // The view's loader cache names the libraries it moved
+                // (`ldcache`), in place of the host's.
+                Some(ld_cache) if item == LD_CACHE => {
+                    push_arg(&mut args, "--ro-bind");
+                    args.push(ld_cache.clone().into_os_string());
+                    push_arg(&mut args, item);
+                }
+                _ if Path::new(item).exists() => push_bind(&mut args, "--ro-bind", item, item),
+                _ => {}
             }
         }
         push_arg(&mut args, "--dev");
@@ -603,7 +580,9 @@ impl Sandbox<'_> {
                 crate::kernel::hostview::PKG_CONFIG_LIBDIR,
             );
         }
-        push_caller_envs(&mut args, envs, &library_path)?;
+        for (key, value) in envs {
+            push_setenv(&mut args, key, value);
+        }
         push_arg(&mut args, "--chdir");
         args.push(cwd.into_os_string());
         push_arg(&mut args, "--unsetenv");
@@ -639,7 +618,7 @@ impl Sandbox<'_> {
 /// program may look up, the time zone, and the static host table. Name
 /// service goes no further: `/etc/resolv.conf` is never bound.
 pub(crate) const HOST_ETC_ENTRIES: [&str; 9] = [
-    "/etc/ld.so.cache",
+    LD_CACHE,
     "/etc/ld.so.conf",
     "/etc/ld.so.conf.d",
     "/etc/alternatives",
@@ -649,6 +628,9 @@ pub(crate) const HOST_ETC_ENTRIES: [&str; 9] = [
     "/etc/nsswitch.conf",
     "/etc/hosts",
 ];
+
+/// The dynamic loader's cache.
+const LD_CACHE: &str = "/etc/ld.so.cache";
 
 /// bubblewrap refuses a command line (its `--args` data included) of more
 /// than this many arguments ("Exceeded maximum number of arguments").
@@ -2495,12 +2477,7 @@ mod tests {
             runtime_only[..start + system.len()],
             full[..start + system.len()]
         );
-        let env_len = if runtime_only.iter().any(|arg| arg == "LD_LIBRARY_PATH") {
-            6
-        } else {
-            3
-        };
-        let view_len = runtime_only.len() - full.len() - env_len;
+        let view_len = runtime_only.len() - full.len() - 3;
         let view = &runtime_only[start + system.len()..start + system.len() + view_len];
         assert!(
             view.iter()
@@ -2515,20 +2492,19 @@ mod tests {
             .expect("RuntimeOnly sets PKG_CONFIG_LIBDIR");
         let mut without_env = tail.to_vec();
         without_env.drain(env..env + 3);
-        // On a host with unversioned runtime ELF libraries the view moves
-        // them out of the linker's reach and names their directories here.
-        if let Some(path) = without_env
-            .windows(2)
-            .position(|window| window == ["--setenv", "LD_LIBRARY_PATH"])
-        {
-            assert!(
-                without_env[path + 2]
-                    .split(':')
-                    .all(|dir| dir.ends_with("/.tog-host-runtime")),
-                "{without_env:?}"
-            );
-            without_env.drain(path..path + 3);
-        }
+        // The loader cache is the view's own, which names the libraries
+        // it moved out of the linker's reach (#332), and no
+        // LD_LIBRARY_PATH outranks a program's RUNPATH.
+        let cache = without_env
+            .iter()
+            .position(|arg| arg == "/etc/ld.so.cache")
+            .expect("the view binds a loader cache");
+        assert_eq!(
+            Path::new(&without_env[cache - 1]),
+            skeleton.join("ld.so.cache")
+        );
+        without_env[cache - 1] = "/etc/ld.so.cache".to_string();
+        assert!(!runtime_only.iter().any(|arg| arg == "LD_LIBRARY_PATH"));
         assert_eq!(without_env, full_tail);
         // The skeleton lives exactly as long as the command line.
         drop(invocation);
@@ -2729,6 +2705,88 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             run(&sandbox, &["/usr/bin/true"], &scratch, &scratch, &[]).unwrap();
             eprintln!("sandbox setup, {host_view:?}: {:?}", started.elapsed());
         }
+    }
+
+    /// A host library the view moved out of the linker's reach is found
+    /// through the view's loader cache, which glibc searches after a
+    /// program's own RUNPATH: a program that ships its own copy of the
+    /// same soname loads that copy (#332).
+    #[test]
+    fn linux_runtime_only_view_lets_runpath_outrank_a_moved_library() {
+        if !linux_ready("linux_runtime_only_view_lets_runpath_outrank_a_moved_library") {
+            return;
+        }
+        if !Path::new("/usr/bin/cc").exists() {
+            eprintln!("skip: host has no /usr/bin/cc");
+            return;
+        }
+        // A regular ELF `lib*.so` outside the C runtime: one the view moves.
+        let moved = [
+            "/usr/lib64",
+            "/usr/lib/x86_64-linux-gnu",
+            "/usr/lib/aarch64-linux-gnu",
+        ]
+        .iter()
+        .filter_map(|dir| fs::read_dir(dir).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let stem = name.strip_suffix(".so")?;
+            let regular = entry.file_type().ok()?.is_file();
+            (regular
+                && stem.starts_with("lib")
+                && !crate::kernel::hostview::C_RUNTIME_SHARED.contains(&stem)
+                && fs::read(entry.path()).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF")))
+            .then_some(name)
+        })
+        .min();
+        let Some(name) = moved else {
+            eprintln!("skip: host has no regular ELF lib*.so for the view to move");
+            return;
+        };
+        let root = temp_dir("runtime-only-runpath");
+        let scratch = root.0.join("scratch");
+        fs::create_dir_all(scratch.join("own")).unwrap();
+        fs::write(
+            scratch.join("own.c"),
+            "int tog_own_copy(void) { return 7; }\n",
+        )
+        .unwrap();
+        fs::write(
+            scratch.join("main.c"),
+            "int tog_own_copy(void);\nint main(void) { return tog_own_copy() == 7 ? 0 : 1; }\n",
+        )
+        .unwrap();
+        let script = r#"
+cd "$1"
+cc -shared -fPIC own.c -o "own/$2" -Wl,-soname,"$2" &&
+cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
+./main
+"#;
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::RuntimeOnly,
+        };
+        let result = run(
+            &sandbox,
+            &[
+                "/usr/bin/sh",
+                "-c",
+                script,
+                "sh",
+                scratch.to_str().unwrap(),
+                &name,
+            ],
+            &scratch,
+            &scratch,
+            &[],
+        );
+        assert!(
+            result.is_ok(),
+            "a program with its own {name} on its RUNPATH did not load it: {result:?}"
+        );
     }
 
     /// Doctor names the AppArmor switch only when it is on and bwrap was
