@@ -28,7 +28,9 @@ pub const WEAK_INTEGRITY: &str = "weak-integrity";
 pub const UNATTESTED_MUTABLE_STATE: &str = "unattested-mutable-state";
 /// A future git dependency was accepted without registry provenance.
 pub const GIT_DEPENDENCY: &str = "git-dependency";
-/// An optional dependency/group was not requested by the user.
+/// Retired: an optional dependency group the user did not request. It is
+/// a choice, not something tog could not vouch for, so it is recorded as an
+/// `OptionalGroupSkipped` in the closure's `optional_groups_skipped` list.
 pub const SKIPPED_OPTIONAL: &str = "skipped-optional";
 /// A manifest named a private index or an index-like option.
 pub const UNATTESTED_INDEX: &str = "unattested-index";
@@ -78,7 +80,6 @@ pub const KINDS: &[&str] = &[
     WEAK_INTEGRITY,
     UNATTESTED_MUTABLE_STATE,
     GIT_DEPENDENCY,
-    SKIPPED_OPTIONAL,
     UNATTESTED_INDEX,
     LOCK_DISAGREEMENT,
     UNATTESTED_CARGO_LOCK,
@@ -117,10 +118,19 @@ const LEGACY_KIND_SPELLINGS: &[(&str, &str)] = &[
 /// reports it outdated with the reason here. `toolchain-component-unavailable`
 /// was a requested Rust component tog did not ship; tog now provisions
 /// every component the pinned release publishes and refuses the rest.
-const RETIRED_KINDS: &[(&str, &str)] = &[(
-    "toolchain-component-unavailable",
-    "closure predates component provisioning",
-)];
+/// `skipped-optional` was an optional dependency group the user did not
+/// request; it is a choice, not an exception, and the closure now lists it
+/// under `optional_groups_skipped` (#71).
+const RETIRED_KINDS: &[(&str, &str)] = &[
+    (
+        "toolchain-component-unavailable",
+        "closure predates component provisioning",
+    ),
+    (
+        SKIPPED_OPTIONAL,
+        "closure predates optional_groups_skipped; unrequested optional groups are no longer exceptions",
+    ),
+];
 
 /// Why a record of `kind` is out of date, when `kind` is one tog retired.
 pub fn retired_kind(kind: &str) -> Option<&'static str> {
@@ -145,6 +155,24 @@ pub struct Exception {
     pub kind: String,
     pub subject: String,
     pub detail: String,
+}
+
+/// An optional dependency group the user did not request, so the sync did
+/// not install it. Informational: it is what the user chose, not something
+/// tog allowed and cannot vouch for, so no policy judges it. The closure
+/// lists these under `optional_groups_skipped`, where `status` and `sbom`
+/// read them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionalGroupSkipped {
+    /// The group as the manifest names it: an extra, or a table such as
+    /// `[dependency-groups]`.
+    pub group: String,
+    /// Where the group is declared and why it was left out.
+    pub detail: String,
+    /// The requirements the group would have added, in manifest order,
+    /// when the manifest lists them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -234,6 +262,7 @@ struct Frame {
     owner: std::thread::ThreadId,
     ecosystem: String,
     exceptions: Vec<Exception>,
+    optional_groups_skipped: Vec<OptionalGroupSkipped>,
     claimed: bool,
     published: bool,
 }
@@ -815,6 +844,52 @@ pub fn record(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
     record_with(current(), kind, subject, detail)
 }
 
+/// Note that the optional group `group` was not requested, into the
+/// innermost attribution, beside its exceptions. `requirement` is one
+/// requirement the group would have added; repeated calls for the same
+/// group and detail collect them into one entry. No policy refuses this:
+/// leaving out what was not asked for is the user's choice (#71).
+pub fn skip_optional(group: &str, detail: &str, requirement: Option<&str>) -> io::Result<()> {
+    with_frames(|frames| {
+        let Some(frame) = frames.last_mut() else {
+            return Err(io::Error::other(
+                "optional group recorded outside any attribution",
+            ));
+        };
+        if frame.owner != std::thread::current().id() {
+            return Err(io::Error::other(format!(
+                "optional group {group} recorded from a thread that does not own the {} attribution",
+                frame.ecosystem
+            )));
+        }
+        let entry = match frame
+            .optional_groups_skipped
+            .iter_mut()
+            .position(|entry| entry.group == group && entry.detail == detail)
+        {
+            Some(index) => &mut frame.optional_groups_skipped[index],
+            None => {
+                ui::note(&format!("optional group {group} not installed: {detail}"));
+                frame.optional_groups_skipped.push(OptionalGroupSkipped {
+                    group: group.into(),
+                    detail: detail.into(),
+                    requirements: Vec::new(),
+                });
+                frame
+                    .optional_groups_skipped
+                    .last_mut()
+                    .expect("entry was just pushed")
+            }
+        };
+        if let Some(requirement) = requirement {
+            if !entry.requirements.iter().any(|known| known == requirement) {
+                entry.requirements.push(requirement.into());
+            }
+        }
+        Ok(())
+    })
+}
+
 /// The policy file whose deny list names `kind`, when a file did.
 pub fn deny_source<'a>(policy: &'a Policy, kind: &str) -> Option<&'a Path> {
     policy
@@ -868,6 +943,7 @@ impl Attribution {
                 owner,
                 ecosystem: ecosystem.to_string(),
                 exceptions: Vec::new(),
+                optional_groups_skipped: Vec::new(),
                 claimed: false,
                 published: false,
             });
@@ -906,6 +982,7 @@ impl Attribution {
                 owner,
                 ecosystem: ecosystem.to_string(),
                 exceptions: Vec::new(),
+                optional_groups_skipped: Vec::new(),
                 claimed: false,
                 published: false,
             });
@@ -918,7 +995,10 @@ impl Attribution {
     }
 
     /// The exceptions recorded into this frame so far, without claiming
-    /// them. For diagnostics and tests; publication goes through `claim`.
+    /// them. For tests; publication goes through `claim`.
+    // A method cannot sit on lib.rs's `boundary` list: tests/npm_scripts.rs
+    // and tests/git_deps.rs call it.
+    #[cfg_attr(tog_dead_code, allow(dead_code))]
     pub fn recorded(&self) -> Vec<Exception> {
         with_frames(|frames| {
             frames
@@ -967,6 +1047,19 @@ impl Attribution {
                 }
             }
             Ok(claimed)
+        })
+    }
+
+    /// The optional groups recorded into this frame, taken for the closure
+    /// that just claimed it. Only valid after `claim`, from the same token.
+    pub(crate) fn take_optional_groups_skipped(&mut self) -> io::Result<Vec<OptionalGroupSkipped>> {
+        with_frames(|frames| match frames.last_mut() {
+            Some(frame) if frame.id == self.id && frame.claimed => {
+                Ok(std::mem::take(&mut frame.optional_groups_skipped))
+            }
+            _ => Err(io::Error::other(
+                "optional groups can only be taken from a claimed attribution",
+            )),
         })
     }
 
@@ -1298,7 +1391,7 @@ deny = ["git-dependency"]"#,
             "d",
         )
         .unwrap();
-        record_with(&Policy::default(), SKIPPED_OPTIONAL, "extra", "d").unwrap();
+        record_with(&Policy::default(), WEAK_INTEGRITY, "left-pad", "d").unwrap();
         let object = object_exceptions();
         attribution.discard();
         assert_eq!(object.len(), 1, "{object:?}");
@@ -1570,8 +1663,8 @@ deny = ["git-dependency"]"#,
         for kind in KINDS {
             assert!(!kind.contains('_'), "{kind} mixes separators");
         }
-        assert_eq!(canonical_kind("skipped_optional"), SKIPPED_OPTIONAL);
-        assert_eq!(canonical_kind(SKIPPED_OPTIONAL), SKIPPED_OPTIONAL);
+        assert_eq!(canonical_kind("unattested_index"), UNATTESTED_INDEX);
+        assert_eq!(canonical_kind(UNATTESTED_INDEX), UNATTESTED_INDEX);
         assert_eq!(
             canonical_kind("kind-from-a-newer-tog"),
             "kind-from-a-newer-tog"
@@ -1579,12 +1672,51 @@ deny = ["git-dependency"]"#,
         // A deny list written under either spelling denies the one kind.
         let parsed = parse_file(
             Path::new("/co/policy.toml"),
-            "deny = [\"skipped_optional\"]\n",
+            "deny = [\"unattested_index\"]\n",
         )
         .unwrap();
-        assert!(parsed.deny.contains(SKIPPED_OPTIONAL));
-        assert!(denied(&parsed, "skipped_optional"));
-        assert!(denied(&parsed, SKIPPED_OPTIONAL));
+        assert!(parsed.deny.contains(UNATTESTED_INDEX));
+        assert!(denied(&parsed, "unattested_index"));
+        assert!(denied(&parsed, UNATTESTED_INDEX));
+    }
+
+    /// `skipped-optional` is retired (#71): a deny list that still names it,
+    /// under either spelling, keeps loading and denies nothing, and an old
+    /// record carrying it reads as outdated.
+    #[test]
+    fn skipped_optional_is_retired_under_both_spellings() {
+        assert!(!KINDS.contains(&SKIPPED_OPTIONAL));
+        assert!(retired_kind("skipped_optional").is_some());
+        assert!(retired_kind(SKIPPED_OPTIONAL).is_some());
+        let parsed = parse_file(
+            Path::new("/co/policy.toml"),
+            "deny = [\"skipped_optional\", \"skipped-optional\"]\n",
+        )
+        .unwrap();
+        assert!(parsed.deny.is_empty());
+        assert!(!denied(&parsed, SKIPPED_OPTIONAL));
+    }
+
+    /// An unrequested group is noted beside the exceptions, collected per
+    /// group, and taken only by the closure that claimed the frame.
+    #[test]
+    fn optional_groups_collect_per_group_and_leave_the_exceptions_alone() {
+        let _guard = exception_guard();
+        let mut attribution = Attribution::open("python").unwrap();
+        skip_optional("docs", "extra, not requested", Some("sphinx")).unwrap();
+        skip_optional("docs", "extra, not requested", Some("sphinx")).unwrap();
+        skip_optional("docs", "extra, not requested", Some("furo")).unwrap();
+        skip_optional("[dependency-groups]", "excluded", None).unwrap();
+        assert!(attribution.take_optional_groups_skipped().is_err());
+        assert!(attribution.claim("python").unwrap().is_empty());
+        let skipped = attribution.take_optional_groups_skipped().unwrap();
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(skipped[0].group, "docs");
+        assert_eq!(skipped[0].requirements, ["sphinx", "furo"]);
+        assert!(skipped[1].requirements.is_empty());
+        attribution.mark_published().unwrap();
+        attribution.finish(true).unwrap();
+        assert!(skip_optional("docs", "outside", None).is_err());
     }
 
     #[test]

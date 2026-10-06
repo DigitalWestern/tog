@@ -119,21 +119,22 @@ pub(crate) fn project_root(cwd: &Path) -> io::Result<PathBuf> {
     Ok(project_for(cwd)?.map_or_else(|| cwd.to_path_buf(), |location| location.root))
 }
 
-/// The steps of the `package.json` script `name` at `root`, before any
-/// sync: `None` when there is no `package.json` or no such script. `tog
-/// <script>` and `tog fmt` ask this to decide whether a word is a script;
-/// `tog run` reads the projected `package.json` once synced.
+/// The steps of the project script `name` at `root`, before any sync:
+/// the first tailor's `Tailor::project_script`, `None` when no ecosystem
+/// has such a script. `tog <script>` and `tog fmt` ask this to decide
+/// whether a word is a script; `tog run` reads the projected script once
+/// synced (`Tailor::projected_script`).
 pub(crate) fn package_script(
     root: &Path,
     name: &str,
     args: &[String],
 ) -> io::Result<Option<Vec<(String, String)>>> {
-    let package_json = root.join("package.json");
-    if !package_json.is_file() {
-        return Ok(None);
+    for tailor in crate::tailors::registry() {
+        if let Some(steps) = tailor.project_script(root, name, args)? {
+            return Ok(Some(steps));
+        }
     }
-    let json = std::fs::read_to_string(&package_json)?;
-    crate::tailors::node::script_commands_from_package(&json, name, args)
+    Ok(None)
 }
 
 /// What a projection under `dir` contributes to a child environment: the

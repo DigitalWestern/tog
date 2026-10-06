@@ -1,10 +1,13 @@
 //! Sandboxed sdist to wheel builds. PEP 517 build dependencies are inspected
 //! without execution and, when needed, realized as a separate Python env.
 
+use super::sdist_view::{self, SdistWheel};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::hostfallback::RUNTIME_ONLY_VIEW;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
+use crate::kernel::sandbox::HostView;
 use crate::kernel::sandbox::Sandbox;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
@@ -164,6 +167,11 @@ fn isolated_sdist_identity_from_ids(
         inputs.insert("native_libs".into(), native_libs_id.into());
         inputs.insert("native_linker".into(), NATIVE_LINKER_CONFIG.into());
     }
+    // Linux builds of native or Rust code try the host's C runtime alone
+    // first (`sdist_view`, #328); Darwin builds see the whole SDK.
+    if !platform.is_macos() && (rust_id.is_some() || native_libs_id.is_some()) {
+        inputs.insert("build_view".into(), RUNTIME_ONLY_VIEW.into());
+    }
     Identity {
         kind: "sdist-build".into(),
         name: pkg.name.clone(),
@@ -251,12 +259,11 @@ fn native_libs_supported(platform: Platform) -> bool {
 pub(crate) struct SdistIdentityPlan {
     pub input: String,
     pub native_libs_id: Option<String>,
-    #[cfg(test)]
     pub identity: Identity,
 }
 
 #[cfg(test)]
-fn test_store(label: &str) -> (crate::kernel::testutil::TempDir, Store) {
+pub(super) fn test_store(label: &str) -> (crate::kernel::testutil::TempDir, Store) {
     let dir = crate::kernel::testutil::TempDir::named(&format!("build-identity-{label}"));
     for sub in ["objects", "meta", "cache/sha256", "tmp"] {
         fs::create_dir_all(dir.0.join(sub)).expect("create Python identity fixture store");
@@ -423,7 +430,6 @@ pub(crate) fn plan_sdist_identity_input(
         return Ok(SdistIdentityPlan {
             input: format!("Sdist:{}:{}", pkg.sha256, derivation_fingerprint()),
             native_libs_id: None,
-            #[cfg(test)]
             identity: sdist_identity(platform, pkg, &python),
         });
     }
@@ -480,7 +486,6 @@ pub(crate) fn plan_sdist_identity_input(
     Ok(SdistIdentityPlan {
         input: format!("Sdist:{}:{}", pkg.sha256, identity.object_id()),
         native_libs_id,
-        #[cfg(test)]
         identity,
     })
 }
@@ -579,7 +584,7 @@ fn cargo_lock_cache_key(sdist_sha256: &str, rust_id: &str) -> String {
     ))
 }
 
-fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
+pub(super) fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
     source
         .join(manifest.parent().unwrap_or_else(|| Path::new("")))
         .join("Cargo.lock")
@@ -659,6 +664,13 @@ fn generate_cargo_lock(
 /// project's lock pinned one: the newest release tog shipped then. A Python
 /// section with no `helpers.rust` pin keeps it, so its wheels keep their ids.
 pub(crate) const LEGACY_SDIST_RUST: &str = "1.96.1";
+
+impl RustPlanInputs {
+    /// The `Cargo.lock` text tog generated for an sdist that shipped none.
+    fn generated_lock_text(&self) -> Option<&str> {
+        self.generated_lock.then_some(self.lock_text.as_str())
+    }
+}
 
 struct RustPlanInputs {
     /// The Rust this build compiles with: the project's locked selection, or
@@ -811,6 +823,78 @@ fn prepare_rust(
     Ok((rust_obj, vendor_obj))
 }
 
+/// For a Rust sdist, the source unpacked under `work` and the Rust inputs
+/// planned from it; `(None, None)` for any other. The archive's lease is
+/// released once it is unpacked: toolchain realization can fetch more
+/// cache entries.
+fn unpack_rust_source(
+    door: &mut ResolutionDoor<'_>,
+    sdist: crate::kernel::fetch::CacheLease,
+    pkg: &LockedPackage,
+    selected: &Selected,
+    rust: Option<&Selected>,
+    info: &ArchiveInfo,
+    work: &Path,
+) -> io::Result<(Option<PathBuf>, Option<RustPlanInputs>)> {
+    if !info.rust_build {
+        return Ok((None, None));
+    }
+    let source =
+        build_requires::extract_sdist_for(door.lease(), &sdist, &work.join("source"), info)?;
+    drop(sdist);
+    let inputs = rust_plan_inputs(
+        door,
+        rust,
+        sdist_rust_default(selected),
+        &pkg.sha256,
+        &source,
+        info,
+    )?;
+    Ok((Some(source), Some(inputs)))
+}
+
+/// What a build mounts besides its environment and interpreter: the native
+/// library set, and for a Rust sdist the toolchain, the vendored crates and
+/// the `CARGO_HOME` pointing at them.
+struct Toolchains {
+    native_libs: Option<PathBuf>,
+    rust: Option<PathBuf>,
+    vendor: Option<PathBuf>,
+    cargo_home: Option<PathBuf>,
+}
+
+fn prepare_toolchains(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    info: &ArchiveInfo,
+    work: &Path,
+    native: bool,
+    rust_inputs: Option<&RustPlanInputs>,
+) -> io::Result<Toolchains> {
+    let native_libs = if native {
+        Some(
+            crate::kernel::provider::nativelibs::ensure_native_libs(store, activity, platform)?
+                .path,
+        )
+    } else {
+        None
+    };
+    record_generated_cargo_lock(info, rust_inputs)?;
+    let (rust, vendor, cargo_home) = if let Some(inputs) = rust_inputs {
+        let (rust, vendor) = prepare_rust(store, activity, platform, info, work, inputs)?;
+        (Some(rust), Some(vendor), Some(work.join("cargo-home")))
+    } else {
+        (None, None, None)
+    };
+    Ok(Toolchains {
+        native_libs,
+        rust,
+        vendor,
+        cargo_home,
+    })
+}
+
 fn run_sdist_build(
     activity: &crate::kernel::activity::StoreActivity,
     platform: Platform,
@@ -825,6 +909,7 @@ fn run_sdist_build(
     cargo_home: Option<&Path>,
     native_libs: Option<&Path>,
     build_plan: &Plan,
+    host_view: HostView,
 ) -> io::Result<()> {
     let py = build_env.join("bin/python");
     let log = work.join("pip-build.log");
@@ -886,9 +971,9 @@ fn run_sdist_build(
             .chain(native_libs)
             .collect(),
         write: vec![work],
-        host_view: crate::kernel::sandbox::HostView::Full,
+        host_view,
     };
-    crate::kernel::sandbox::run_build_spec_on_with_activity(
+    crate::kernel::sandbox::run_build_spec_on(
         platform,
         &crate::kernel::sandbox::BuildSpec {
             argv,
@@ -898,9 +983,9 @@ fn run_sdist_build(
             write: sb.write.iter().map(|path| path.to_path_buf()).collect(),
             scratch: work.to_path_buf(),
             path,
-            host_view: crate::kernel::sandbox::HostView::Full,
+            host_view,
         },
-        activity,
+        Some(activity),
     )
     .map_err(|error| wrap_sandbox_build_error_with_tail(pkg, error, stderr_tail(&log)))
 }
@@ -913,7 +998,7 @@ pub fn build_sdist_wheel(
     selected: &Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(door, pkg, selected, None, None, 0)
+    build_sdist_wheel_at_depth(door, pkg, selected, None, None, 0).map(|wheel| wheel.path)
 }
 
 /// Public runtime-aware entry point for callers that are building one sdist
@@ -927,6 +1012,7 @@ pub fn build_sdist_wheel_with_runtime_plan(
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     build_sdist_wheel_at_depth(door, pkg, selected, None, Some(runtime_plan), 0)
+        .map(|wheel| wheel.path)
 }
 
 /// Turn a git dependency into an ordinary sdist package: realize the commit,
@@ -1002,7 +1088,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     rust: Option<&Selected>,
     runtime_plan: Option<&Plan>,
     depth: usize,
-) -> io::Result<PathBuf> {
+) -> io::Result<SdistWheel> {
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     crate::tailors::install_kinds();
     admit_sdist_build(platform, pkg, depth)?;
@@ -1023,7 +1109,10 @@ pub(crate) fn build_sdist_wheel_at_depth(
         let fast_id = fast_identity.object_id();
         if store.has_with_activity(activity, &fast_id)? {
             crate::kernel::policy::check_cached_with_activity(store, activity, &fast_id)?;
-            return find_wheel(&store.object_path(&fast_id));
+            return Ok(SdistWheel {
+                path: find_wheel(&store.object_path(&fast_id))?,
+                host_inputs: None,
+            });
         }
     }
     let build_plan = if fast_requirements {
@@ -1048,31 +1137,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     fs::create_dir_all(&outdir)?;
     let sdist_named = stage_sdist_copy(&sdist, &work, pkg)?;
 
-    let source = if info.rust_build {
-        Some(build_requires::extract_sdist_for(
-            activity,
-            &sdist,
-            &work.join("source"),
-            &info,
-        )?)
-    } else {
-        None
-    };
-    // The archive has been copied/extracted. Toolchain realization below can
-    // fetch more cache entries, so release this lease before it starts.
-    drop(sdist);
-    let rust_inputs = if let Some(source) = &source {
-        Some(rust_plan_inputs(
-            door,
-            rust,
-            sdist_rust_default(selected),
-            &pkg.sha256,
-            source,
-            &info,
-        )?)
-    } else {
-        None
-    };
+    let (source, rust_inputs) = unpack_rust_source(door, sdist, pkg, selected, rust, &info, &work)?;
     let identity = sdist_build_identity(
         platform,
         pkg,
@@ -1083,61 +1148,80 @@ pub(crate) fn build_sdist_wheel_at_depth(
         fast_identity,
         native_libs_id.as_deref(),
     )?;
-    let id = identity.object_id();
-    if store.has_with_activity(activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
+    if let Some(cached) = sdist_view::cached_object(store, activity, &identity)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
         let _ = crate::kernel::store::remove_tree(&work);
-        return find_wheel(&store.object_path(&id));
+        return Ok(SdistWheel {
+            path: find_wheel(&store.object_path(&cached.id))?,
+            host_inputs: cached.host_inputs,
+        });
     }
 
-    let native_libs = if native_libs_id.is_some() {
-        Some(crate::kernel::provider::nativelibs::ensure_native_libs(
-            store, activity, platform,
-        )?)
-    } else {
-        None
-    };
-
-    record_generated_cargo_lock(&info, rust_inputs.as_ref())?;
-
-    let (rust, vendor, cargo_home) = if let Some(inputs) = &rust_inputs {
-        let (rust, vendor) = prepare_rust(store, activity, platform, &info, &work, inputs)?;
-        (Some(rust), Some(vendor), Some(work.join("cargo-home")))
-    } else {
-        (None, None, None)
-    };
+    let Toolchains {
+        native_libs,
+        rust,
+        vendor,
+        cargo_home,
+    } = prepare_toolchains(
+        store,
+        activity,
+        platform,
+        &info,
+        &work,
+        native_libs_id.is_some(),
+        rust_inputs.as_ref(),
+    )?;
 
     let cpython_obj = crate::tailors::python::realize_runtime(store, activity, platform, selected)?;
     let input = source.as_deref().unwrap_or(&sdist_named);
-    run_sdist_build(
-        activity,
-        platform,
-        pkg,
-        &build_env,
-        &cpython_obj,
-        input,
-        &work,
-        &outdir,
-        rust.as_deref(),
-        vendor.as_deref(),
-        cargo_home.as_deref(),
-        native_libs.as_ref().map(|set| set.path.as_path()),
-        &build_plan,
-    )?;
-
+    let build = |host_view: HostView| {
+        run_sdist_build(
+            activity,
+            platform,
+            pkg,
+            &build_env,
+            &cpython_obj,
+            input,
+            &work,
+            &outdir,
+            rust.as_deref(),
+            vendor.as_deref(),
+            cargo_home.as_deref(),
+            native_libs.as_deref(),
+            &build_plan,
+            host_view,
+        )
+    };
+    let discard = || {
+        sdist_view::discard_failed_attempt(
+            store,
+            activity,
+            pkg,
+            &info,
+            &work,
+            &outdir,
+            source.as_deref(),
+            rust_inputs
+                .as_ref()
+                .and_then(RustPlanInputs::generated_lock_text),
+        )
+    };
+    let host_inputs = sdist_view::build_in_view(&identity, pkg, build, discard)?;
     let built = single_built_wheel(&outdir, pkg)?;
-    commit_built_wheel(
+    let path = commit_built_wheel(
         store,
         activity,
-        &identity,
+        &sdist_view::commit_identity(&identity, pkg, host_inputs.as_deref()),
         &built,
         &work,
         &cpython_obj,
         &build_env,
         pkg,
         rust_inputs.as_ref(),
-        native_libs.as_ref().map(|set| set.path.as_path()),
-    )
+        native_libs.as_deref(),
+    )?;
+    sdist_view::record(store, activity, &identity, pkg, host_inputs.as_deref());
+    Ok(SdistWheel { path, host_inputs })
 }
 
 /// Everything that must hold before the build touches the network: the
@@ -1594,7 +1678,8 @@ mod tests {
                 .insert("build_env".into(), "store-independent".into());
             assert_eq!(
                 fixed.object_id(),
-                "d9f923625b654a848fa8a03efa2c8393628d4f65-locked-rust-1.0"
+                // build_view runtime-only/2 since #331.
+                "321a28af3fe8b27ac858314a1367413fe91c5c2a-locked-rust-1.0"
             );
         }
         let today = pinned(shipped_rust.version("rustc").unwrap());
@@ -1906,7 +1991,8 @@ mod tests {
             (
                 Platform::X86_64UnknownLinuxGnu,
                 Some("native-libs-object"),
-                "c6652c7b7965481c70734e59b691df55ded0889a-example-1.0",
+                // build_view runtime-only/2 since #331.
+                "c897995821cc1696a67d8723e06bc4ec75f133e7-example-1.0",
             ),
             (
                 Platform::Aarch64AppleDarwin,
@@ -1934,6 +2020,11 @@ mod tests {
                 }
             );
             assert_eq!(identity.object_id(), golden, "{}", platform.triple());
+            assert_eq!(
+                identity.inputs.get("build_view").map(String::as_str),
+                (!platform.is_macos()).then_some(RUNTIME_ONLY_VIEW),
+                "Linux builds try the C runtime alone first"
+            );
             assert_eq!(
                 crate::kernel::objmeta::check_identity_grammar(&identity),
                 Ok(())

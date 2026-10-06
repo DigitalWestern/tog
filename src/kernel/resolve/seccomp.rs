@@ -109,6 +109,8 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Insn {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arch {
     X86_64,
+    // Built only where tog runs on aarch64; the tables cover both.
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     Aarch64,
 }
 

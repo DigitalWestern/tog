@@ -207,8 +207,7 @@ impl Manifest {
             path: format!("{}:/usr/bin:/bin", build_env.join("bin").display()),
             host_view: crate::kernel::sandbox::HostView::Full,
         };
-        let result =
-            crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity);
+        let result = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity));
         if let Err(error) = result {
             let tail = read_tail(&log, 20);
             let _ = fs::remove_dir_all(&scratch);

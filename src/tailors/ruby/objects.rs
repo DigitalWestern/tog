@@ -17,7 +17,14 @@ pub static KINDS: &[ObjectKind] = &[
         kind: "ruby-gems",
         schema: Some("ruby-gems/1"),
         live_required: &["schema", "installer", "ruby_platform"],
-        live_optional: &["build_view", "host_fallback", "host_inputs", "gem:"],
+        live_optional: &[
+            "build_view",
+            "native",
+            "native_libs",
+            "host_fallback",
+            "host_inputs",
+            "gem:",
+        ],
         live_contract: Some(ruby_gems_contract),
     },
 ];
@@ -42,57 +49,39 @@ fn ruby_gems_contract(identity: &Identity) -> Result<(), String> {
             "Ruby gem count/version relation: version {version} does not match {gems} gem: inputs"
         ));
     }
-    host_fallback_contract(identity)
+    crate::kernel::hostfallback::identity_contract(identity, |name| {
+        identity.inputs.contains_key(&format!("gem:{name}"))
+    })?;
+    native_contract(identity)
 }
 
-/// A `host-fallback/1` object names the gems that fell back, each one a gem
-/// of the object, sorted and without repeats, and the SHA-256 fingerprint
-/// of the host build inputs they were built against; no other object
-/// names either.
-fn host_fallback_contract(identity: &Identity) -> Result<(), String> {
-    let view = identity.inputs.get("build_view").map(String::as_str);
-    let fallback = view == Some("host-fallback/1");
-    match identity.inputs.get("host_inputs") {
-        Some(host_inputs) if !fallback => {
-            return Err(format!(
-                "host_inputs {host_inputs:?} without build_view host-fallback/1"
-            ))
-        }
-        Some(host_inputs)
-            if host_inputs.len() != 64
-                || !host_inputs
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
-        {
-            return Err(format!(
-                "host_inputs {host_inputs:?} is not a lowercase SHA-256 hex digest"
-            ))
-        }
-        None if fallback => {
-            return Err("build_view host-fallback/1 without host_inputs".to_string())
-        }
-        _ => {}
+/// A Linux gems object (one with a `build_view`) spells out whether its
+/// native gems built with tog's native library set (`native`), and names
+/// the set exactly when they did; a macOS one names neither. A plan with
+/// no gem has no native gem.
+fn native_contract(identity: &Identity) -> Result<(), String> {
+    let inputs = &identity.inputs;
+    let linux = inputs.contains_key("build_view");
+    let native = inputs.get("native").map(String::as_str);
+    let has_libs = inputs.contains_key("native_libs");
+    if !linux {
+        return match (native, has_libs) {
+            (None, false) => Ok(()),
+            _ => Err("Ruby native decision: native and native_libs are Linux-only".into()),
+        };
     }
-    let names = identity.inputs.get("host_fallback");
-    match (view, names) {
-        (Some("host-fallback/1"), Some(names)) => {
-            let names: Vec<&str> = names.split(',').collect();
-            if names.windows(2).any(|pair| pair[0] >= pair[1]) {
-                return Err(format!("host_fallback {names:?} is not sorted and unique"));
-            }
-            for name in names {
-                if !identity.inputs.contains_key(&format!("gem:{name}")) {
-                    return Err(format!(
-                        "host_fallback names {name:?}, which is not a gem: input"
-                    ));
-                }
-            }
-            Ok(())
-        }
-        (Some("host-fallback/1"), None) => {
-            Err("build_view host-fallback/1 without host_fallback".to_string())
-        }
-        (_, Some(_)) => Err("host_fallback without build_view host-fallback/1".to_string()),
-        (_, None) => Ok(()),
+    let expected = match has_libs {
+        true => super::native_libs::NATIVE_LIBS_MOUNTED,
+        false => super::native_libs::NATIVE_NONE,
+    };
+    if native != Some(expected) {
+        return Err(format!(
+            "Ruby native decision: native {native:?} does not match the {expected:?} this \
+             identity's native_libs input implies"
+        ));
     }
+    if has_libs && !inputs.keys().any(|key| key.starts_with("gem:")) {
+        return Err("Ruby native_libs/gem relation: native_libs requires a gem: input".into());
+    }
+    Ok(())
 }

@@ -34,6 +34,8 @@ mod bins;
 mod plan;
 mod project;
 mod realize;
+mod script_view;
+mod unpack;
 
 use bins::*;
 pub use plan::*;
@@ -367,14 +369,7 @@ pub fn realize_runtime(
     let staged = store
         .stage_with_activity(activity)
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
-    crate::kernel::archive::extract_with_activity_and_options(
-        activity,
-        &tarball,
-        &staged,
-        &crate::kernel::archive::ExtractOptions::platform_build(1),
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract node tarball: {e}")))?;
+    unpack::extract_node_dist(activity, &tarball, &staged)?;
     validate_node_layout(&staged)?;
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
@@ -1169,7 +1164,7 @@ mod tests {
         for (platform, golden, golden_v4) in [
             (
                 Platform::X86_64UnknownLinuxGnu,
-                "3999dd6a1940ed182bcfffefd41dedcfed9fb429-env-24.20.0",
+                "2cf1d75337c73a5d9e64f9df00ad513e7131340f-env-24.20.0",
                 "26333746f02786ed4d81de465ca6ee4c43e07000-env-24.20.0",
             ),
             (
@@ -1214,10 +1209,38 @@ mod tests {
                 Ok(())
             );
 
-            // Without the node-gyp Python, the `/4` identity is unchanged.
+            // Linux install scripts run against the C runtime alone first
+            // (#328); a host-fallback environment names what fell back.
+            assert_eq!(
+                identity.inputs.get("build_view").map(String::as_str),
+                (!platform.is_macos()).then_some(crate::kernel::hostfallback::RUNTIME_ONLY_VIEW),
+                "{}",
+                platform.triple()
+            );
+            if !platform.is_macos() {
+                let fallback = crate::kernel::hostfallback::fallback_identity(
+                    &identity,
+                    &["node_modules/example".to_string()],
+                    &"b".repeat(64),
+                );
+                assert_eq!(
+                    crate::kernel::objmeta::check_identity_grammar(&fallback),
+                    Ok(())
+                );
+                let stranger = crate::kernel::hostfallback::fallback_identity(
+                    &identity,
+                    &["node_modules/absent".to_string()],
+                    &"b".repeat(64),
+                );
+                assert!(crate::kernel::objmeta::check_identity_grammar(&stranger).is_err());
+            }
+
+            // Without the node-gyp Python and the build view, the `/4`
+            // identity is unchanged.
             let mut v4 = identity.clone();
             v4.inputs.insert("schema".into(), "node-env/4".into());
             v4.inputs.remove("gyp_python");
+            v4.inputs.remove("build_view");
             assert_eq!(v4.object_id(), golden_v4, "{}", platform.triple());
 
             // The `/3` spelling of the same plan: a different object id,
@@ -1652,6 +1675,12 @@ mod tests {
             &[],
             None,
             &test_gyp_python(),
+            &Identity {
+                kind: "node-env".into(),
+                name: "env".into(),
+                version: "24.20.0".into(),
+                inputs: BTreeMap::new(),
+            },
             &mut consumed,
             &mut cleanup,
         )
@@ -1705,7 +1734,7 @@ mod tests {
         };
         let identity = node_env_identity(
             &store,
-            Platform::host().unwrap(),
+            Platform::Aarch64AppleDarwin,
             &node_obj,
             &plan,
             &[],
@@ -3051,6 +3080,12 @@ mod tests {
             &[],
             None,
             &test_gyp_python(),
+            &Identity {
+                kind: "node-env".into(),
+                name: "env".into(),
+                version: "24.20.0".into(),
+                inputs: BTreeMap::new(),
+            },
             &mut consumed,
             &mut cleanup,
         )

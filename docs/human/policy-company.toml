@@ -111,9 +111,6 @@ deny = [
 #   requirement-skipped              a project-local or direct-reference
 #                                    requirement was left to the project;
 #                                    nothing unverified entered the store.
-#   skipped-optional                 an optional group or extra was not
-#                                    requested; fewer packages, not unknown
-#                                    ones.
 #   built-from-source                a package that ships prebuilt binaries
 #                                    was compiled from its (hash-verified)
 #                                    source in the network-denied sandbox;
@@ -129,7 +126,8 @@ deny = [
 #                                    none; every crate in it is still
 #                                    hash-verified. Commit the lock to make
 #                                    this disappear.
-#   host-build-inputs                a native extension (a Ruby gem's) did
+#   host-build-inputs                a native build (a Ruby gem's, a Python
+#                                    sdist's, an npm install script) did
 #                                    not build against the host's C runtime
 #                                    alone, so it was rebuilt against the
 #                                    machine's whole /usr: the object depends

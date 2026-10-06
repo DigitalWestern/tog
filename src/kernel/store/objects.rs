@@ -72,29 +72,9 @@ impl Store {
                 format!("object reference {id} is still writable"),
             ));
         }
-        let no_metadata = |error: io::Error| {
-            io::Error::new(
-                error.kind(),
-                format!("object reference {id} has no metadata: {error}"),
-            )
-        };
-        let file = match self.open_object_meta(id).map_err(no_metadata)? {
-            MetaFile::File(file) => file,
-            MetaFile::Missing => return Err(no_metadata(io::ErrorKind::NotFound.into())),
-            MetaFile::NotRegular => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("object reference {id} metadata is not a regular file"),
-                ))
-            }
-        };
-        let value: serde_json::Value =
-            serde_json::from_reader(io::BufReader::new(file)).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("parse object reference metadata {id}: {e}"),
-                )
-            })?;
+        let (_, value) = crate::kernel::objmeta::read_store_body(self, id).map_err(|error| {
+            io::Error::new(error.kind(), format!("object reference {id}: {error}"))
+        })?;
         if value.get("id").and_then(serde_json::Value::as_str) != Some(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -477,30 +457,11 @@ impl Store {
         result
     }
 
+    /// The exceptions `id`'s record carries, from a record opened and parsed
+    /// by objmeta's reader.
     pub fn exceptions(&self, id: &str) -> io::Result<Vec<Exception>> {
         let path = self.root.join("meta").join(format!("{id}.json"));
-        let file = match self.open_object_meta(id)? {
-            MetaFile::File(file) => file,
-            MetaFile::Missing => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("{} is missing", path.display()),
-                ))
-            }
-            MetaFile::NotRegular => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} is not a regular file", path.display()),
-                ))
-            }
-        };
-        let meta: serde_json::Value =
-            serde_json::from_reader(io::BufReader::new(file)).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("parse {}: {e}", path.display()),
-                )
-            })?;
+        let (_, meta) = crate::kernel::objmeta::read_store_body(self, id)?;
         match meta.get("exceptions") {
             None => Ok(Vec::new()),
             Some(value) => serde_json::from_value(value.clone()).map_err(|e| {

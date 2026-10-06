@@ -108,14 +108,8 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
 }
 
 fn tar_entries(path: &Path, activity: Option<&StoreActivity>) -> io::Result<Vec<ArchiveEntry>> {
-    use crate::kernel::archive::Compression;
-    let listed = match activity {
-        Some(activity) => {
-            crate::kernel::archive::list_with_activity(activity, path, Compression::Gzip)
-        }
-        None => crate::kernel::archive::list(path, Compression::Gzip),
-    }
-    .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
+    let listed = super::unpack::list_sdist(path, activity)
+        .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
     listed
         .into_iter()
         .map(|entry| {
@@ -194,12 +188,7 @@ fn root_relative(entry: &str, root: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn archive_file(
-    path: &Path,
-    kind: ArchiveKind,
-    member: &str,
-    activity: Option<&StoreActivity>,
-) -> io::Result<Vec<u8>> {
+fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<u8>> {
     match kind {
         ArchiveKind::TarGz => {
             // One manifest read, not an extraction: the bytes come from the
@@ -207,22 +196,8 @@ fn archive_file(
             // 16 MiB covers any real manifest; anything larger is refused
             // rather than buffered.
             const MEMBER_CAP: u64 = 16 << 20;
-            let bytes = match activity {
-                Some(activity) => crate::kernel::archive::read_member_with_activity(
-                    activity,
-                    path,
-                    crate::kernel::archive::Compression::Gzip,
-                    member,
-                    MEMBER_CAP,
-                ),
-                None => crate::kernel::archive::read_member(
-                    path,
-                    crate::kernel::archive::Compression::Gzip,
-                    member,
-                    MEMBER_CAP,
-                ),
-            }
-            .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
+            let bytes = super::unpack::read_sdist_member(path, member, MEMBER_CAP)
+                .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
             Ok(bytes)
         }
         ArchiveKind::Zip => {
@@ -449,7 +424,7 @@ fn inspect_sdist_inner(path: &Path, activity: Option<&StoreActivity>) -> io::Res
         .find(|entry| entry.normalized == pyproject_member);
     let (requires, backend, explicit_manifest) = if let Some(entry) = pyproject_entry {
         parse_pyproject(
-            &archive_file(path, kind, &entry.original, activity)?,
+            &archive_file(path, kind, &entry.original)?,
             &pyproject_member,
         )?
     } else {
@@ -544,37 +519,17 @@ fn extract_sdist_inner(
             // The listing validates every member before the delegated tar
             // writes anything. The same check runs in inspect_sdist, but
             // extract_sdist is also used directly in the Rust planning path.
-            use crate::kernel::archive::Compression;
-            let listed = match activity {
-                Some(activity) => {
-                    crate::kernel::archive::list_with_activity(activity, path, Compression::Gzip)
-                }
-                None => crate::kernel::archive::list(path, Compression::Gzip),
-            }
-            .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", path.display())))?;
+            let listed = super::unpack::list_sdist(path, activity).map_err(|e| {
+                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+            })?;
             // Keep the name-shape check the inspect path applies, so a
             // direct extract refuses exactly what inspection would refuse.
             for entry in &listed {
                 clean_entry(&entry.name)?;
             }
-            match activity {
-                Some(activity) => crate::kernel::archive::extract_validated_with_activity(
-                    activity,
-                    path,
-                    destination,
-                    1,
-                    Compression::Gzip,
-                    &listed,
-                ),
-                None => crate::kernel::archive::extract_validated(
-                    path,
-                    destination,
-                    1,
-                    Compression::Gzip,
-                    &listed,
-                ),
-            }
-            .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", path.display())))?;
+            super::unpack::extract_sdist(path, destination, activity, &listed).map_err(|e| {
+                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+            })?;
         }
         ArchiveKind::Zip => {
             let file = File::open(path)?;
@@ -625,7 +580,11 @@ fn extract_sdist_inner(
 }
 
 fn validate_extracted_links(root: &Path) -> io::Result<()> {
-    fn walk(root: &Path, path: &Path) -> io::Result<()> {
+    /// Each hard-linked inode met in the walk: its link count, how many of
+    /// its names the walk found, and the first one.
+    type Links = std::collections::BTreeMap<(u64, u64), (u64, u64, std::path::PathBuf)>;
+
+    fn walk(root: &Path, path: &Path, links: &mut Links) -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
@@ -641,7 +600,7 @@ fn validate_extracted_links(root: &Path) -> io::Result<()> {
         }
         if file_type.is_dir() {
             for entry in fs::read_dir(path)? {
-                walk(root, &entry?.path())?;
+                walk(root, &entry?.path(), links)?;
             }
             return Ok(());
         }
@@ -650,10 +609,10 @@ fn validate_extracted_links(root: &Path) -> io::Result<()> {
             {
                 use std::os::unix::fs::MetadataExt;
                 if metadata.nlink() > 1 {
-                    return Err(invalid(format!(
-                        "extracted sdist contains a hard link: {}",
-                        path.display()
-                    )));
+                    let slot = links
+                        .entry((metadata.dev(), metadata.ino()))
+                        .or_insert_with(|| (metadata.nlink(), 0, path.to_path_buf()));
+                    slot.1 += 1;
                 }
             }
             return Ok(());
@@ -664,7 +623,21 @@ fn validate_extracted_links(root: &Path) -> io::Result<()> {
         )))
     }
 
-    walk(root, root)
+    let mut links = Links::new();
+    walk(root, root, &mut links)?;
+    // A hard link the archive carried names an earlier member of the same
+    // archive (`archive::validate_with_options`), so every name of its
+    // file is in this tree. A file with a name the walk did not find is
+    // shared with something outside it.
+    for (count, found, path) in links.values() {
+        if found != count {
+            return Err(invalid(format!(
+                "extracted sdist contains a hard link to a file outside it: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a link lexically while following existing symlinks.  This also
@@ -1079,24 +1052,26 @@ mod link_guard_tests {
     }
 
     #[test]
-    fn a_hard_link_is_refused() {
+    fn a_hard_link_inside_the_tree_is_accepted() {
         let (_dir, root) = tree("hard");
         fs::write(root.join("a"), b"a").unwrap();
-        fs::hard_link(root.join("a"), root.join("b")).unwrap();
-        let error = refusal(&root);
-        // Either name is the second link to the same inode.
-        assert!(
-            error
-                == format!(
-                    "extracted sdist contains a hard link: {}",
-                    root.join("a").display()
-                )
-                || error
-                    == format!(
-                        "extracted sdist contains a hard link: {}",
-                        root.join("b").display()
-                    ),
-            "{error}"
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::hard_link(root.join("a"), root.join("sub/b")).unwrap();
+        validate_extracted_links(&root).unwrap();
+    }
+
+    #[test]
+    fn a_hard_link_to_a_file_outside_the_tree_is_refused() {
+        let (dir, root) = tree("hard-out");
+        let outside = dir.0.join("outside");
+        fs::write(&outside, b"host").unwrap();
+        fs::hard_link(&outside, root.join("b")).unwrap();
+        assert_eq!(
+            refusal(&root),
+            format!(
+                "extracted sdist contains a hard link to a file outside it: {}",
+                root.join("b").display()
+            )
         );
     }
 

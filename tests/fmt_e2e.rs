@@ -75,9 +75,10 @@ fn write_legacy_record(dir: &Path) -> PathBuf {
 
 /// `tog fmt` needs no lock and no sync, caches its formatter, and writes
 /// no closure: the lock pins the formatter, so there is nothing to record.
-/// A record an older tog left alone in a never-synced project stays (its
-/// deletion is covered by the unit tests, beside another closure). Nothing roots the formatter objects, so gc may reclaim them
-/// between runs and the next run fetches them again.
+/// A record an older tog left alone in a never-synced project is removed
+/// when the store has no gc root for the project (#416). Nothing roots the
+/// formatter objects, so gc may reclaim them between runs and the next run
+/// fetches them again.
 #[test]
 #[ignore]
 fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
@@ -144,15 +145,13 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
         "fn main() {\n    println!(\"hello {}\", itoa::Buffer::new().format(128u64));\n}\n"
     );
     assert!(!project.join("Cargo.lock").exists());
-    // The run wrote no closure of its own. The legacy record is the
-    // project's only one, so it stays: an older tog registered a gc root
-    // for this project, and that root over an empty closures directory
-    // would stop every sweep.
+    // The run wrote no closure of its own, and removed the lone legacy
+    // record: this store has no gc root for the project, so nothing is
+    // left pointing at an empty closures directory (#416).
     let closures: Vec<_> = fs::read_dir(project.join(".tog/closures"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(closures, [std::ffi::OsString::from("rustfmt.json")]);
+        .map(|dir| dir.map(|entry| entry.unwrap().file_name()).collect())
+        .unwrap_or_default();
+    assert!(closures.is_empty(), "{closures:?}");
 
     let before = object_ids(&store);
     let warm = tog_at(&project, &home, &store, &["fmt", "--check"]);
@@ -315,7 +314,10 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
     );
     assert!(!member.join("tog-toolchain.toml").exists());
     assert!(!member.join(".tog/closures/rustfmt.json").exists());
-    assert!(legacy.is_file(), "a lone legacy record must stay");
+    assert!(
+        !legacy.exists(),
+        "a lone legacy record with no gc root must be removed (#416)"
+    );
     let rust_id = object_of_kind(&store, "rust");
     assert!(
         rust_id.ends_with(&format!("-rust-{pinned}")),

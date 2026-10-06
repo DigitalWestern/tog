@@ -93,6 +93,14 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
                 }));
             }
         }
+        // What the user chose not to install, kept apart from the
+        // exceptions so a reader never counts it as one (#71).
+        for group in crate::comforter::records::optional_groups_skipped(closure)? {
+            exception_properties.push(json!({
+                "name": "tog:optional-group-skipped",
+                "value": format!("{eco}: {}: {}", group.group, group.detail),
+            }));
+        }
         eco_components(eco, body, &mut components)?;
     }
     Ok(json!({
@@ -164,6 +172,11 @@ mod tests {
                     "subject": ".",
                     "detail": "project-local requirement",
                 }],
+                "optional_groups_skipped": [{
+                    "group": "docs",
+                    "detail": "extra, not requested",
+                    "requirements": ["sphinx"],
+                }],
             }),
         );
         write(
@@ -232,6 +245,10 @@ mod tests {
         assert!(properties.iter().any(|p| {
             p["name"] == "tog:exception:install-script-failed"
                 && p["value"] == "node_modules/a: postinstall: network-denied"
+        }));
+        assert!(properties.iter().any(|p| {
+            p["name"] == "tog:optional-group-skipped"
+                && p["value"] == "python: docs: extra, not requested"
         }));
     }
 

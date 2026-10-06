@@ -35,11 +35,6 @@ use std::io;
 /// Where the Rust project publishes release archives and manifests.
 pub const DIST: &str = "https://static.rust-lang.org/dist";
 
-/// The manifest URL for one exact release.
-pub fn manifest_url(version: &str) -> String {
-    format!("{DIST}/channel-rust-{version}.toml")
-}
-
 /// The target key of a package that is the same on every host.
 pub const ANY_TARGET: &str = "*";
 

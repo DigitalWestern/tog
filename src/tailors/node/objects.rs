@@ -25,7 +25,16 @@ pub static KINDS: &[ObjectKind] = &[
             "native",
             "gyp_python",
         ],
-        live_optional: &["layout", "native_libs", "pkg:", "provisioned:", "artifact:"],
+        live_optional: &[
+            "layout",
+            "native_libs",
+            "build_view",
+            "host_fallback",
+            "host_inputs",
+            "pkg:",
+            "provisioned:",
+            "artifact:",
+        ],
         live_contract: Some(node_env_v5_contract),
     },
 ];
@@ -140,6 +149,11 @@ fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
 /// shipped default) and the id commits to it.
 fn node_env_v5_contract(identity: &Identity) -> Result<(), String> {
     node_env_v4_contract(identity)?;
+    // A host-fallback environment names the packages whose install scripts
+    // fell back.
+    crate::kernel::hostfallback::identity_contract(identity, |path| {
+        identity.inputs.contains_key(&format!("pkg:{path}"))
+    })?;
     let gyp_python = identity
         .inputs
         .get("gyp_python")

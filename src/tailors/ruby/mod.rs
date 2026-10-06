@@ -12,8 +12,14 @@
 pub mod edit;
 mod gem_home;
 mod native;
+mod native_libs;
 pub mod objects;
 pub mod tailor;
+mod unpack;
+
+use unpack::extract_ruby_bottle;
+#[cfg(test)]
+use unpack::extract_ruby_bottle_for_test;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
@@ -128,7 +134,9 @@ fn ruby_identity(spec: &RubySpec) -> Identity {
     }
 }
 
-fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan) -> Identity {
+/// `native_libs_id` is the pinned native library set the plan's native
+/// gems build with (`native_libs::identity_id`): Linux only.
+fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan, native_libs_id: Option<&str>) -> Identity {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "ruby-gems/1".to_string()),
         // Installer recipe AND wrapper-byte provenance: generated binstubs
@@ -147,8 +155,21 @@ fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan) -> Identity {
     // and the object is committed under `ruby_gems_fallback_identity`
     // instead, never under this id. Darwin builds see the whole SDK, and
     // their ids are pinned.
+    //
+    // Linux native gems also build with tog's pinned native library set
+    // mounted (`native_libs`, #329). `native` spells out that decision
+    // either way, so a dropped `native_libs` input cannot pass for a plan
+    // with no native gem.
     if !spec.platform.is_macos() {
         inputs.insert("build_view".to_string(), RUNTIME_ONLY_VIEW.to_string());
+        let native = match native_libs_id {
+            Some(id) => {
+                inputs.insert("native_libs".to_string(), id.to_string());
+                native_libs::NATIVE_LIBS_MOUNTED
+            }
+            None => native_libs::NATIVE_NONE,
+        };
+        inputs.insert("native".to_string(), native.to_string());
     }
     for g in &plan.gems {
         inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
@@ -257,33 +278,6 @@ fn validate_ruby_layout(root: &Path) -> io::Result<()> {
         return Err(err("portable-ruby is missing interpreter headers"));
     }
     Ok(())
-}
-
-fn extract_ruby_bottle(activity: &StoreActivity, tarball: &Path, staged: &Path) -> io::Result<()> {
-    // The verified Linux and Darwin bottles both use
-    // portable-ruby/<version>/<tree>; this is deliberately not Node's
-    // strip count. The archive remains unchanged in the verified cache.
-    crate::kernel::archive::extract_with_activity_and_options(
-        activity,
-        tarball,
-        staged,
-        &crate::kernel::archive::ExtractOptions::platform_build(2),
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
-    validate_ruby_layout(staged)
-}
-
-#[cfg(test)]
-fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io::Result<()> {
-    crate::kernel::archive::extract_with_options(
-        tarball,
-        staged,
-        &crate::kernel::archive::ExtractOptions::platform_build(2),
-        crate::kernel::archive::Compression::Gzip,
-    )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
-    validate_ruby_layout(staged)
 }
 
 /// Realize the Ruby the selection names: its bytes, its version, its
@@ -497,7 +491,19 @@ if mode == "install"
   # symlinks — symlink binstubs point into the staging dir and dangle
   # after the store commit rename (Sol review, reproduced).
   require "rubygems/installer"
-  gemfile, install_dir = ARGV
+  gemfile, install_dir, native_libs = ARGV
+  # tog's native library set, when given: mkmf takes the flags its
+  # Makefile uses from extconf's arguments, never from the environment, and
+  # each one replaces Ruby's own default, so the default leads.
+  build_args = []
+  if native_libs
+    require "rbconfig"
+    require "shellwords"
+    include = Shellwords.escape(File.join(native_libs, "include"))
+    lib = Shellwords.escape(File.join(native_libs, "lib"))
+    build_args << "--with-cppflags=#{RbConfig::CONFIG["CPPFLAGS"]} -I#{include}"
+    build_args << "--with-ldflags=#{RbConfig::CONFIG["LDFLAGS"]} -L#{lib} -Wl,-rpath,#{lib}"
+  end
   installer = Gem::Installer.at(
     gemfile,
     install_dir: install_dir,
@@ -505,7 +511,8 @@ if mode == "install"
     ignore_dependencies: true,
     document: [],
     wrappers: true,
-    env_shebang: true
+    env_shebang: true,
+    build_args: build_args
   )
   installer.install
   puts "installed #{File.basename(gemfile)}"
@@ -720,14 +727,19 @@ fn valid_component(s: &str) -> bool {
         && !s.starts_with('.')
 }
 
+/// A gem's name, version, platform and full name, each one safe to place in
+/// a URL path or query and in a store path.
+fn valid_coordinates(name: &str, version: &str, platform: &str, full_name: &str) -> bool {
+    valid_component(name)
+        && valid_component(version)
+        && (platform == "ruby" || valid_component(platform))
+        && valid_component(full_name)
+}
+
 fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     for g in &plan.gems {
-        if !valid_component(&g.name)
-            || !valid_component(&g.version)
-            || !(g.platform == "ruby" || valid_component(&g.platform))
-            || !valid_component(&g.full_name)
-        {
+        if !valid_coordinates(&g.name, &g.version, &g.platform, &g.full_name) {
             return Err(err(format!("invalid gem coordinates in plan: {g:?}")));
         }
         if g.sha256.len() != 64 || !g.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -880,6 +892,15 @@ pub fn plan_ruby(
 
     let mut gems = Vec::new();
     for g in parsed.gems {
+        // Checked before any of them is placed in a rubygems.org URL: a
+        // lock entry such as `x?platform=java` would otherwise choose the
+        // query the digest is asked with.
+        if !valid_coordinates(&g.name, &g.version, &g.platform, &g.full_name) {
+            return Err(err(format!(
+                "invalid gem coordinates in Gemfile.lock: {} {} {}",
+                g.name, g.version, g.platform
+            )));
+        }
         let mut digest_from_api = false;
         let recorded = match g.checksum {
             Some(_) => None,
@@ -897,11 +918,8 @@ pub fn plan_ruby(
                     "https://rubygems.org/api/v2/rubygems/{}/versions/{}.json?platform={}",
                     g.name, g.version, g.platform
                 );
-                let body = ureq::get(&url)
-                    .call()
-                    .map_err(|e| err(format!("{}: {url}: {e}", g.full_name)))?
-                    .into_string()
-                    .map_err(|e| err(format!("{}: read: {e}", g.full_name)))?;
+                let body = crate::kernel::fetch::fetch_text(&url)
+                    .map_err(|e| err(format!("{}: {e}", g.full_name)))?;
                 digest_from_api_reply(&g.full_name, &g.version, &g.platform, &body)?
             }
         };
@@ -1091,35 +1109,133 @@ pub fn realize_gems(
     crate::kernel::platform::require_host(platform, "Ruby gems")?;
     let spec = ruby_spec(platform, selected)?;
     validate_plan(plan)?;
-    let identity = ruby_gems_identity(&spec, plan);
-    let lookup_inputs = crate::kernel::hostview::host_build_inputs;
-    if let Some(id) = cached_gems_object(store, activity, &identity, lookup_inputs)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
-        record_api_digests_on_hit(store, activity, plan, ruby_obj);
-        return Ok(store.object_path(&id));
-    }
-
-    // Fetch + post-download spec verification first (all-or-nothing).
+    // Fetch + post-download spec verification (all-or-nothing). It runs
+    // before the cache lookup only when a gem's native classification is
+    // not in the store yet: the identity names the native library set
+    // exactly when the plan has a native gem (`native_libs`).
     let scratch = store.stage_with_activity(activity)?;
-    let helper = scratch.join("helper.rb");
-    fs::write(&helper, HELPER)?;
+    let result = (|| {
+        let helper = scratch.join("helper.rb");
+        fs::write(&helper, HELPER)?;
+        let mut verified = None;
+        let has_native = match native_libs::persisted_classification(store, plan)? {
+            Some(has_native) => has_native,
+            None => {
+                let gems = verify_plan(store, activity, ruby_obj, &scratch, &helper, plan)?;
+                let has_native = gems.artifacts.iter().any(|(_, _, native)| *native);
+                verified = Some(gems);
+                has_native
+            }
+        };
+        let mut native_libs_id = native_libs::identity_id(store, platform, has_native)?;
+        let mut identity = ruby_gems_identity(&spec, plan, native_libs_id.as_deref());
+        let cached = |identity: &Identity| -> io::Result<Option<PathBuf>> {
+            let lookup_inputs = crate::kernel::hostview::host_build_inputs;
+            match cached_gems_object(store, activity, identity, lookup_inputs)? {
+                Some(id) => {
+                    crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
+                    Ok(Some(store.object_path(&id)))
+                }
+                None => Ok(None),
+            }
+        };
+        if let Some(path) = cached(&identity)? {
+            record_api_digests_on_hit(store, activity, plan, ruby_obj);
+            return Ok(path);
+        }
+        let verified = match verified {
+            Some(verified) => verified,
+            None => {
+                let verified = verify_plan(store, activity, ruby_obj, &scratch, &helper, plan)?;
+                // The identity above came from the store's records; the
+                // gemspecs just read are the authority. When they disagree,
+                // the records were wrong (`verify_plan` has rewritten them),
+                // and the object is built and named by the gemspecs.
+                if let Some(fresh) = stale_native_classification(has_native, &verified) {
+                    ui::note(&format!(
+                        "the store recorded that this plan {} a native gem, but its gemspecs \
+                         say it {}; the record is corrected and the gemspecs decide",
+                        if has_native { "has" } else { "has no" },
+                        if fresh { "has" } else { "has not" },
+                    ));
+                    native_libs_id = native_libs::identity_id(store, platform, fresh)?;
+                    identity = ruby_gems_identity(&spec, plan, native_libs_id.as_deref());
+                    // `verify_plan` recorded this plan's API digests already.
+                    if let Some(path) = cached(&identity)? {
+                        return Ok(path);
+                    }
+                }
+                verified
+            }
+        };
+        let native_libs = match native_libs_id {
+            Some(_) => Some(crate::kernel::provider::nativelibs::ensure_native_libs(
+                store, activity, platform,
+            )?),
+            None => None,
+        };
+        install_gems(
+            store,
+            activity,
+            platform,
+            plan,
+            ruby_obj,
+            &identity,
+            &GemsWork {
+                scratch: &scratch,
+                helper: &helper,
+                verified,
+                native_libs: native_libs.as_ref(),
+            },
+        )
+    })();
+    let _ = crate::kernel::store::remove_tree(&scratch);
+    result
+}
+
+/// The verified `.gem` of every planned gem, with whether its gemspec
+/// declares native extensions, and the cache leases that keep them.
+struct VerifiedGems<'p> {
+    artifacts: Vec<(&'p RubyGem, PathBuf, bool)>,
+    _leases: Vec<CacheLease>,
+}
+
+/// Whether `verified`'s gemspecs say the plan has a native gem, when that
+/// differs from `recorded`, the answer the store's classification records
+/// gave; `None` when they agree.
+fn stale_native_classification(recorded: bool, verified: &VerifiedGems<'_>) -> Option<bool> {
+    let fresh = verified.artifacts.iter().any(|(_, _, native)| *native);
+    (fresh != recorded).then_some(fresh)
+}
+
+/// Download and verify every gem of `plan`, refusing two gems that provide
+/// one executable, and record each gem's native classification.
+fn verify_plan<'p>(
+    store: &Store,
+    activity: &StoreActivity,
+    ruby_obj: &Path,
+    scratch: &Path,
+    helper: &Path,
+    plan: &'p RubyPlan,
+) -> io::Result<VerifiedGems<'p>> {
     let mut artifacts: Vec<(&RubyGem, PathBuf, bool)> = Vec::new();
     // One download per gem, and the lease from that download is held through
     // the sandboxed installs below, so no sweep can drop a `.gem` between
     // verification and use. That is all the lease closes: a same-user
     // replacement of a cache entry is still possible, so the install loop
     // digests every artifact again immediately before it copies it.
-    let mut _cache_leases = Vec::new();
+    let mut leases = Vec::new();
     let mut executables: BTreeMap<String, String> = BTreeMap::new();
     for g in &plan.gems {
-        let (lease, exes, native) = verify_gem(store, activity, ruby_obj, &scratch, &helper, g)?;
+        let (lease, exes, native) = verify_gem(store, activity, ruby_obj, scratch, helper, g)?;
         let file_path = lease.to_path_buf();
-        _cache_leases.push(lease);
+        leases.push(lease);
         // The bytes rubygems.org serves match the digest its API gave and
         // name this coordinate: that is what a digest record vouches for.
         if g.digest_from_api {
             record_gem_digest(store, activity, g);
         }
+        native_libs::record_classification(store, activity, &g.sha256, native);
         for e in exes {
             if let Some(prev) = executables.insert(e.clone(), g.name.clone()) {
                 return Err(err(format!(
@@ -1131,7 +1247,34 @@ pub fn realize_gems(
         }
         artifacts.push((g, file_path, native));
     }
+    Ok(VerifiedGems {
+        artifacts,
+        _leases: leases,
+    })
+}
 
+/// What the installs of one gems object work from: the scratch directory
+/// and the helper in it, the verified gems, and the native library set
+/// their native gems build with.
+struct GemsWork<'a, 'p> {
+    scratch: &'a Path,
+    helper: &'a Path,
+    verified: VerifiedGems<'p>,
+    native_libs: Option<&'a crate::kernel::provider::nativelibs::NativeLibSet>,
+}
+
+/// Install every verified gem into a staged GEM_HOME, dependency-first, and
+/// commit it under `identity` (or its host-fallback identity).
+fn install_gems(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    plan: &RubyPlan,
+    ruby_obj: &Path,
+    identity: &Identity,
+    work: &GemsWork,
+) -> io::Result<PathBuf> {
+    let (scratch, helper, artifacts) = (work.scratch, work.helper, &work.verified.artifacts);
     let staged = store.stage_with_activity(activity)?;
     let bin = staged.join("bin");
     fs::create_dir_all(&bin)?;
@@ -1139,14 +1282,15 @@ pub fn realize_gems(
         platform,
         activity,
         ruby_obj,
-        helper: &helper,
-        scratch: &scratch,
+        helper,
+        scratch,
         staged: &staged,
+        native_libs: work.native_libs.map(|set| set.path.as_path()),
     };
     let mut fell_back = Vec::new();
     // The host state every fallback was built against (`same_host_state`).
     let mut host_inputs = None;
-    for (g, file, native) in &artifacts {
+    for (g, file, native) in artifacts {
         // Re-verify immediately before use. The lease held since the download
         // stops a sweep, not a same-user replacement of the cache entry, so
         // the bytes about to be installed are digested again here.
@@ -1170,9 +1314,11 @@ pub fn realize_gems(
             fell_back.push(g.full_name.clone());
         }
     }
-    let _ = crate::kernel::store::remove_tree(&scratch);
     let mut deps = crate::kernel::store::ObjectDeps::new();
     deps.object_id(&crate::kernel::store::object_id_from_path(ruby_obj)?)?;
+    if let Some(set) = work.native_libs {
+        deps.object_id(&set.id)?;
+    }
     for gem in &plan.gems {
         deps.cache_digest(Digest::sha256(&gem.sha256)?);
     }
@@ -1185,14 +1331,14 @@ pub fn realize_gems(
     // points a later sync on a host in the same state at it.
     let commit_identity = match &host_inputs {
         None => identity.clone(),
-        Some(host_inputs) => ruby_gems_fallback_identity(&identity, &fell_back, host_inputs),
+        Some(host_inputs) => ruby_gems_fallback_identity(identity, &fell_back, host_inputs),
     };
     let candidate = crate::kernel::policy::object_exceptions();
     let (object, applied) = store
         .commit_with_activity_and_deps(activity, &commit_identity, &staged, &candidate, &deps)
         .map_err(|e| io::Error::new(e.kind(), format!("commit gems: {e}")))?;
     if let Some(host_inputs) = &host_inputs {
-        record_host_fallback(store, activity, &identity, host_inputs, &fell_back);
+        record_host_fallback(store, activity, identity, host_inputs, &fell_back);
     }
     for exception in applied {
         if !candidate.contains(&exception) {
@@ -1223,15 +1369,17 @@ pub fn project_ruby_env(
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, activity, &ruby_obj)?;
     refs.object_path(&store, activity, &gems_obj)?;
-    crate::comforter::write_closure(
-        project,
-        "ruby",
-        closure_body(&ruby_obj, &gems_obj, plan, lock_sha256, selected)?,
-        &store,
-        activity,
-        refs,
-        attribution,
-    )
+    // Native extensions load the set's libraries at run time, through the
+    // rpath they were linked with, so the project keeps it live too.
+    let native_reference = crate::kernel::provider::nativelibs::env_reference(&gems_obj)?;
+    if let Some(id) = native_reference.as_ref().and_then(|r| r["id"].as_str()) {
+        refs.object_id(&store, activity, id)?;
+    }
+    let mut body = closure_body(&ruby_obj, &gems_obj, plan, lock_sha256, selected)?;
+    if let Some(reference) = native_reference {
+        body["native_libs"] = reference;
+    }
+    crate::comforter::write_closure(project, "ruby", body, &store, activity, refs, attribution)
 }
 
 /// The Ruby closure body: the projection's objects and plan, plus the
@@ -1301,9 +1449,15 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         }],
         ..empty_plan.clone()
     };
-    let gems = ruby_gems_identity(&spec, &gem_plan);
-    let mut cases = vec![ruby, ruby_gems_identity(&spec, &empty_plan), gems.clone()];
+    let gems = ruby_gems_identity(&spec, &gem_plan, None);
+    let mut cases = vec![
+        ruby,
+        ruby_gems_identity(&spec, &empty_plan, None),
+        gems.clone(),
+    ];
     if !platform.is_macos() {
+        let native_libs_id = format!("{}-libset-3", "c".repeat(40));
+        cases.push(ruby_gems_identity(&spec, &gem_plan, Some(&native_libs_id)));
         cases.push(ruby_gems_fallback_identity(
             &gems,
             &["rake-13.2.1".into()],
@@ -1475,6 +1629,36 @@ mod tests {
         }
     }
 
+    /// A classification record that disagrees with the gemspecs read on a
+    /// cache miss is caught, and the identity is decided by the gemspecs:
+    /// a gem recorded as pure Ruby that is native names the set.
+    #[test]
+    fn a_stale_native_record_is_overruled_by_the_gemspecs() {
+        let plan = linux_test_plan();
+        let spec = pin_spec(Platform::X86_64UnknownLinuxGnu);
+        let verified = |native: bool| VerifiedGems {
+            artifacts: vec![(&plan.gems[0], PathBuf::from("/cache/rake.gem"), native)],
+            _leases: Vec::new(),
+        };
+        assert_eq!(stale_native_classification(false, &verified(false)), None);
+        assert_eq!(stale_native_classification(true, &verified(true)), None);
+        assert_eq!(
+            stale_native_classification(false, &verified(true)),
+            Some(true)
+        );
+        assert_eq!(
+            stale_native_classification(true, &verified(false)),
+            Some(false)
+        );
+
+        let set = format!("{}-libset-3", "c".repeat(40));
+        let recorded = ruby_gems_identity(&spec, &plan, None);
+        let corrected = ruby_gems_identity(&spec, &plan, Some(&set));
+        assert_eq!(recorded.inputs["native"], native_libs::NATIVE_NONE);
+        assert_eq!(corrected.inputs["native"], native_libs::NATIVE_LIBS_MOUNTED);
+        assert_ne!(recorded.object_id(), corrected.object_id());
+    }
+
     #[test]
     fn linux_and_darwin_identities_are_distinct_rows_of_one_schema() {
         let darwin_pin = pin_spec(Platform::Aarch64AppleDarwin);
@@ -1491,8 +1675,8 @@ mod tests {
         assert_eq!(linux.inputs["artifact_sha256"], linux_pin.sha256);
 
         let plan = linux_test_plan();
-        let darwin_gems = ruby_gems_identity(&darwin_pin, &plan);
-        let linux_gems = ruby_gems_identity(&linux_pin, &plan);
+        let darwin_gems = ruby_gems_identity(&darwin_pin, &plan, None);
+        let linux_gems = ruby_gems_identity(&linux_pin, &plan, None);
         assert_ne!(darwin_gems.object_id(), linux_gems.object_id());
         assert!(linux_gems.inputs["installer"].contains(&linux_pin.sha256));
     }
@@ -1506,12 +1690,13 @@ mod tests {
         assert_eq!(
             (
                 ruby_identity(&spec).object_id(),
-                ruby_gems_identity(&spec, &linux_test_plan()).object_id(),
+                ruby_gems_identity(&spec, &linux_test_plan(), None).object_id(),
             ),
             (
                 "192a4c7b501dd09eb3c76a3ebd427e8077fbda6e-ruby-3.4.6".to_string(),
-                // runtime-only/1: native extensions see the C runtime alone.
-                "24d2dc19be2a56388a92bc93e964986f90568d5e-gems-1".to_string(),
+                // runtime-only/2: native extensions see the C runtime alone;
+                // native none: the plan names no native library set.
+                "b20b2d01edb86ced8eb3b8d0a56c07a51a07a2d6-gems-1".to_string(),
             )
         );
     }
@@ -1521,10 +1706,78 @@ mod tests {
     #[test]
     fn linux_gem_identity_names_the_runtime_only_view() {
         let plan = linux_test_plan();
-        let linux = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan);
-        assert_eq!(linux.inputs["build_view"], "runtime-only/1");
-        let darwin = ruby_gems_identity(&pin_spec(Platform::Aarch64AppleDarwin), &plan);
+        let linux = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan, None);
+        assert_eq!(linux.inputs["build_view"], "runtime-only/2");
+        let darwin = ruby_gems_identity(&pin_spec(Platform::Aarch64AppleDarwin), &plan, None);
         assert!(!darwin.inputs.contains_key("build_view"), "{darwin:?}");
+    }
+
+    /// A Linux gems identity spells out its native decision, names the
+    /// native library set exactly when it says so, and a macOS one names
+    /// neither (#329).
+    #[test]
+    fn the_native_decision_and_the_library_set_agree() {
+        let plan = linux_test_plan();
+        let linux = pin_spec(Platform::X86_64UnknownLinuxGnu);
+        let set = format!("{}-libset-3", "c".repeat(40));
+        let none = ruby_gems_identity(&linux, &plan, None);
+        let mounted = ruby_gems_identity(&linux, &plan, Some(&set));
+        assert_eq!(none.inputs["native"], native_libs::NATIVE_NONE);
+        assert_eq!(mounted.inputs["native"], native_libs::NATIVE_LIBS_MOUNTED);
+        assert_eq!(mounted.inputs["native_libs"], set);
+        assert_ne!(none.object_id(), mounted.object_id());
+        let grammar = crate::kernel::objmeta::check_identity_grammar;
+        assert_eq!(grammar(&none), Ok(()));
+        assert_eq!(grammar(&mounted), Ok(()));
+        let mut dropped = mounted.clone();
+        dropped.inputs.remove("native_libs");
+        assert!(grammar(&dropped).unwrap_err().contains("native decision"));
+        let mut no_decision = none.clone();
+        no_decision.inputs.remove("native");
+        assert!(grammar(&no_decision).is_err());
+        let mut empty = mounted.clone();
+        empty.inputs.retain(|key, _| !key.starts_with("gem:"));
+        empty.version = "0".into();
+        assert!(grammar(&empty).unwrap_err().contains("requires a gem:"));
+        let darwin_spec = pin_spec(Platform::Aarch64AppleDarwin);
+        let darwin = ruby_gems_identity(&darwin_spec, &plan, Some(&set));
+        assert!(!darwin.inputs.contains_key("native"), "{darwin:?}");
+        assert!(!darwin.inputs.contains_key("native_libs"), "{darwin:?}");
+        let mut foreign = darwin.clone();
+        foreign
+            .inputs
+            .insert("native".into(), native_libs::NATIVE_NONE.into());
+        assert!(grammar(&foreign).unwrap_err().contains("Linux-only"));
+    }
+
+    /// Native classifications kept in the store answer for a plan only
+    /// when every gem has one.
+    #[test]
+    fn a_plan_is_classified_only_when_every_gem_is() {
+        let temp = TempDir::named("ruby-native-records");
+        let root = temp.0.join("store");
+        for sub in ["objects", "meta", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store::for_test(root.canonicalize().unwrap());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let mut plan = linux_test_plan();
+        let mut second = plan.gems[0].clone();
+        second.sha256 = "b".repeat(64);
+        plan.gems.push(second);
+        let persisted =
+            |plan: &RubyPlan| native_libs::persisted_classification(&store, plan).unwrap();
+        assert_eq!(persisted(&plan), None);
+        native_libs::record_classification(&store, &activity, &plan.gems[0].sha256, false);
+        assert_eq!(persisted(&plan), None);
+        native_libs::record_classification(&store, &activity, &plan.gems[1].sha256, true);
+        assert_eq!(persisted(&plan), Some(true));
+        assert_eq!(
+            native_libs::identity_id(&store, Platform::Aarch64AppleDarwin, true).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1604,7 +1857,7 @@ mod tests {
                 digest_from_api: false,
             }],
         };
-        let identity = ruby_gems_identity(&spec, &plan);
+        let identity = ruby_gems_identity(&spec, &plan, None);
         assert_eq!(
             identity.object_id(),
             "c017bc4da37483c7d35d1997df4c541d35e4a751-gems-1"
@@ -1698,8 +1951,8 @@ mod tests {
             );
             let plan = linux_test_plan();
             assert_eq!(
-                ruby_gems_identity(&from_lock, &plan).object_id(),
-                ruby_gems_identity(&from_pin, &plan).object_id()
+                ruby_gems_identity(&from_lock, &plan, None).object_id(),
+                ruby_gems_identity(&from_pin, &plan, None).object_id()
             );
         }
     }

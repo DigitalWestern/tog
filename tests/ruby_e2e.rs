@@ -177,8 +177,9 @@ fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) {
 /// glibc sonames the portable bottle, and a gem extension built against the
 /// host C runtime alone, may legitimately need from the host. Nothing else:
 /// the gem sandbox hides every other host library (`HostView::RuntimeOnly`),
-/// so nokogiri's vendored libxml2 finds neither zlib nor liblzma and links
-/// glibc only, on every host (issue #304).
+/// so nokogiri's vendored libxml2 finds neither the host's zlib nor its
+/// liblzma, on every host (issue #304); what it links beyond glibc comes from
+/// tog's native library set (#329).
 fn is_glibc_soname(soname: &str) -> bool {
     [
         "libc.so",
@@ -198,6 +199,26 @@ fn is_glibc_soname(soname: &str) -> bool {
 /// historical provenance (the bottle retains its Homebrew build RUNPATH but
 /// nothing NEEDED lives there). `ldd` then proves what actually resolves.
 fn assert_elf_resolves_from_system(elf: &Path, staging: &Path) {
+    assert_elf_resolves_from(elf, staging, None);
+}
+
+/// `assert_elf_resolves_from_system`, except that a NEEDED library `ldd`
+/// resolves inside `libset`, tog's pinned native library set, is allowed:
+/// a native gem builds with the set mounted and links it through its
+/// RUNPATH (#329).
+fn assert_elf_resolves_from(elf: &Path, staging: &Path, libset: Option<&Path>) {
+    let ldd = tool("ldd", &[], elf);
+    let from_set = |soname: &str| {
+        libset.is_some_and(|set| {
+            ldd.lines().any(|line| {
+                let mut parts = line.trim().split(" => ");
+                parts.next() == Some(soname)
+                    && parts.next().is_some_and(|path| {
+                        Path::new(path.split(' ').next().unwrap()).starts_with(set)
+                    })
+            })
+        })
+    };
     let dynamic = tool("readelf", &["-dW"], elf);
     for line in dynamic.lines() {
         if line.contains("(NEEDED)") {
@@ -208,15 +229,14 @@ fn assert_elf_resolves_from_system(elf: &Path, staging: &Path) {
                 .trim_end_matches(']')
                 .trim();
             assert!(
-                is_glibc_soname(soname),
-                "{} NEEDS a non-glibc library {soname}",
+                is_glibc_soname(soname) || from_set(soname),
+                "{} NEEDS a non-glibc library {soname} from outside the native library set:\n{ldd}",
                 elf.display()
             );
         } else if line.contains("(RUNPATH)") || line.contains("(RPATH)") {
             eprintln!("{}: historical {}", elf.display(), line.trim());
         }
     }
-    let ldd = tool("ldd", &[], elf);
     assert!(
         !ldd.contains("not found"),
         "{} has unresolved libraries:\n{ldd}",
@@ -539,7 +559,7 @@ fn ruby_sync_native_ext_and_run() {
         );
         assert_eq!(
             inputs["build_view"].as_str(),
-            Some("runtime-only/1"),
+            Some("runtime-only/2"),
             "{inputs:?}"
         );
         // Every native gem here (racc, nokogiri) builds against the host C
@@ -704,7 +724,10 @@ puts JSON.generate("native" => File.realpath(native), "value" => value,
             "nokogiri loaded outside the committed gem object: {native}"
         );
         assert_no_forbidden_prefix(native, &staging, "nokogiri native library");
-        assert_elf_resolves_from_system(Path::new(native), &staging);
+        // Its vendored libxml2 may link zlib or liblzma from the native
+        // library set the build mounted; nothing from the host.
+        let libset = find_object(&store, "native-libs").map(|(set, _)| set.canonicalize().unwrap());
+        assert_elf_resolves_from(Path::new(native), &staging, libset.as_deref());
     }
     // Without its lock the project is refused under --frozen and left
     // alone; a plan regenerates the lock with the store bundler.
@@ -712,9 +735,8 @@ puts JSON.generate("native" => File.realpath(native), "value" => value,
 }
 
 /// Linux project whose only gem is the source `zlib` gem. Its extension
-/// needs the host's `zlib.h` and `libz.so`, which the C-runtime-only view
-/// hides, and it bundles no zlib source of its own, so its hermetic build
-/// fails and it falls back to the whole host.
+/// needs `zlib.h` and `libz.so`, which the C-runtime-only view hides, and it
+/// bundles no zlib source of its own.
 fn zlib_project_files(project: &Path) {
     std::fs::write(
         project.join("Gemfile"),
@@ -744,29 +766,20 @@ BUNDLED WITH
     .unwrap();
 }
 
-/// A gem that needs host development packages still installs: it falls
-/// back to the whole host, the object is committed under its own
-/// `host-fallback/1` identity with a `host-build-inputs` exception naming
-/// the gem, and the next sync on the unchanged host finds that object
-/// through the store record instead of building again (issue #304).
+/// A gem that needs a library tog pins builds against tog's native library
+/// set, never the host's: the C-runtime-only view hides the host's zlib,
+/// the set's is mounted, and the extension's RUNPATH names the set, so it
+/// loads the store's libz at run time (issue #329). Nothing falls back to
+/// the whole host. The next sync finds the object from the store alone:
+/// with the `.gem` gone from the artifact cache and the network cut, a
+/// rebuild could not even start, and the gem's native classification,
+/// recorded on the first sync, names the set without the gemspec.
 #[test]
 #[ignore]
 #[cfg(target_os = "linux")]
-fn ruby_gem_needing_host_headers_falls_back_once() {
-    if !Path::new("/usr/include/zlib.h").is_file() {
-        // `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the skip
-        // into a failure, so CI cannot report a skipped check as passed.
-        let required =
-            matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty());
-        assert!(
-            !required,
-            "required host-fallback test needs /usr/include/zlib.h (the zlib development package)"
-        );
-        eprintln!("skipped: this host has no /usr/include/zlib.h (zlib development package)");
-        return;
-    }
+fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
     const ZLIB_SHA256: &str = "5bd316698b32f31a64ab910a8b6c282442ca1626a81bbd6a1674e8522e319c20";
-    let temp = TempDir::new("ruby-e2e-fallback");
+    let temp = TempDir::new("ruby-e2e-native-libs");
     let project = temp.0.join("ruby-zlib");
     std::fs::create_dir_all(&project).unwrap();
     zlib_project_files(&project);
@@ -783,19 +796,14 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
     );
     assert_eq!(
         inputs["build_view"].as_str(),
-        Some("host-fallback/1"),
+        Some("runtime-only/2"),
         "{inputs:?}"
     );
+    assert_eq!(inputs["native"].as_str(), Some("native-libs"), "{inputs:?}");
+    let (libset, _) = find_object(&store, "native-libs").expect("native library set realized");
     assert_eq!(
-        inputs["host_fallback"].as_str(),
-        Some("zlib-3.2.3"),
-        "{inputs:?}"
-    );
-    // Keyed by this host's build inputs too (`hostview::host_build_inputs`).
-    assert!(
-        inputs["host_inputs"]
-            .as_str()
-            .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())),
+        inputs["native_libs"].as_str(),
+        libset.file_name().unwrap().to_str(),
         "{inputs:?}"
     );
     let exceptions = gems_meta["exceptions"]
@@ -803,33 +811,37 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        exceptions
+        !exceptions
             .iter()
-            .any(|exception| exception["kind"] == "host-build-inputs"
-                && exception["subject"] == "zlib-3.2.3"),
-        "no host-build-inputs exception for zlib-3.2.3: {exceptions:?}"
+            .any(|exception| exception["kind"] == "host-build-inputs"),
+        "zlib was rebuilt against the whole host: {exceptions:?}"
     );
-    // The extension was built against the host's libz.
+    // The extension links libz and finds it in the set.
     let mut extensions = Vec::new();
     collect_files(&gems_obj.join("extensions"), "/zlib.so", &mut extensions);
     assert_eq!(extensions.len(), 1, "{extensions:?}");
     let dynamic = tool("readelf", &["-dW"], &extensions[0]);
     assert!(dynamic.contains("[libz.so.1]"), "{dynamic}");
-    let records = store.join("records/ruby-gems-host-fallback");
-    assert_eq!(
-        std::fs::read_dir(&records).unwrap().count(),
-        1,
-        "the fallback was not recorded"
+    let libset = libset.canonicalize().unwrap();
+    let lib = libset.join("lib");
+    assert!(
+        dynamic.contains(&lib.display().to_string()),
+        "the extension's RUNPATH does not name the set's lib ({}): {dynamic}",
+        lib.display()
     );
-
-    // The next sync reaches the fallback object through the record, never
-    // by building again: with the `.gem` gone from the artifact cache and
-    // the network cut, a rebuild could not even start.
+    // And the loader resolves libz there, not from the host.
+    assert_elf_resolves_from(&extensions[0], &store.join("tmp"), Some(&libset));
     let closure = |project: &Path| -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
             .unwrap()
     };
     let before = closure(&project);
+    assert_eq!(
+        before["body"]["native_libs"]["id"].as_str(),
+        libset.file_name().unwrap().to_str(),
+        "the closure does not keep the set live: {before}"
+    );
+
     let cached = store.join("cache/sha256").join(ZLIB_SHA256);
     assert!(cached.exists(), "the zlib gem is not in the artifact cache");
     tog::kernel::store::remove_tree(&cached)
@@ -837,7 +849,7 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
         .unwrap();
     let second = assert_ok(
         tog_offline(&project, &temp.0, &["sync"]),
-        "offline re-sync over the fallback object",
+        "offline re-sync over the native-libs object",
     );
     eprintln!("second sync: {second}");
     let after = closure(&project);

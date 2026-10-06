@@ -50,6 +50,24 @@ pub struct ClosureListing {
     pub packages: Vec<PackageRow>,
 }
 
+/// A project script `tog run` executes step by step, from
+/// [`Tailor::projected_script`]: a package.json script with its `pre` and
+/// `post` hooks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptRun {
+    /// (label, shell text) per step, in the order they run.
+    pub steps: Vec<(String, String)>,
+    /// Variables with this prefix, inherited or set by a projection, are
+    /// removed from every step before `env` is applied.
+    pub scrubbed_prefix: &'static str,
+    /// The variable that carries each step's label, when there is one.
+    pub step_label_var: Option<&'static str>,
+    /// Variables every step gets.
+    pub env: Vec<(String, std::ffi::OsString)>,
+    /// How an error names a step ("npm script").
+    pub noun: &'static str,
+}
+
 /// What a sync asks of one tailor: the flags that change how it works
 /// and the toolchain it must use. Under `--frozen` the caller skips
 /// `prepare`, so the tailor syncs from the committed lock.
@@ -198,10 +216,12 @@ pub trait Tailor: Sync {
     fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()>;
 
     /// Host-side preparation that must precede planning for one ecosystem:
-    /// missing-lock generation with the ecosystem's own tool, the one place
-    /// a tailor writes project inputs. Runs for detected ecosystems only,
-    /// before that ecosystem plans, and never under `--frozen`; a plan that
-    /// then finds no lock refuses with [`missing_lock`].
+    /// missing-lock generation with the ecosystem's own tool. Every tailor
+    /// but Python implements it. Python compiles its requirements lock
+    /// inside `plan` instead, so this hook is not the only place a tailor
+    /// writes project inputs. Runs for detected ecosystems only, before
+    /// that ecosystem plans, and never under `--frozen`; a plan that then
+    /// finds no lock refuses with [`missing_lock`].
     ///
     /// The tool runs only through `door`, a missing-lock door on the
     /// ecosystem's own scope.
@@ -215,8 +235,10 @@ pub trait Tailor: Sync {
         Ok(())
     }
 
-    /// `tog plan`: the plan as pretty-printed JSON text, without
-    /// realizing anything. `None` when, after `prepare`, there is nothing of
+    /// `tog plan`: the plan as pretty-printed JSON text. Planning realizes
+    /// no dependency environment, but it may fetch the pinned toolchain
+    /// into the store, and Python's writes its requirements lock and stamp
+    /// into the project. `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
     /// A planner that asks the ecosystem's tool (a consistency gate, a lock
@@ -287,8 +309,36 @@ pub trait Tailor: Sync {
     /// up, when it is one of this ecosystem's package-manager verbs that
     /// would write into a projection (`pip install`, `npm install`). The
     /// refusal is the same in every project, so it needs no projection.
+    /// A refusal that depends on the project belongs in `run_env` instead:
+    /// .NET refuses `dotnet build` there, and only in a project that has
+    /// a .NET closure.
     fn refused_command(&self, _cmd: &[String]) -> Option<String> {
         None
+    }
+
+    /// The steps of the project script `name` at `root`, read straight from
+    /// the project's inputs before any sync: `None` when this ecosystem has
+    /// no such script there. `tog <script>` and `tog fmt` ask this to
+    /// decide whether a word is a script.
+    fn project_script(
+        &self,
+        _root: &Path,
+        _name: &str,
+        _args: &[String],
+    ) -> io::Result<Option<Vec<(String, String)>>> {
+        Ok(None)
+    }
+
+    /// `tog run`: the script `cmd` names in this ecosystem's projection
+    /// under `dir`, run from `cwd`. `None` when `cmd` is not one, and
+    /// `tog run` spawns it as a program instead.
+    fn projected_script(
+        &self,
+        _dir: &Path,
+        _cwd: &Path,
+        _cmd: &[String],
+    ) -> io::Result<Option<ScriptRun>> {
+        Ok(None)
     }
 
     /// `tog run`: why a package.json script may not run in `dir`, when this
@@ -733,20 +783,27 @@ pub fn install_kinds() {
 
 /// The tailors whose inputs are present in `dir`, in registry order.
 pub fn detected(dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
-    // A directory that is not there, or not a directory, has nothing to
-    // detect. One tog may not read is an error naming the path: an empty
-    // detection would report "no project here" for a project that exists.
     let project = match ProjectRoot::open(dir) {
         Ok(project) => project,
-        Err(error)
-            if error.kind() == io::ErrorKind::NotFound
-                || error.kind() == io::ErrorKind::InvalidData =>
-        {
-            return Ok(Vec::new())
-        }
+        Err(error) if nothing_to_detect(dir, &error) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
     detected_in(&project)
+}
+
+/// Whether `error`, from opening `dir`, means there is no project there: the
+/// path is missing, or it names something that is not a directory. Any
+/// other failure is an error naming the path, since an empty detection
+/// would report "no project here" for a project that exists. That includes
+/// the refusal `ProjectRoot::open` gives when a directory on the path was
+/// swapped for a symlink while it walked: it shares `InvalidData` with the
+/// not-a-directory case, so the path itself is looked at to tell them apart.
+fn nothing_to_detect(dir: &Path, error: &io::Error) -> bool {
+    match error.kind() {
+        io::ErrorKind::NotFound => true,
+        io::ErrorKind::InvalidData => std::fs::metadata(dir).is_ok_and(|meta| !meta.is_dir()),
+        _ => false,
+    }
 }
 
 /// `detected` for a project the caller already holds: sync detects through
@@ -826,6 +883,24 @@ mod tests {
             std::fs::write(temp.0.join(lock), "").unwrap();
             require_lock(&project).unwrap_or_else(|error| panic!("{tailor}: {error}"));
         }
+    }
+
+    #[test]
+    fn a_file_has_nothing_to_detect_but_a_refused_directory_is_an_error() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let file = temp.0.join("go.mod");
+        std::fs::write(&file, "module example.com/m\n").unwrap();
+        assert!(detected(&file).unwrap().is_empty());
+        // The refusal a symlink swapped in mid-walk gives, for a path that
+        // is a directory when looked at: that is no "nothing here".
+        let refusal = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "x is not a real directory; refusing to open project through it",
+        );
+        assert!(!nothing_to_detect(&temp.0, &refusal));
+        assert!(nothing_to_detect(&file, &refusal));
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert!(nothing_to_detect(&temp.0.join("absent"), &missing));
     }
 
     #[test]

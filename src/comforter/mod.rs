@@ -257,7 +257,7 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     // The first durable step of a projection switch: a toolchain source
     // that moved during planning is caught here, before a user directory
     // is moved or a visible link replaced, and again by the closure writer.
-    toolchain::recheck_before_publication()?;
+    toolchain::recheck_before_publication(project)?;
     project.check_still_named()?;
     // Registration imports the closures the project already has. A `.tog`
     // that is a symlink, or anything but a real directory, is refused here,
@@ -315,7 +315,7 @@ fn write_closure_inner(
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
     // them before anything of this sync becomes visible.
-    toolchain::recheck_before_publication()?;
+    toolchain::recheck_before_publication(project)?;
     if !body.is_object() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -361,9 +361,17 @@ fn write_closure_inner(
     // later write step fails, the claimed exceptions are gone with the frame;
     // the token is marked published only after the write completes.
     let pending = attribution.claim(ecosystem)?;
-    body.as_object_mut()
-        .expect("validated closure body object")
-        .insert("exceptions".into(), serde_json::to_value(&pending)?);
+    let skipped = attribution.take_optional_groups_skipped()?;
+    let fields = body.as_object_mut().expect("validated closure body object");
+    fields.insert("exceptions".into(), serde_json::to_value(&pending)?);
+    // Informational, beside the exceptions rather than among them: what the
+    // user chose not to install (#71). Absent when there is none.
+    if !skipped.is_empty() {
+        fields.insert(
+            "optional_groups_skipped".into(),
+            serde_json::to_value(&skipped)?,
+        );
+    }
     // Envelope-level platform: a project synced on
     // a Mac and then on a Linux box carries two different closures over
     // time; readers must not assume the body's object ids are valid for
@@ -1596,7 +1604,10 @@ mod tests {
         let key = std::sync::Arc::new(SigningKey::load(&key_path).unwrap());
         set_signing_key_for_test(Some(key));
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        crate::kernel::policy::record("skipped-optional", "dev", "not requested").unwrap();
+        crate::kernel::policy::record("weak-integrity", "dev", "sha1 accepted").unwrap();
+        crate::kernel::policy::skip_optional("docs", "extra, not requested", Some("sphinx"))
+            .unwrap();
+        crate::kernel::policy::skip_optional("docs", "extra, not requested", Some("furo")).unwrap();
         let written = publish_test_closure(project, "python", &store, &mut attribution);
         set_signing_key_for_test(None);
         written.unwrap();
@@ -1610,13 +1621,26 @@ mod tests {
             crate::kernel::signing::Verification::Valid(public)
         );
         assert_eq!(closure["signature"]["key"], public.hex());
-        assert_eq!(closure["body"]["exceptions"][0]["kind"], "skipped-optional");
-        let mut edited = closure.clone();
-        edited["body"]["exceptions"] = serde_json::json!([]);
-        assert!(matches!(
-            crate::kernel::signing::verify(&edited),
-            crate::kernel::signing::Verification::Bad { .. }
-        ));
+        assert_eq!(closure["body"]["exceptions"][0]["kind"], "weak-integrity");
+        // An unrequested group is listed beside the exceptions, never among
+        // them, one entry per group (#71).
+        assert_eq!(closure["body"]["exceptions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            closure["body"]["optional_groups_skipped"],
+            serde_json::json!([{
+                "group": "docs",
+                "detail": "extra, not requested",
+                "requirements": ["sphinx", "furo"],
+            }])
+        );
+        for field in ["exceptions", "optional_groups_skipped"] {
+            let mut edited = closure.clone();
+            edited["body"][field] = serde_json::json!([]);
+            assert!(matches!(
+                crate::kernel::signing::verify(&edited),
+                crate::kernel::signing::Verification::Bad { .. }
+            ));
+        }
         // `read_closure` accepts the signed record unchanged.
         assert_eq!(
             super::read_closure(project, "python").unwrap()["exceptions"][0]["subject"],

@@ -8,6 +8,7 @@ pub mod objects;
 pub mod resolve;
 pub mod rustfmt;
 pub mod tailor;
+mod unpack;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
@@ -384,7 +385,7 @@ pub fn build_sandboxed(
         path: format!("{}:/usr/bin:/bin", rust_obj.join("bin").display()),
         host_view: crate::kernel::sandbox::HostView::Full,
     };
-    let result = crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, activity);
+    let result = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity));
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
         io::Error::new(e.kind(), format!(

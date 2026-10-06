@@ -6,149 +6,44 @@
 
 use super::*;
 
-pub(super) const RUNTIME_ONLY_VIEW: &str = "runtime-only/1";
-const HOST_FALLBACK_VIEW: &str = "host-fallback/1";
+use crate::kernel::hostfallback::{self, FallbackRecords};
 
-/// The store record kind naming, for a runtime-only gems identity built
-/// on a host in a given state, the gems that fell back to the whole host.
-const HOST_FALLBACK_RECORDS: &str = "ruby-gems-host-fallback";
+pub(super) use crate::kernel::hostfallback::{same_host_state, RUNTIME_ONLY_VIEW};
 
-/// A gem's build against the whole host ran while the host's build inputs
-/// changed (the fingerprints taken before and after it differ), or two
-/// gems of one object fell back against different host states. Nothing
-/// built in that sync can be keyed by one host state, so it fails.
-#[derive(Debug)]
-pub(super) struct HostChanged(pub(super) String);
-
-impl std::fmt::Display for HostChanged {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "host development files changed during the build of {}; re-run tog",
-            self.0
-        )
-    }
-}
-
-impl std::error::Error for HostChanged {}
-
-/// The one host state every fallback of a gems object was built against:
-/// the first fallback's fingerprint, which each later one must equal.
-pub(super) fn same_host_state(
-    first: &mut Option<String>,
-    gem: &str,
-    fingerprint: String,
-) -> io::Result<()> {
-    match first {
-        None => *first = Some(fingerprint),
-        Some(first) if *first != fingerprint => {
-            return Err(io::Error::other(HostChanged(gem.to_string())))
-        }
-        Some(_) => {}
-    }
-    Ok(())
-}
+/// Where a runtime-only gems identity, built on a host in a given state,
+/// records the gems that fell back to the whole host.
+const HOST_FALLBACK_RECORDS: FallbackRecords = FallbackRecords {
+    kind: "ruby-gems-host-fallback",
+    names: |identity, name| identity.inputs.contains_key(&format!("gem:{name}")),
+    what: "gems",
+};
 
 /// The identity a gems object is committed under when `fell_back` gems
-/// were rebuilt against the whole host: the runtime-only identity, with
-/// the view renamed, the fallen-back gems listed, and the fingerprint of
-/// the host state they were built against (`host_inputs`). Two hosts, or
-/// one host before and after a development package changed, get
-/// different ids; the object never answers for the runtime-only identity.
+/// were rebuilt against the whole host (`hostfallback::fallback_identity`).
 pub(super) fn ruby_gems_fallback_identity(
     runtime_only: &Identity,
     fell_back: &[String],
     host_inputs: &str,
 ) -> Identity {
-    let mut identity = runtime_only.clone();
-    identity
-        .inputs
-        .insert("build_view".to_string(), HOST_FALLBACK_VIEW.to_string());
-    identity
-        .inputs
-        .insert("host_fallback".to_string(), sorted(fell_back).join(","));
-    identity
-        .inputs
-        .insert("host_inputs".to_string(), host_inputs.to_string());
-    identity
+    hostfallback::fallback_identity(runtime_only, fell_back, host_inputs)
 }
 
-fn sorted(names: &[String]) -> Vec<String> {
-    let mut names = names.to_vec();
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// A fallback record's key: the runtime-only id and the host fingerprint,
-/// so a host in another state finds no record and builds.
-fn record_key(runtime_only: &Identity, host_inputs: &str) -> String {
-    serde_json::json!([runtime_only.object_id(), host_inputs]).to_string()
-}
-
-/// The gems a previous build of `runtime_only`, on a host whose build
-/// inputs had this fingerprint, rebuilt against the whole host, as its
-/// store record says. A record that names a gem outside the plan, or no
-/// gem, is ignored.
-fn recorded_host_fallback(
-    store: &Store,
-    runtime_only: &Identity,
-    host_inputs: &str,
-) -> io::Result<Option<Vec<String>>> {
-    let key = record_key(runtime_only, host_inputs);
-    let Some(value) = store.read_record(HOST_FALLBACK_RECORDS, &key)? else {
-        return Ok(None);
-    };
-    let names: Option<Vec<String>> = value["host_fallback"].as_array().and_then(|names| {
-        names
-            .iter()
-            .map(|name| name.as_str().map(str::to_string))
-            .collect()
-    });
-    Ok(names.filter(|names| {
-        !names.is_empty()
-            && names
-                .iter()
-                .all(|name| runtime_only.inputs.contains_key(&format!("gem:{name}")))
-    }))
-}
-
-/// The gems object already in the store for `identity`: the runtime-only
-/// object itself, or, when a build of it on a host in this host's state
-/// fell back, the host-fallback object that build committed. Rebuilding
-/// would only fall back again against the same host inputs, so the record
-/// stands in for the attempt. `fingerprint` (`hostview::host_build_inputs`
-/// in production) is taken only past the first check, so a runtime-only
-/// hit never pays for it, and it serves this lookup only: a build keys its
-/// object by the fingerprints taken around its own fallbacks.
+/// The gems object already in the store for `identity`, the runtime-only
+/// one or the host-fallback one a recorded fallback points at
+/// (`FallbackRecords::cached_object`).
 pub(super) fn cached_gems_object(
     store: &Store,
     activity: &StoreActivity,
     identity: &Identity,
     fingerprint: impl FnOnce() -> io::Result<String>,
 ) -> io::Result<Option<String>> {
-    let id = identity.object_id();
-    if store.has_with_activity(activity, &id)? {
-        return Ok(Some(id));
-    }
-    if identity.inputs.get("build_view").map(String::as_str) != Some(RUNTIME_ONLY_VIEW) {
-        return Ok(None);
-    }
-    let host_inputs = fingerprint()?;
-    let Some(fell_back) = recorded_host_fallback(store, identity, &host_inputs)? else {
-        return Ok(None);
-    };
-    let fallback = ruby_gems_fallback_identity(identity, &fell_back, &host_inputs).object_id();
-    Ok(store
-        .has_with_activity(activity, &fallback)?
-        .then_some(fallback))
+    Ok(HOST_FALLBACK_RECORDS
+        .cached_object(store, activity, identity, fingerprint)?
+        .map(|cached| cached.id))
 }
 
-/// Record which gems of `runtime_only` fell back against these host
-/// inputs, so the next sync over the same store on a host in the same
-/// state finds the host-fallback object instead of building again. A
-/// failed write costs that sync a rebuild and nothing else, so it is
-/// reported and the sync goes on.
+/// Record which gems of `runtime_only` fell back against these host inputs
+/// (`FallbackRecords::record`).
 pub(super) fn record_host_fallback(
     store: &Store,
     activity: &StoreActivity,
@@ -156,14 +51,7 @@ pub(super) fn record_host_fallback(
     host_inputs: &str,
     fell_back: &[String],
 ) {
-    let value = serde_json::json!({ "host_fallback": sorted(fell_back) });
-    let key = record_key(runtime_only, host_inputs);
-    if let Err(error) = store.write_record(activity, HOST_FALLBACK_RECORDS, &key, &value) {
-        ui::note(&format!(
-            "gems built against the whole host were not recorded in the store ({error}); \
-             the next sync builds them again"
-        ));
-    }
+    HOST_FALLBACK_RECORDS.record(store, activity, runtime_only, host_inputs, fell_back);
 }
 
 /// Where the gems of one plan install from and into: the Ruby object, the
@@ -176,6 +64,9 @@ pub(super) struct GemInstall<'a> {
     pub(super) helper: &'a Path,
     pub(super) scratch: &'a Path,
     pub(super) staged: &'a Path,
+    /// tog's native library set, which native gems build with
+    /// (`native_libs`).
+    pub(super) native_libs: Option<&'a Path>,
 }
 
 impl GemInstall<'_> {
@@ -194,29 +85,49 @@ impl GemInstall<'_> {
         let (platform, ruby_obj, scratch, staged) =
             (self.platform, self.ruby_obj, self.scratch, self.staged);
         let mut homes = AttemptHomes::new(scratch, &gem.full_name);
+        // Only a native gem compiles anything, so only its build gets the
+        // native library set.
+        let native_libs = self.native_libs.filter(|_| native);
         let install = |host_view: HostView| {
             let home = homes.next()?;
+            let mut argv = vec![
+                ruby_obj.join("bin/ruby").display().to_string(),
+                self.helper.display().to_string(),
+                "install".to_string(),
+                named.display().to_string(),
+                staged.display().to_string(),
+            ];
+            let mut env = vec![
+                ("GEM_HOME".to_string(), staged.display().to_string()),
+                ("GEM_PATH".to_string(), staged.display().to_string()),
+                ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
+            ];
+            let mut read = vec![ruby_obj.to_path_buf(), scratch.to_path_buf()];
+            if let Some(set) = native_libs {
+                argv.push(set.display().to_string());
+                env.extend(super::native_libs::build_env(set, host_view));
+                read.push(set.to_path_buf());
+            }
             let spec = BuildSpec {
-                argv: vec![
-                    ruby_obj.join("bin/ruby").display().to_string(),
-                    self.helper.display().to_string(),
-                    "install".to_string(),
-                    named.display().to_string(),
-                    staged.display().to_string(),
-                ],
+                argv,
                 cwd: home.clone(),
-                env: vec![
-                    ("GEM_HOME".to_string(), staged.display().to_string()),
-                    ("GEM_PATH".to_string(), staged.display().to_string()),
-                    ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
-                ],
-                read: vec![ruby_obj.to_path_buf(), scratch.to_path_buf()],
+                env,
+                read,
                 write: vec![staged.to_path_buf()],
                 scratch: home,
-                path: format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+                // The set's own tools (`xml2-config`, `curl-config`) follow
+                // the store Ruby.
+                path: match native_libs {
+                    Some(set) => format!(
+                        "{}:{}:/usr/bin:/bin",
+                        ruby_obj.join("bin").display(),
+                        set.join("bin").display()
+                    ),
+                    None => format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+                },
                 host_view,
             };
-            crate::kernel::sandbox::run_build_spec_on_with_activity(platform, &spec, self.activity)
+            crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(self.activity))
         };
         // What the GEM_HOME held before a hermetic attempt, so a failed one
         // can be undone before the retry (see `gem_home`).
@@ -230,10 +141,10 @@ impl GemInstall<'_> {
             record: crate::kernel::policy::record,
             discard,
             fingerprint: crate::kernel::hostview::host_build_inputs,
-            install,
+            build: install,
         };
         install_gem(platform, native, &gem.full_name, attempt).map_err(|e| {
-            if e.get_ref().is_some_and(|inner| inner.is::<HostChanged>()) {
+            if hostfallback::is_host_changed(&e) {
                 return e;
             }
             io::Error::new(
@@ -292,17 +203,7 @@ impl<'a> AttemptHomes<'a> {
     }
 }
 
-/// One gem's install as `install_gem` drives it: `record` records an
-/// exception, `discard` undoes what a failed hermetic attempt left in the
-/// GEM_HOME (or refuses), `fingerprint` takes the host build inputs
-/// fingerprint (`hostview::host_build_inputs`), and `install` runs one
-/// attempt with a view.
-struct Attempt<R, D, F, I> {
-    record: R,
-    discard: D,
-    fingerprint: F,
-    install: I,
-}
+use crate::kernel::hostfallback::Attempt;
 
 /// Install one gem with the host view its build needs, and say whether it
 /// fell back to the whole host. A gem whose gemspec declares native
@@ -327,7 +228,7 @@ where
     if native && !platform.is_macos() {
         install_hermetic_first(gem, attempt)
     } else {
-        (attempt.install)(HostView::Full).map(|()| None)
+        (attempt.build)(HostView::Full).map(|()| None)
     }
 }
 
@@ -337,26 +238,13 @@ const HOST_BUILD_INPUTS_DETAIL: &str = "native extension did not build against t
      depends on which -dev packages the host has";
 
 /// Install one gem against the host's C runtime alone, and only if that
-/// build fails, against the whole host. The
-/// fallback is an exception, and it is recorded before the second attempt
-/// runs, so a policy that denies `host-build-inputs` stops here with
-/// nothing built against the host.
-///
-/// A sandbox that could not be set up, or a run tog was asked to stop,
-/// says nothing about the gem and is returned as is.
-///
+/// build fails, against the whole host (`hostfallback::hermetic_first`).
 /// Before the retry, `discard` removes what the failed attempt left in the
 /// shared GEM_HOME and refuses when the attempt changed anything beyond
-/// RubyGems' own leftovers for this gem (`gem_home::discard_failed_attempt`);
-/// a refusal records nothing.
-///
-/// The host build inputs are fingerprinted immediately before the retry
-/// and again right after it. The fallback returns that fingerprint, the
-/// host state the object was actually built against; when the two differ
-/// the host changed under the build and it fails (`HostChanged`).
+/// RubyGems' own leftovers for this gem (`gem_home::discard_failed_attempt`).
 fn install_hermetic_first<R, D, F, I>(
     gem: &str,
-    mut attempt: Attempt<R, D, F, I>,
+    attempt: Attempt<R, D, F, I>,
 ) -> io::Result<Option<String>>
 where
     R: FnOnce(&str, &str, &str) -> io::Result<()>,
@@ -364,43 +252,7 @@ where
     F: FnMut() -> io::Result<String>,
     I: FnMut(HostView) -> io::Result<()>,
 {
-    let hermetic = match (attempt.install)(HostView::RuntimeOnly) {
-        Ok(()) => return Ok(None),
-        Err(error) => error,
-    };
-    if matches!(
-        hermetic.kind(),
-        io::ErrorKind::Unsupported | io::ErrorKind::Interrupted
-    ) {
-        return Err(hermetic);
-    }
-    let attempts = format!("the build against the C runtime alone failed ({hermetic})");
-    let prepared = (attempt.discard)().and_then(|()| {
-        let before = (attempt.fingerprint)()?;
-        (attempt.record)(
-            crate::kernel::policy::HOST_BUILD_INPUTS,
-            gem,
-            HOST_BUILD_INPUTS_DETAIL,
-        )?;
-        Ok(before)
-    });
-    let before = prepared.map_err(|refusal| {
-        io::Error::new(
-            refusal.kind(),
-            format!("{attempts}, and it was not retried against the whole host: {refusal}"),
-        )
-    })?;
-    (attempt.install)(HostView::Full).map_err(|full| {
-        io::Error::new(
-            full.kind(),
-            format!("{attempts}, and so did the build against this machine's whole /usr ({full})"),
-        )
-    })?;
-    let after = (attempt.fingerprint)()?;
-    if after != before {
-        return Err(io::Error::other(HostChanged(gem.to_string())));
-    }
-    Ok(Some(after))
+    hostfallback::hermetic_first(gem, HOST_BUILD_INPUTS_DETAIL, attempt)
 }
 
 #[cfg(test)]
@@ -468,7 +320,7 @@ mod tests {
                         .pop()
                         .expect("a fingerprint the test did not script"))
                 },
-                install: |view| {
+                build: |view| {
                     views.push(view);
                     results.pop().expect("an attempt the test did not script")
                 },
@@ -542,7 +394,8 @@ mod tests {
         second.version = "1.18.10".into();
         second.full_name = "nokogiri-1.18.10".into();
         plan.gems.push(second);
-        let runtime_only = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan);
+        let runtime_only =
+            ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan, None);
         let host = "a".repeat(64);
         let one = ruby_gems_fallback_identity(&runtime_only, &["nokogiri-1.18.10".into()], &host);
         let both = ruby_gems_fallback_identity(
@@ -556,7 +409,7 @@ mod tests {
             &["nokogiri-1.18.10".into()],
             &"b".repeat(64),
         );
-        assert_eq!(one.inputs["build_view"], HOST_FALLBACK_VIEW);
+        assert_eq!(one.inputs["build_view"], hostfallback::HOST_FALLBACK_VIEW);
         assert_eq!(one.inputs["host_fallback"], "nokogiri-1.18.10");
         assert_eq!(one.inputs["host_inputs"], host);
         assert_eq!(both.inputs["host_fallback"], "nokogiri-1.18.10,rake-13.2.1");
@@ -609,6 +462,7 @@ mod tests {
         let runtime_only = ruby_gems_identity(
             &pin_spec(Platform::X86_64UnknownLinuxGnu),
             &linux_test_plan(),
+            None,
         );
         let (host, upgraded) = ("a".repeat(64), "b".repeat(64));
         let fallback = ruby_gems_fallback_identity(&runtime_only, &["rake-13.2.1".into()], &host);
@@ -628,8 +482,8 @@ mod tests {
         store
             .write_record(
                 &activity,
-                HOST_FALLBACK_RECORDS,
-                &record_key(&runtime_only, &host),
+                HOST_FALLBACK_RECORDS.kind,
+                &FallbackRecords::key(&runtime_only, &host),
                 &serde_json::json!({"host_fallback": ["rails-8.0.0"]}),
             )
             .unwrap();
@@ -666,7 +520,7 @@ mod tests {
                 record: |_: &str, _: &str, _: &str| Ok(()),
                 discard: || Ok(()),
                 fingerprint: || Ok(HOST.to_string()),
-                install: |view| {
+                build: |view| {
                     let home = homes.next()?;
                     assert_eq!(fs::read_dir(&home)?.count(), 0, "a home that is not empty");
                     seen.push(home.clone());
@@ -707,7 +561,7 @@ mod tests {
         let error = result.unwrap_err();
         assert!(error
             .get_ref()
-            .is_some_and(|inner| inner.is::<HostChanged>()));
+            .is_some_and(|inner| inner.is::<hostfallback::HostChanged>()));
         assert_eq!(
             error.to_string(),
             "host development files changed during the build of nokogiri-1.18.10; re-run tog"
@@ -786,7 +640,7 @@ mod tests {
                 },
                 discard: || Ok(()),
                 fingerprint: || Ok(HOST.to_string()),
-                install: move |view| {
+                build: move |view| {
                     views.push(view);
                     match view {
                         HostView::RuntimeOnly => failed("lzma.h not found"),

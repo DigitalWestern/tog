@@ -61,12 +61,11 @@ pub(crate) enum TarballUrlRefusal {
 pub(crate) const TARBALL_URL_CREDENTIALS: &str =
     "tarball URL carries credentials (user:pass@ before its host); tog will not record them";
 
-/// A locked URL parsed the way the fetcher parses it (ureq, through the
-/// `url` crate), so the check here and the download there read one URL:
-/// `https:///u:p@host` has credentials to both. `None` when ureq could not
-/// request it at all.
-fn fetcher_url(url: &str) -> Option<ureq::RequestUrl> {
-    ureq::get(url).request_url().ok()
+/// A locked URL parsed the way the fetcher parses it, so the check here and
+/// the download there read one URL: `https:///u:p@host` has credentials to
+/// both. `None` when the fetcher could not request it at all.
+fn fetcher_url(url: &str) -> Option<url::Url> {
+    crate::kernel::fetch::request_url(url)
 }
 
 /// The refusal for a locked tarball URL, if any: tog never fetches from a
@@ -76,7 +75,6 @@ pub(crate) fn tarball_url_refusal(url: &str) -> Option<TarballUrlRefusal> {
     let Some(parsed) = fetcher_url(url) else {
         return Some(TarballUrlRefusal::NotHttps);
     };
-    let parsed = parsed.as_url();
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Some(TarballUrlRefusal::Credentials);
     }
@@ -108,7 +106,7 @@ pub(crate) fn redact_url_userinfo(text: &str) -> String {
             .is_some_and(|(_, rest)| rest.contains('@'));
         return withheld(embedded || url_credentials(text));
     };
-    let mut url = parsed.as_url().clone();
+    let mut url = parsed;
     if url.username().is_empty() && url.password().is_none() {
         return withheld(url_credentials(text));
     }
