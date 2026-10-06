@@ -838,7 +838,7 @@ fn select_with(
 /// The locked row of a path selection, checked before anything is read.
 fn locked_row(platform: Platform, selected: &Selected) -> io::Result<(ArtifactSpec, PathBuf)> {
     let row = selected.artifact(platform, "rustc")?;
-    row.check("cargo", PATH_RECIPE, "sha256")?;
+    row.check_from("cargo", PATH_RECIPE, "sha256", selected.row_source())?;
     let tree = row
         .url
         .strip_prefix(PATH_URL_SCHEME)
@@ -1480,6 +1480,17 @@ mod locked_row_tests {
         assert_eq!(
             refusal(&selected("rust-path/2", "file:///opt/rust", sha256())),
             "cargo: recipe rust-path/2 in tog-toolchain.toml is not known to this tog; upgrade tog"
+        );
+    }
+
+    /// A path selection made now, not read from a lock, says so (#558).
+    #[test]
+    fn a_refused_row_of_a_new_selection_names_the_catalog() {
+        let mut new = selected("rust-path/2", "file:///opt/rust", sha256());
+        new.source = Source::Created;
+        assert_eq!(
+            refusal(&new),
+            "cargo: recipe rust-path/2 in the toolchain catalog is not known to this tog; upgrade tog"
         );
     }
 

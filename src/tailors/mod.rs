@@ -1013,6 +1013,8 @@ mod tests {
             let error = result.map(|found| found.len()).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
             assert!(error.to_string().contains("locked/project"), "{error}");
+        } else {
+            eprintln!("skip the unsearchable-parent case: root searches any directory");
         }
     }
 

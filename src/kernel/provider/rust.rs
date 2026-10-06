@@ -20,7 +20,7 @@ use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::input;
-use crate::kernel::toolchain::{ArtifactSpec, Catalog, Selected, Source};
+use crate::kernel::toolchain::{ArtifactSpec, Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 use std::collections::BTreeMap;
@@ -60,8 +60,7 @@ pub const CHANNEL_MANIFEST_RECIPE: &str = "rust-channel-manifest/1";
 /// still held to every row of the lock before anything is read from it.
 pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
     let (row, source) = match selected.artifact(platform, CHANNEL_MANIFEST) {
-        Ok(row) if selected.source == Source::Lock => (row, "tog-toolchain.toml"),
-        Ok(row) => (row, "the Rust toolchain catalog"),
+        Ok(row) => (row, selected.row_source()),
         Err(_) => {
             let version = selected.version("rustc")?;
             shipped_selection(version)
@@ -266,7 +265,7 @@ pub fn runtime_rows(platform: Platform, selected: &Selected) -> io::Result<Vec<A
         // Checked as `cargo`, the name users know this ecosystem by; the
         // selection's own ecosystem is `rust`.
         let row = selected.artifact(platform, component)?;
-        row.check("cargo", RUST_RECIPE, "sha256")?;
+        row.check_from("cargo", RUST_RECIPE, "sha256", selected.row_source())?;
         rows.push(row);
     }
     Ok(rows)
