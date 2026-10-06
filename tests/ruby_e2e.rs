@@ -559,7 +559,7 @@ fn ruby_sync_native_ext_and_run() {
         );
         assert_eq!(
             inputs["build_view"].as_str(),
-            Some("runtime-only/1"),
+            Some("runtime-only/2"),
             "{inputs:?}"
         );
         // Every native gem here (racc, nokogiri) builds against the host C
@@ -796,7 +796,7 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
     );
     assert_eq!(
         inputs["build_view"].as_str(),
-        Some("runtime-only/1"),
+        Some("runtime-only/2"),
         "{inputs:?}"
     );
     assert_eq!(inputs["native"].as_str(), Some("native-libs"), "{inputs:?}");

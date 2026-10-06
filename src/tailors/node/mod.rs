@@ -1185,7 +1185,7 @@ mod tests {
         for (platform, golden, golden_v4) in [
             (
                 Platform::X86_64UnknownLinuxGnu,
-                "e47fc9abe7bcbdae9f37a45dc238dcdbc6121243-env-24.20.0",
+                "2cf1d75337c73a5d9e64f9df00ad513e7131340f-env-24.20.0",
                 "26333746f02786ed4d81de465ca6ee4c43e07000-env-24.20.0",
             ),
             (
