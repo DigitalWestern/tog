@@ -87,7 +87,6 @@ None open.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
   - #321 tests: kernel_smoke realizes against the developer's own store, so a local run can pass on cached objects.
 - **Found in the #323 review (2026-09-26).** One issue and one PR each:
-  - #324 ci: adding the heavy label during a path-triggered heavy run restarts it on the same commit.
   - #325 ci: tailor changes to extraction do not trigger the heavy suite on their own.
 - **Found in the #327 work (2026-09-26).** One issue and one PR each:
   - #328 sandbox: opt Python sdist builds and npm addons into HostView::RuntimeOnly.
