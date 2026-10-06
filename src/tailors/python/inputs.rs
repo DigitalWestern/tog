@@ -90,14 +90,16 @@ pub fn python_input_records(
 
 /// The text uv resolves, and whether uv may be handed the manifest's own
 /// file instead (it names the same requirements). A file outside the
-/// project never is: uv would read it again by path, and by then the path
-/// may name another file (#501). uv compiles the flattened text tog read
+/// project never is, and nor is one whose includes reach outside it: uv
+/// would read the external file again by path, and by then the path may
+/// name another file (#501). uv compiles the flattened text tog read
 /// instead, written under `.tog` by `read_plan`.
 fn resolver_input(project: &ProjectRoot, manifest: &manifest::Manifest) -> (String, bool) {
     let external = manifest
         .source_path
         .as_deref()
-        .is_some_and(|path| project.relative(path).is_none());
+        .is_some_and(|path| manifest::held_relative(project, path).is_none())
+        || manifest.has_external_includes();
     if external {
         return (manifest.flattened_text(), false);
     }
@@ -830,6 +832,52 @@ mod tests {
         let project = ProjectRoot::open(&project_dir).unwrap();
         // The first read happens here; the replacement after it is not seen.
         assert!(project.read_external(&external).unwrap().is_some());
+        std::fs::write(&external, "decoy==1.0\n").unwrap();
+        let _ = read_plan(
+            &project,
+            &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &test_activity(&store),
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+        );
+        let args = std::fs::read_to_string(project_dir.join("uv-args.txt")).unwrap();
+        assert!(
+            args.starts_with(&format!("pip compile {MANIFEST_REQUIREMENTS} ")),
+            "{args}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_dir.join("uv-input.txt")).unwrap(),
+            "six==1.17.0\n"
+        );
+    }
+
+    /// An in-project requirements file whose include lies beside the
+    /// project: uv is not handed the file, which names the include by a
+    /// path uv would reopen. It compiles the flattened text of the first
+    /// read, so the include replaced after that read is not seen (#501).
+    #[test]
+    fn uv_compiles_the_flattened_text_when_an_include_is_external() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("requirements.txt"),
+            "-r ../shared/base.txt\n",
+        )
+        .unwrap();
+        let external = temp.0.join("shared/base.txt");
+        std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+        std::fs::write(&external, "six==1.17.0\n").unwrap();
+        let store = store_with_stub_uv(&temp.0.join("store"));
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        // The first read happens here, by the spelling the include uses.
+        assert!(project
+            .read_external(&project_dir.join("../shared/base.txt"))
+            .unwrap()
+            .is_some());
         std::fs::write(&external, "decoy==1.0\n").unwrap();
         let _ = read_plan(
             &project,

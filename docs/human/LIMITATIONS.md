@@ -260,7 +260,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   as stopping malicious code from running.
 - **Sandboxes are cooperative hermeticity, not hostile-code containment.** On Linux, tog scans
   every declared root, the cwd, the scratch and the fixed `/etc` entries it binds for Unix
-  sockets before invoking bubblewrap, but not `/usr`, which is trusted, and a socket created
+  sockets before invoking bubblewrap. The build sandbox trusts `/usr` unscanned; the
+  resolution sandbox scans `/usr` and the other system roots once per process. A socket created
   after the scan is not caught (the fmt host-socket scan is Linux-only too); build daemons can
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content

@@ -202,10 +202,12 @@ fn status_with_stderr(
 ) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
     match activity {
         Some(activity) => crate::kernel::supervise::local_status_with_stderr(command, activity),
-        None => {
-            let output = wait_with_stderr_relay(spawn_unmanaged(command)?)?;
-            Ok((output.status, output.stderr))
-        }
+        None => status_with_scrubbed_relay(
+            command,
+            &mut io::stdout(),
+            &mut io::stderr(),
+            crate::kernel::resolve::confine::signing_key_secrets(),
+        ),
     }
 }
 
@@ -422,7 +424,7 @@ impl Sandbox<'_> {
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
         let held = HeldRoots::resolve(self, cwd)?;
-        self.reject_host_sockets(cwd, tmp, &held)?;
+        self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
         let mut invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs, &held)?;
         let mut command = bwrap_command(bwrap)?;
@@ -433,51 +435,72 @@ impl Sandbox<'_> {
         Ok((command, invocation))
     }
 
-    /// The unmanaged bwrap run with stdout sent to `stdout`, for the tests
-    /// that read what the command printed.
+    /// The unmanaged bwrap run with its stdout collected, for the tests
+    /// that read what the command printed. Its stderr is relayed to ours,
+    /// and `stderr` holds the classifier's prefix of it.
     #[cfg(test)]
-    fn run_bwrap_with_stdout(
+    fn run_bwrap_capture(
         &self,
         cmd: &[&str],
         env_path: &str,
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
-        stdout: std::process::Stdio,
     ) -> io::Result<std::process::Output> {
         let (mut command, _invocation) = self.bwrap(cmd, env_path, tmp, cwd, envs, None)?;
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(stdout)
-            .stderr(std::process::Stdio::piped());
-        wait_with_stderr_relay(spawn_unmanaged(&mut command)?)
+        command.stdin(std::process::Stdio::null());
+        let mut stdout = Vec::new();
+        let (status, stderr) = status_with_scrubbed_relay(
+            &mut command,
+            &mut stdout,
+            &mut io::stderr(),
+            crate::kernel::resolve::confine::signing_key_secrets(),
+        )?;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     /// A Unix socket is reachable through a read-only bind as well as a
     /// writable one (`connect` needs no write access to the mount), so every
-    /// declared root is scanned, not only the writable ones.
+    /// declared root is scanned, not only the writable ones, and so is each
+    /// of the fixed host `binds` (`HOST_ETC_ENTRIES` in production).
     /// A root an open project root holds is scanned through its held
     /// descriptor, the directory the sandbox binds (`held`).
-    fn reject_host_sockets(&self, cwd: &Path, scratch: &Path, held: &HeldRoots) -> io::Result<()> {
+    fn reject_host_sockets(
+        &self,
+        cwd: &Path,
+        scratch: &Path,
+        held: &HeldRoots,
+        binds: &[&str],
+    ) -> io::Result<()> {
         let mut roots = Vec::with_capacity(self.read.len() + self.write.len() + 2);
         roots.extend(self.read.iter().copied());
         roots.extend(self.write.iter().copied());
         roots.push(cwd);
         roots.push(scratch);
 
-        let mut scanned = Vec::new();
+        // Each root scanned so far, and whether through a held descriptor.
+        // A root under one already scanned is skipped, except a held root
+        // under a parent scanned by path: the parent's walk covered what
+        // sits at the root's path now, not the tree the sandbox binds, which
+        // may have been renamed out from under it.
+        let mut scanned: Vec<(PathBuf, bool)> = Vec::new();
         for root in roots {
             let (alias, root) = match held.find(root) {
                 Some(found) => (Some(found.alias()), found.dest.clone()),
                 None => (None, fs::canonicalize(root)?),
             };
+            let is_held = alias.is_some();
             if scanned
                 .iter()
-                .any(|parent: &PathBuf| root.starts_with(parent))
+                .any(|(parent, parent_held)| root.starts_with(parent) && (*parent_held || !is_held))
             {
                 continue;
             }
-            scanned.retain(|parent| !parent.starts_with(&root));
+            scanned.retain(|(parent, _)| !parent.starts_with(&root));
             let found = match &alias {
                 Some(alias) => find_socket_without_following_symlinks(alias)?.map(|socket| {
                     match socket.strip_prefix(alias) {
@@ -493,11 +516,12 @@ impl Sandbox<'_> {
                     socket.display()
                 )));
             }
-            scanned.push(root);
+            scanned.push((root, is_held));
         }
-        // The fixed `/etc` entries are bound too (#373). `/usr` is trusted
-        // unscanned: walking it would cost more than the build.
-        reject_sockets_in_binds(HOST_ETC_ENTRIES.iter().map(Path::new))
+        // The fixed `/etc` entries are bound too (#373). This sandbox trusts
+        // `/usr` unscanned, since walking it on every build would cost more
+        // than the build; the resolution sandbox scans it once per process.
+        reject_sockets_in_binds(binds.iter().map(Path::new))
     }
 
     fn bwrap_args(
@@ -511,7 +535,7 @@ impl Sandbox<'_> {
     ) -> io::Result<BwrapInvocation> {
         let (read_binds, write_binds) = held.place(&self.read, &self.write, tmp)?;
         let scratch = fs::canonicalize(tmp)?;
-        let cwd = held.place_one(cwd)?.1;
+        let cwd = held.dest(cwd)?;
         let read: Vec<PathBuf> = read_binds.iter().map(|(_, dest)| dest.clone()).collect();
         let write: Vec<PathBuf> = write_binds.iter().map(|(_, dest)| dest.clone()).collect();
 
@@ -678,27 +702,28 @@ struct BwrapInvocation {
 /// setup errors are a single short line. The supervisor keeps the same.
 use crate::kernel::supervise::CLASSIFIER_PREFIX as STDERR_PREFIX_LIMIT;
 
-/// Copy a child's stderr to `sink` as it arrives, with the signing key
-/// scrubbed out by the same [`Scrubber`](crate::kernel::resolve::confine::Scrubber)
-/// the supervisor's relay uses (#430), retaining the first
-/// `STDERR_PREFIX_LIMIT` scrubbed bytes. Relay failures (e.g. our stderr
-/// closed) are ignored: they must not turn a successful build into a
-/// failure.
-fn relay_stderr(
-    mut stderr: impl io::Read,
+/// Copy a child's output stream to `sink` as it arrives, with the signing
+/// key scrubbed out by the same
+/// [`Scrubber`](crate::kernel::resolve::confine::Scrubber) the supervisor's
+/// relay uses (#430), retaining the first `limit` scrubbed bytes. Relay
+/// failures (e.g. our stderr closed) are ignored: they must not turn a
+/// successful build into a failure.
+fn relay_scrubbed(
+    mut stream: impl io::Read,
     sink: &mut impl io::Write,
     secrets: &[Vec<u8>],
+    limit: usize,
 ) -> Vec<u8> {
     let mut scrubber = crate::kernel::resolve::confine::Scrubber::new(secrets.to_vec());
     let mut prefix = Vec::new();
     let mut buffer = [0u8; 8192];
     let mut pass_on = |bytes: Vec<u8>| {
-        let keep = bytes.len().min(STDERR_PREFIX_LIMIT - prefix.len());
+        let keep = bytes.len().min(limit - prefix.len());
         prefix.extend_from_slice(&bytes[..keep]);
         let _ = sink.write_all(&bytes);
     };
     loop {
-        let read = match stderr.read(&mut buffer) {
+        let read = match stream.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
@@ -709,23 +734,32 @@ fn relay_stderr(
     prefix
 }
 
-fn wait_with_stderr_relay(mut child: std::process::Child) -> io::Result<std::process::Output> {
-    let stderr = child.stderr.take().expect("stderr is piped");
-    let relay = std::thread::spawn(move || {
-        relay_stderr(
-            stderr,
-            &mut io::stderr(),
-            crate::kernel::resolve::confine::signing_key_secrets(),
-        )
-    });
-    let output = child.wait_with_output()?;
-    let stderr = relay
-        .join()
-        .map_err(|_| io::Error::other("sandbox stderr relay thread panicked"))?;
-    Ok(std::process::Output {
-        status: output.status,
-        stdout: output.stdout,
-        stderr,
+/// Run `command` outside the supervisor, both its streams piped and
+/// relayed through [`relay_scrubbed`] with `secrets` taken out: stdout to
+/// `stdout`, stderr to `stderr`, the way the supervisor relays both
+/// (#430). Returns the status and the first `STDERR_PREFIX_LIMIT` scrubbed
+/// bytes of stderr, for the setup-failure classifier.
+fn status_with_scrubbed_relay(
+    command: &mut Command,
+    stdout: &mut (impl io::Write + Send),
+    stderr: &mut (impl io::Write + Send),
+    secrets: &[Vec<u8>],
+) -> io::Result<(std::process::ExitStatus, Vec<u8>)> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = spawn_unmanaged(command)?;
+    let out_pipe = child.stdout.take().expect("stdout is piped");
+    let err_pipe = child.stderr.take().expect("stderr is piped");
+    std::thread::scope(|scope| {
+        let out = scope.spawn(move || relay_scrubbed(out_pipe, stdout, secrets, 0));
+        let err =
+            scope.spawn(move || relay_scrubbed(err_pipe, stderr, secrets, STDERR_PREFIX_LIMIT));
+        let status = child.wait();
+        let panicked = |_| io::Error::other("sandbox output relay thread panicked");
+        out.join().map_err(panicked)?;
+        let prefix = err.join().map_err(panicked)?;
+        Ok((status?, prefix))
     })
 }
 
@@ -948,15 +982,30 @@ pub(crate) fn bwrap_command(path: &Path) -> io::Result<Command> {
     Ok(command)
 }
 
+/// What a bind of the host path `bind` mounts: bubblewrap follows a
+/// symlink at the bound path, so its real target, where a socket scan has
+/// to start. `None` when nothing is there (absent, or a dangling link),
+/// which the sandboxes bind nothing for. Any other failure names the bind.
+/// The resolution sandbox resolves its `/etc` entries through this too.
+pub(crate) fn bind_target(bind: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::canonicalize(bind) {
+        Ok(target) => Ok(Some(target)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("cannot resolve sandbox path {}: {error}", bind.display()),
+        )),
+    }
+}
+
 /// Refuse a Unix socket in any of the host paths the sandbox binds as they
-/// are, where each exists: bubblewrap follows a symlink at the bound path,
-/// so the scan starts at its target.
+/// are, where each exists, scanning from each one's [`bind_target`].
 fn reject_sockets_in_binds<'a>(binds: impl Iterator<Item = &'a Path>) -> io::Result<()> {
     for bind in binds {
-        if !bind.exists() {
+        let Some(target) = bind_target(bind)? else {
             continue;
-        }
-        if let Some(socket) = find_socket_without_following_symlinks(&fs::canonicalize(bind)?)? {
+        };
+        if let Some(socket) = find_socket_without_following_symlinks(&target)? {
             return Err(io::Error::other(format!(
                 "host Unix socket exposed by sandbox path {}: {}",
                 bind.display(),
@@ -1043,17 +1092,24 @@ pub(crate) fn bwrap_preflight_with_activity(
     activity: Option<&StoreActivity>,
 ) -> io::Result<&'static Path> {
     static PREFLIGHT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    let verdict = match PREFLIGHT.get() {
-        Some(verdict) => verdict,
-        None => {
-            let verdict = run_preflight(activity)?;
-            PREFLIGHT.get_or_init(|| verdict)
-        }
-    };
-    match verdict {
+    match cached_verdict(&PREFLIGHT, || run_preflight(activity))? {
         Ok(path) => Ok(path.as_path()),
         Err(message) => Err(io::Error::new(io::ErrorKind::Unsupported, message.clone())),
     }
+}
+
+/// The verdict in `cache`, or the one `probe` reaches, cached. An error
+/// from `probe` (an interrupt) is returned and nothing is cached, so the
+/// next call probes again.
+fn cached_verdict(
+    cache: &OnceLock<Result<PathBuf, String>>,
+    probe: impl FnOnce() -> io::Result<Result<PathBuf, String>>,
+) -> io::Result<&Result<PathBuf, String>> {
+    if let Some(verdict) = cache.get() {
+        return Ok(verdict);
+    }
+    let verdict = probe()?;
+    Ok(cache.get_or_init(|| verdict))
 }
 
 /// An error from a probe child: a verdict (the sandbox is unavailable,
@@ -1390,14 +1446,19 @@ mod tests {
     /// even when the key arrives split across reads, and keeps the
     /// classifier's prefix scrubbed too (#430).
     #[test]
-    fn the_unmanaged_stderr_relay_scrubs_the_signing_key() {
+    fn the_unmanaged_relay_scrubs_the_signing_key() {
         let secret = b"k3y5eedQWERTYUIOPasdfghjklZXCVBNM12".to_vec();
         let stream = io::Read::chain(
             io::Cursor::new(b"bwrap: oops k3y5eedQWERTYU".to_vec()),
             io::Cursor::new(b"IOPasdfghjklZXCVBNM12 done\n".to_vec()),
         );
         let mut sink = Vec::new();
-        let prefix = relay_stderr(stream, &mut sink, std::slice::from_ref(&secret));
+        let prefix = relay_scrubbed(
+            stream,
+            &mut sink,
+            std::slice::from_ref(&secret),
+            STDERR_PREFIX_LIMIT,
+        );
         let relayed = String::from_utf8_lossy(&sink).into_owned();
         assert!(relayed.starts_with("bwrap: oops "), "{relayed}");
         assert!(relayed.ends_with(" done\n"), "{relayed}");
@@ -1405,8 +1466,37 @@ mod tests {
         assert_eq!(prefix, sink);
         // No secret: the bytes pass through unchanged.
         let mut sink = Vec::new();
-        relay_stderr(io::Cursor::new(b"plain\n".to_vec()), &mut sink, &[]);
+        relay_scrubbed(io::Cursor::new(b"plain\n".to_vec()), &mut sink, &[], 1);
         assert_eq!(sink, b"plain\n");
+    }
+
+    /// A child the no-store path runs has the key scrubbed from both of
+    /// its streams, and only stderr feeds the classifier's prefix (#430).
+    #[test]
+    fn the_unmanaged_path_scrubs_the_key_from_stdout_and_stderr() {
+        let secret = b"k3y5eedQWERTYUIOPasdfghjklZXCVBNM12".to_vec();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'out %s\\n' \"$1\"; printf 'err %s\\n' \"$1\" >&2; exit 4",
+            "sh",
+            std::str::from_utf8(&secret).unwrap(),
+        ]);
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let (status, prefix) = status_with_scrubbed_relay(
+            &mut command,
+            &mut stdout,
+            &mut stderr,
+            std::slice::from_ref(&secret),
+        )
+        .unwrap();
+        assert_eq!(status.code(), Some(4));
+        for (stream, label) in [(&stdout, "out "), (&stderr, "err ")] {
+            let text = String::from_utf8_lossy(stream);
+            assert!(text.starts_with(label), "{text}");
+            assert!(!text.contains("QWERTY"), "{text}");
+        }
+        assert_eq!(prefix, stderr);
     }
 
     use super::*;
@@ -1494,14 +1584,7 @@ mod tests {
         cwd: &Path,
         envs: &[(String, String)],
     ) -> io::Result<Vec<u8>> {
-        let output = sandbox.run_bwrap_with_stdout(
-            cmd,
-            "/usr/bin:/bin",
-            scratch,
-            cwd,
-            envs,
-            std::process::Stdio::piped(),
-        )?;
+        let output = sandbox.run_bwrap_capture(cmd, "/usr/bin:/bin", scratch, cwd, envs)?;
         if !output.status.success() {
             let failure = classify_sandbox_failure(&output.status, &output.stderr)
                 .expect("non-zero status has a sandbox failure classification");
@@ -1585,6 +1668,40 @@ mod tests {
             "rc=7",
             "curl inside the sandbox must fail with 'could not connect'"
         );
+    }
+
+    /// An interrupted first probe leaves the cache empty, so the next call
+    /// probes again, and that verdict is the one kept (#289).
+    #[test]
+    fn an_interrupted_probe_caches_nothing() {
+        use std::os::unix::process::ExitStatusExt;
+        let cache = OnceLock::new();
+        let probes = std::cell::Cell::new(0);
+        let interrupted = cached_verdict(&cache, || {
+            probes.set(probes.get() + 1);
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                crate::kernel::supervise::Interrupted {
+                    signal: libc::SIGINT,
+                    status: std::process::ExitStatus::from_raw(libc::SIGINT),
+                },
+            ))
+        })
+        .unwrap_err();
+        assert!(crate::kernel::supervise::interrupted(&interrupted).is_some());
+        assert!(cache.get().is_none());
+        let verdict = cached_verdict(&cache, || {
+            probes.set(probes.get() + 1);
+            Ok(Err("bubblewrap is not installed".to_string()))
+        })
+        .unwrap();
+        assert_eq!(verdict, &Err("bubblewrap is not installed".to_string()));
+        assert_eq!(probes.get(), 2);
+        let cached = cached_verdict(&cache, || -> io::Result<Result<PathBuf, String>> {
+            unreachable!("a cached verdict is not probed again")
+        })
+        .unwrap();
+        assert_eq!(cached, &Err("bubblewrap is not installed".to_string()));
     }
 
     #[test]
@@ -1675,15 +1792,28 @@ mod tests {
         let path = project.join("f");
         // `test` is a child of the shell, so it holds exactly what the
         // command was given: the held descriptor would be at 3.
+        // An unexpanded glob (no `/proc/1/fd` to read) is reported too,
+        // so the pid 1 check cannot pass by looking at nothing.
         let script = "/usr/bin/cat f \"$1\"; \
             if /usr/bin/test -d /proc/self/fd/3; then echo ' leak 3'; fi; \
             for fd in /proc/1/fd/*; do \
+                if ! /usr/bin/test -e \"$fd\"; then echo \" unreadable $fd\"; fi; \
                 if /usr/bin/test -d \"$fd\"; then echo \" leak $fd\"; fi; \
             done";
         let cmd = ["/usr/bin/sh", "-c", script, "sh", path.to_str().unwrap()];
         // Renamed, nothing at the path.
         let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
         assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        // A symlink to another directory swapped in at the path: the held
+        // spelling is still resolved through the descriptor, never through
+        // what the path names now.
+        let linked = root.0.join("linked");
+        fs::create_dir(&linked).unwrap();
+        fs::write(linked.join("f"), "linked").unwrap();
+        std::os::unix::fs::symlink(&linked, &project).unwrap();
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        fs::remove_file(&project).unwrap();
         // Another directory swapped in at the path.
         fs::create_dir(&project).unwrap();
         fs::write(project.join("f"), "swapped").unwrap();
@@ -1693,6 +1823,72 @@ mod tests {
         // Once no root holds it, the path is bound as it stands.
         let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
         assert_eq!(String::from_utf8_lossy(&seen), "swappedswapped");
+    }
+
+    /// A working directory an open root holds, inside the bound project
+    /// but not a declared root itself (`cargo fmt` from a workspace
+    /// member), has a place in the sandbox and no bind source: resolving
+    /// it must not panic, and asking it for a bind source is an error.
+    #[test]
+    fn a_held_working_directory_that_is_no_root_has_a_place_and_no_source() {
+        let root = temp_dir("held-cwd");
+        let scratch = root.0.join("scratch");
+        let project = root.0.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(project.join("member")).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let member = project.join("member");
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let held = HeldRoots::resolve(&sandbox, &member).unwrap();
+        assert!(
+            held.find(&member).is_some(),
+            "the held cwd was not resolved"
+        );
+        assert_eq!(held.dest(&member).unwrap(), member);
+        assert!(held.passed().is_empty());
+        let error = held.place_one(&member).unwrap_err().to_string();
+        assert!(error.contains("not a declared sandbox root"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    /// A held root is scanned through its descriptor even when a parent
+    /// declared before it was scanned by path: the parent's walk covered
+    /// what its path holds now, and the held tree, renamed out of it, is
+    /// not there any more. A socket in the held tree is still found.
+    #[test]
+    fn a_held_root_is_scanned_though_an_unheld_parent_was() {
+        let root = temp_dir("held-under-unheld");
+        let scratch = root.0.join("scratch");
+        let parent = root.0.join("parent");
+        let project = parent.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let parent = parent.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let _held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        // Out of the parent, with a socket inside.
+        let moved = root.0.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        let _listener = crate::kernel::testutil::bind_socket(&moved.join("sock"));
+        let sandbox = Sandbox {
+            read: vec![&parent, &project],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let held = HeldRoots::resolve(&sandbox, &scratch).unwrap();
+        let error = sandbox
+            .reject_host_sockets(&scratch, &scratch, &held, &HOST_ETC_ENTRIES)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&project.join("sock").display().to_string()),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2318,14 +2514,7 @@ mod tests {
         };
         let cmd = ["/usr/bin/sh", "-c", "echo build diagnostic >&2; exit 3"];
         let output = sandbox
-            .run_bwrap_with_stdout(
-                &cmd,
-                "/usr/bin:/bin",
-                &scratch,
-                &scratch,
-                &[],
-                std::process::Stdio::piped(),
-            )
+            .run_bwrap_capture(&cmd, "/usr/bin:/bin", &scratch, &scratch, &[])
             .unwrap();
         // The relay thread retained the build's own stderr (and forwarded it
         // to ours); a build printing to stderr is still a command failure.
@@ -2871,10 +3060,10 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             "/usr/lib/aarch64-linux-gnu",
         ]
         .iter()
-        .filter_map(|dir| fs::read_dir(dir).ok())
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
+        .filter(|dir| !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_symlink()))
+        .filter_map(|dir| Some((*dir, fs::read_dir(dir).ok()?)))
+        .flat_map(|(dir, entries)| entries.flatten().map(move |entry| (dir, entry)))
+        .filter_map(|(dir, entry)| {
             let name = entry.file_name().into_string().ok()?;
             let stem = name.strip_suffix(".so")?;
             let regular = entry.file_type().ok()?.is_file();
@@ -2882,10 +3071,10 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
                 && stem.starts_with("lib")
                 && !crate::kernel::hostview::C_RUNTIME_SHARED.contains(&stem)
                 && fs::read(entry.path()).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF")))
-            .then_some(name)
+            .then_some((name, dir))
         })
         .min();
-        let Some(name) = moved else {
+        let Some((name, dir)) = moved else {
             eprintln!("skip: host has no regular ELF lib*.so for the view to move");
             return;
         };
@@ -2902,11 +3091,24 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
             "int tog_own_copy(void);\nint main(void) { return tog_own_copy() == 7 ? 0 : 1; }\n",
         )
         .unwrap();
+        fs::write(scratch.join("other.c"), "int main(void) { return 0; }\n").unwrap();
+        // The library moved: absent where the host has it, present in the
+        // runtime subdirectory. `main` loads its own copy over RUNPATH, and
+        // `other`, which NEEDs the same name with no RUNPATH, loads the
+        // moved one through the view's loader cache.
         let script = r#"
 cd "$1"
+test ! -e "$3/$2" || { echo "$3/$2 was not moved"; exit 1; }
+test -f "$3/$4/$2" || { echo "$3/$4/$2 is missing"; exit 1; }
 cc -shared -fPIC own.c -o "own/$2" -Wl,-soname,"$2" &&
 cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
-./main
+./main || exit 1
+cc other.c -o other -Wl,--no-as-needed "own/$2" -Wl,--as-needed || exit 1
+traced=$(LD_TRACE_LOADED_OBJECTS=1 ./other) || { echo "$traced"; exit 1; }
+case "$traced" in
+  *"$2 => $3/$4/$2 "*) ./other ;;
+  *) echo "other did not load $3/$4/$2: $traced"; exit 1 ;;
+esac
 "#;
         let sandbox = Sandbox {
             read: vec![],
@@ -2922,6 +3124,8 @@ cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
                 "sh",
                 scratch.to_str().unwrap(),
                 &name,
+                dir,
+                crate::kernel::hostview::RUNTIME_SUBDIR,
             ],
             &scratch,
             &scratch,
@@ -2929,7 +3133,8 @@ cc main.c -o main "own/$2" -Wl,--enable-new-dtags,-rpath,'$ORIGIN/own' &&
         );
         assert!(
             result.is_ok(),
-            "a program with its own {name} on its RUNPATH did not load it: {result:?}"
+            "{name} in {dir}: a program with its own copy on its RUNPATH did not load it, \
+             or one without did not load the moved copy through the cache: {result:?}"
         );
     }
 
@@ -3358,7 +3563,6 @@ mod containment_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_host_socket_under_a_read_root_is_refused_before_bwrap() {
-        // Short names: a socket path is capped at 108 bytes.
         let root = temp_dir("rs");
         let scratch = root.0.join("s");
         let readable = root.0.join("r");
@@ -3409,31 +3613,45 @@ mod containment_tests {
             host_view: HostView::Full,
         };
         sandbox
-            .reject_host_sockets(&scratch, &scratch, &HeldRoots::default())
+            .reject_host_sockets(&scratch, &scratch, &HeldRoots::default(), &HOST_ETC_ENTRIES)
             .unwrap();
         drop(listener);
     }
 
     /// A socket in one of the fixed host binds, or behind a symlink the
     /// bind follows, is refused by name; binds without one, and a missing
-    /// one, pass (#373).
+    /// one, pass (#373). A bind that cannot be resolved is refused by name.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_socket_in_a_fixed_host_bind_is_refused() {
         let root = temp_dir("etc-binds");
+        let scratch = root.0.join("s");
         let conf_d = root.0.join("ld.so.conf.d");
         let localtime = root.0.join("localtime");
         let zone = root.0.join("zone");
+        fs::create_dir(&scratch).unwrap();
         fs::create_dir(&conf_d).unwrap();
         fs::write(conf_d.join("a.conf"), "/opt/lib\n").unwrap();
         fs::write(&zone, "TZif").unwrap();
         std::os::unix::fs::symlink(&zone, &localtime).unwrap();
         let missing = root.0.join("missing");
-        let binds = [conf_d.as_path(), localtime.as_path(), missing.as_path()];
-        reject_sockets_in_binds(binds.iter().copied()).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let binds = [
+            conf_d.to_str().unwrap(),
+            localtime.to_str().unwrap(),
+            missing.to_str().unwrap(),
+        ];
+        let scan = |binds: &[&str]| {
+            sandbox.reject_host_sockets(&scratch, &scratch, &HeldRoots::default(), binds)
+        };
+        scan(&binds).unwrap();
 
         let listener = crate::kernel::testutil::bind_socket(&conf_d.join("s.sock"));
-        let error = reject_sockets_in_binds(binds.iter().copied()).unwrap_err();
+        let error = scan(&binds).unwrap_err();
         assert!(
             error.to_string().starts_with(&format!(
                 "host Unix socket exposed by sandbox path {}: ",
@@ -3448,9 +3666,20 @@ mod containment_tests {
         let listener = crate::kernel::testutil::bind_socket(&target);
         fs::remove_file(&localtime).unwrap();
         std::os::unix::fs::symlink(&target, &localtime).unwrap();
-        let error = reject_sockets_in_binds(binds.iter().copied()).unwrap_err();
+        let error = scan(&binds).unwrap_err();
         assert!(error.to_string().contains("target.sock"), "{error}");
         drop(listener);
+
+        let looped = root.0.join("looped");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let error = scan(&[looped.to_str().unwrap()]).unwrap_err();
+        assert!(
+            error.to_string().starts_with(&format!(
+                "cannot resolve sandbox path {}: ",
+                looped.display()
+            )),
+            "{error}"
+        );
     }
 
     /// A read root the scan cannot list is refused, naming the directory,
@@ -3475,7 +3704,7 @@ mod containment_tests {
             write: vec![&scratch],
             host_view: HostView::Full,
         };
-        let result = sandbox.reject_host_sockets(&scratch, &scratch, &HeldRoots::default());
+        let result = sandbox.reject_host_sockets(&scratch, &scratch, &HeldRoots::default(), &[]);
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
         let error = result.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");

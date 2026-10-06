@@ -1586,12 +1586,19 @@ mod tests {
         );
         fs::remove_file(root.0.join("lib/pkgconfig/ssl.pc")).unwrap();
 
-        fs::write(
-            root.0.join("lib/libfoo.so"),
-            b"\x7fELF /home/build/_h_env_placehold_placehold/lib",
-        )
-        .unwrap();
-        assert!(scan_for_placeholders(&root.0, &placeholders).is_err());
+        // Each generic marker refuses on its own, one file each.
+        for (file, marker) in [
+            ("lib/libfoo.so", "/home/build/_h_env_placehold/lib"),
+            ("lib/libbar.so", "/opt/placehold_placehold/lib"),
+        ] {
+            let mut bytes = b"\x7fELF ".to_vec();
+            bytes.extend_from_slice(marker.as_bytes());
+            fs::write(root.0.join(file), bytes).unwrap();
+            let error = scan_for_placeholders(&root.0, &placeholders).unwrap_err();
+            assert!(error.to_string().contains(file), "{marker}: {error}");
+            fs::remove_file(root.0.join(file)).unwrap();
+        }
+        scan_for_placeholders(&root.0, &placeholders).unwrap();
     }
 
     /// No package is pinned twice, and the object id names the store it
