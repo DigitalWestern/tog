@@ -48,6 +48,9 @@ None open.
 
 ## Open work, each its own pull request
 
+- **Found in the `tog <file>` work (2026-10-05).** One issue and one PR each:
+  - #561 run: `tog <file>` outside a project, or in a project without that ecosystem, on the locked or shipped toolchain. Pick: realize the runtime as `x` does.
+  - #562 node: say when the locked Node is too old to run a `.ts` file. Pick: refuse naming `tog update --toolchain node`, with `--experimental-strip-types` for 22.6 to 22.17.
 - **#462: tests: fsroot socket fixture renames across filesystems under a long TMPDIR.** fsroot test socket fixture crosses filesystems with a long TMPDIR. Pick: bind through the held directory fd alias.
 - **#463: tests: sandbox socket fixtures fail before assertions under a long TMPDIR.** sandbox socket fixtures exceed SUN_LEN with a long TMPDIR. Pick: a shared Linux fd-alias binding helper, batched with required sandbox work.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
