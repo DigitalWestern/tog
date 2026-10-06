@@ -51,11 +51,12 @@
     collecting different parts of the codebase to report back to the
     orchestrator.
 
-- Keep CI runs few. The GitHub Actions budget is small (2,000 minutes a
-  month, and it has run out before), and the heavy suite is slow: one
-  e2e run took 47 minutes. Every push to a pull request re-runs the
-  whole suite, and every merge runs it again on main, so each extra push
-  is a full run. Before the first push:
+- Keep CI runs few. The repository is public (since 2026-10-06), so
+  Actions minutes are free on the standard runners, but the heavy suite
+  is slow: one e2e run took 47 minutes, every push to a pull request
+  re-runs the whole suite, and every merge runs it again on main, so an
+  extra push that wakes the heavy suite is a 47-minute wait and a queue
+  behind it. Before the first push:
   - Run clippy (`-D warnings`), the tests and the Sol review locally, so
     the branch goes up once, finished.
   - If main has moved, merge it into the branch locally, then push. A
@@ -65,7 +66,8 @@
   - Know whether your change wakes the heavy suite. heavy.yml runs the
     47-minute e2e job on a pull request when it changes any file its
     `gate` job watches: `src/kernel/archive*`, `src/kernel/fetch*`,
-    `src/kernel/sandbox*`, anything under `src/kernel/provider/`, any
+    `src/kernel/sandbox*`, anything under `src/kernel/provider/`, a
+    tailor's `unpack.rs`, `src/commands/selfupdate.rs`, any
     `catalog.toml`, `Cargo.lock`, `heavy.yml`, or `tests/acceptance.sh`.
     It also runs for any file under `tests/` other than a top-level
     `tests/*.rs`, `tests/size_baseline.txt` or `tests/install.sh`
@@ -78,11 +80,14 @@
     touch them, run the e2e suites it affects locally before the first
     push (see the local equivalents below). #409 woke the suite twice
     with a one-line test-only change to `src/kernel/provider/rust.rs`.
-  Never push only to retrigger CI. Do not open a pull request that
-  only adds a FOLLOW-UPS.md pointer or another one-line doc change: put
-  it in the next real pull request, or in the work's own pull request
-  before it merges. Run `gh pr list --state open` first, so you do not
-  duplicate a pull request another agent already opened.
+  Never push only to retrigger CI. A pull request that only adds a
+  FOLLOW-UPS.md pointer or a one-line doc change is allowed now that
+  minutes are free, but batching it into the next real pull request is
+  still better. A pull request touching only FOLLOW-UPS.md or STATUS.md
+  skips ci.yml entirely, the `dco` job included, so the sign-off on
+  those commits is up to the author (#565). Run
+  `gh pr list --state open` first, so you do not duplicate a pull
+  request another agent already opened.
 
 - When CI fails on a pull request, reproduce and fix it on this machine,
   not in the cloud. You have permission to run any CI job locally,
