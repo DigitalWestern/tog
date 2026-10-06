@@ -70,7 +70,7 @@ None open.
 
 - **Resolution proxy PR 5 review leftovers (#428).** One checklist issue
   per theme:
-  - #430 signing key: the no-store sandbox relay is unscrubbed, and `cargo_door` still has its own copy of `kernel::tomlerr`. The other TOML parsers name a position only.
+  - #430 signing key: the no-store sandbox relay is unscrubbed, and `cargo_door` still has its own copy of `kernel::tomlerr`. Three TOML parse sites still print the parser's full `Display`, source line included: `reject_workspace_inheritance` in `src/kernel/provider/crates.rs` (a git crate's `Cargo.toml`), `Document::parse` in `src/kernel/toolchain/document.rs` (a catalog document) and `ChannelManifest::parse` in `src/kernel/provider/rust_channel.rs` (a Rust channel manifest). Move each to `kernel::tomlerr`.
   - #431 cargo confinement edges: a symlinked spelling of the root, grandchild-held pipes (left open by #57), an offline git-dependency test.
 - **Test-suite audit of 2026-09-27 (#351).** Nine reviewers, one per
   area, looked for tests that stay green when the code they name is
