@@ -1609,9 +1609,9 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/kernel/testutil.rs", "detached_lease", 1),
 ];
 
-/// A call of one of `kernel::fetch`'s verified downloads, which admit a
-/// cache entry by its digest alone (a call, not the `fn` that defines it).
-/// A call through a `use ... as` alias is not seen.
+/// A call of one of `kernel::fetch`'s verified downloads or cache reads,
+/// which admit a cache entry by its digest alone (a call, not the `fn`
+/// that defines it). A call through a `use ... as` alias is not seen.
 fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bool {
     const FETCHES: &[&str] = &[
         "download_verified_held",
@@ -1619,6 +1619,13 @@ fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bo
         "download_verified_digest_held",
         "download_toolchain_artifact_held",
         "download_verified_any_held",
+        // The cache-only reads and the proxy's streaming insert: a hit is
+        // admitted by digest the same way.
+        "cache_verified_held",
+        "cache_verified_digest_held",
+        "read_cache_verified_digest",
+        "cache_from_reader",
+        "cache_from_reader_any",
     ];
     FETCHES
         .iter()
@@ -1635,6 +1642,11 @@ fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bo
 /// `fetch::download_verified_digest_held`). A new caller fails until it is
 /// listed under its source, or under a new group that says why that source
 /// is trusted.
+///
+/// The count is per function, so it sees a call added or removed, not one
+/// replaced: a listed function that drops its call and gains another, with
+/// a digest from somewhere else, keeps its count and passes. A function
+/// that changes where its digest comes from has to move groups by hand.
 const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // A toolchain row: tog's catalog, or the project's toolchain lock
     // pinning one of its rows. `download_toolchain_artifact_held` also
@@ -1685,6 +1697,23 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
         "discard_failed_attempt",
         1,
     ),
+    // Cache reads of a pin's bytes: go's plan carries the sha256 of each
+    // module file tog itself inserted after checking it against go.sum's
+    // h1, and Corepack's check reads the pnpm tarball the node lock's
+    // integrity names before comparing it with `packageManager`'s hash.
+    // A persisted native classification is reused only for the lock
+    // integrity candidate whose tarball re-verifies in the cache.
+    ("src/tailors/go/mod.rs", "stage_modcache_skeleton", 1),
+    ("src/tailors/node/classify.rs", "archive_is_cached", 1),
+    ("src/tailors/node/corepack.rs", "verify_corepack_hash", 1),
+    // The registry's claim, read through the resolution proxy: the digest
+    // a registry's metadata response (an npm packument's integrity, a
+    // crates.io index checksum) states for an artifact the tool then
+    // fetches. The proxy serves the claimed bytes only when they match, so
+    // the tool sees what the registry promised, over TLS, as it would
+    // without the proxy; a lock written from them then carries the same
+    // digest as its pin.
+    ("src/kernel/resolve/mirror.rs", "claimed_artifact", 1),
 ];
 
 #[test]
