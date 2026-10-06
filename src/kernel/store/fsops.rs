@@ -992,15 +992,19 @@ mod remove_tree_tests {
     }
 
     /// A tree replaced after the first stat is left alone and reported.
+    /// The old tree is moved aside, not removed, so the filesystem cannot
+    /// hand its inode number to the replacement (ext4 reuses a freed one
+    /// at once, and the replacement would then look like the same tree).
     #[test]
     fn a_tree_replaced_concurrently_is_kept_and_reported() {
         let temp = TempDir::named("remove-tree-replaced");
         let tree = temp.0.join("tree");
         fs::create_dir(&tree).unwrap();
         let other = tree.clone();
+        let aside = temp.0.join("tree-old");
         let error = with_failpoint(
             move || {
-                fs::remove_dir(&other).unwrap();
+                fs::rename(&other, &aside).unwrap();
                 fs::create_dir(&other).unwrap();
                 fs::write(other.join("new"), "kept").unwrap();
             },
