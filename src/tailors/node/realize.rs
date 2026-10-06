@@ -357,24 +357,27 @@ fn node_env_identity_inner(
 ///
 /// Any tarballs fetched for the inspection are appended to `classification`;
 /// the caller keeps those leases until it no longer needs the cached bytes.
-fn resolve_native_libs_id<'a>(
+/// The second value says which archive each package's classification is of,
+/// for `confirm_classified_sources` once the cold path has fetched.
+pub(super) fn resolve_native_libs_id<'a>(
     store: &Store,
     activity: &StoreActivity,
     platform: Platform,
     plan: &'a NpmPlan,
     classification: &mut Vec<FetchedTarball<'a>>,
-) -> io::Result<Option<String>> {
+) -> io::Result<(Option<String>, BTreeMap<String, Digest>)> {
     if platform.is_macos() {
-        return Ok(None);
+        return Ok((None, BTreeMap::new()));
     }
-    let has_native = match persisted_archive_classification(store, &plan.packages)? {
-        Some(has_native) => has_native,
+    let decision = match persisted_archive_classification(store, activity, &plan.packages)? {
+        Some(decision) => decision,
         None => {
             *classification = fetch_npm_tarballs(store, activity, &plan.packages)?;
             classify_downloaded_archives(store, activity, classification)?
         }
     };
-    native_libs_identity_id(store, platform, has_native)
+    let id = native_libs_identity_id(store, platform, decision.has_native)?;
+    Ok((id, decision.classified_from))
 }
 
 /// The byte sources for a cold realization: one held cache lease per distinct
@@ -786,7 +789,7 @@ pub(super) fn realize_node_env_with_node_object(
     let mut classification_tarballs: Vec<FetchedTarball<'_>> = Vec::new();
     // One lease for the whole realization: the archive children and the
     // staged environment borrow it.
-    let native_libs_id = resolve_native_libs_id(
+    let (native_libs_id, classified_from) = resolve_native_libs_id(
         store,
         activity,
         platform,
@@ -814,6 +817,7 @@ pub(super) fn realize_node_env_with_node_object(
     // function for exactly that reason.
     drop(classification_tarballs);
     let (leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, activity, plan)?;
+    confirm_classified_sources(&classified_from, &tarballs)?;
 
     let native_libs = if native_libs_id.is_some() {
         Some(crate::kernel::provider::nativelibs::ensure_native_libs(

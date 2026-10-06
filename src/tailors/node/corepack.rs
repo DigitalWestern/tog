@@ -1,9 +1,12 @@
 //! Corepack's `packageManager` pin for the pnpm a Node edit runs: the exact
 //! release it names, the optional `+<algo>.<hex>` hash suffix, and the
-//! check that the pnpm tarball tog realized has that hash.
+//! check that the pnpm tarball tog realized has that hash. The realized
+//! tarball is whichever cached entry matched the lock's integrity, which
+//! may allow several hashes (#508), so each candidate's entry is a witness.
 
 use crate::comforter;
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::digest::sri_candidates;
 use crate::kernel::fetch;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store::Store;
@@ -174,31 +177,129 @@ fn verify_corepack_hash(
             "x: cannot verify packageManager {name} for {package}@{version}: pnpm artifact has no integrity and no reachable cache path; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
         ))
     })?;
-    let digest = fetch::Digest::from_sri(integrity).map_err(|error| {
+    // The integrity may allow several hashes of its strongest algorithm
+    // (#508), and the tarball tog realized matched one of them: that is the
+    // cache entry the pnpm came from, so every candidate's entry is tried.
+    let candidates = sri_candidates(integrity).map_err(|error| {
         other(format!(
             "x: cannot verify packageManager {name} for {package}@{version}: pnpm artifact integrity is invalid ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache"
         ))
     })?;
-    let cache_path = store.cache_path(digest.algo(), digest.hex());
-    let bytes = fetch::read_cache_verified_digest(store, activity, &digest).map_err(|error| {
-        other(format!(
-            "x: cannot verify packageManager {name} for {package}@{version}: verified pnpm artifact cache {} is not reachable ({error}); hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache",
-            cache_path.display()
-        ))
-    })?;
-    let actual = algo.hex_digest(&bytes);
-    if actual != expected.hex.to_ascii_lowercase() {
+    let mut unreachable = Vec::new();
+    let mut cached = Vec::new();
+    for digest in &candidates {
+        let cache_path = store.cache_path(digest.algo(), digest.hex());
+        match fetch::read_cache_verified_digest(store, activity, digest) {
+            Ok(bytes) => {
+                let actual = algo.hex_digest(&bytes);
+                if actual == expected.hex.to_ascii_lowercase() {
+                    return Ok(());
+                }
+                cached.push(actual);
+            }
+            Err(error) => unreachable.push(format!("{} ({error})", cache_path.display())),
+        }
+    }
+    if cached.is_empty() {
         return Err(other(format!(
-            "x: Corepack {name} mismatch for {package}@{version}: packageManager declares {}, cached pnpm tarball has {actual}; nothing runs",
-            expected.hex
+            "x: cannot verify packageManager {name} for {package}@{version}: verified pnpm artifact cache {} is not reachable; hash verification is not supported yet; remove the suffix or use a pnpm package whose tarball is in the verified cache",
+            unreachable.join(", ")
         )));
     }
-    Ok(())
+    Err(other(format!(
+        "x: Corepack {name} mismatch for {package}@{version}: packageManager declares {}, cached pnpm tarball has {}; nothing runs",
+        expected.hex,
+        cached.join(" or ")
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::testutil::TempDir;
+    use std::fs;
+
+    /// A store holding `cached` under its sha512 digest, and a project whose
+    /// node closure lists pnpm@`version` with an integrity allowing both
+    /// `cached` and the never-cached `other` bytes.
+    fn two_hash_fixture(cached: &[u8], other: &[u8], version: &str) -> (TempDir, Store) {
+        let scratch = TempDir::named("corepack-two-hash");
+        let root = scratch.0.join("store");
+        for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
+            fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store::for_test(root.canonicalize().unwrap());
+        let sri = |bytes: &[u8]| {
+            format!(
+                "sha512-{}",
+                crate::kernel::base64::encode(&Sha512::digest(bytes))
+            )
+        };
+        fs::write(
+            store.cache_path("sha512", &hex::encode(Sha512::digest(cached))),
+            cached,
+        )
+        .unwrap();
+        let project = scratch.0.join("project");
+        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        let envelope = serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "node",
+            "body": {
+                "packages": [{
+                    "path": "node_modules/pnpm",
+                    "name": "pnpm",
+                    "version": version,
+                    "integrity": format!("{} {}", sri(other), sri(cached)),
+                }],
+            },
+        });
+        fs::write(
+            project.join(".tog/closures/node.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        (scratch, store)
+    }
+
+    #[test]
+    fn corepack_hash_matches_whichever_allowed_tarball_is_cached() {
+        let (scratch, store) = two_hash_fixture(b"the pnpm tarball", b"its other build", "9.12.3");
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let project = scratch.0.join("project");
+        let expected = CorepackHash {
+            algo: CorepackAlgo::Sha256,
+            hex: hex::encode(Sha256::digest(b"the pnpm tarball")),
+        };
+        verify_corepack_hash(&store, &activity, &project, "pnpm", "9.12.3", &expected)
+            .expect("the cached candidate carries the declared hash");
+
+        let wrong = CorepackHash {
+            hex: hex::encode(Sha256::digest(b"its other build")),
+            ..expected.clone()
+        };
+        let mismatch = verify_corepack_hash(&store, &activity, &project, "pnpm", "9.12.3", &wrong)
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("sha256 mismatch"), "{mismatch}");
+        assert!(mismatch.contains(&expected.hex), "{mismatch}");
+
+        // With no candidate's tarball in the cache there is nothing to hash.
+        let digest = fetch::Digest::from_sri(&format!(
+            "sha512-{}",
+            crate::kernel::base64::encode(&Sha512::digest(b"the pnpm tarball"))
+        ))
+        .unwrap();
+        fs::remove_file(store.cache_path(digest.algo(), digest.hex())).unwrap();
+        let unreachable =
+            verify_corepack_hash(&store, &activity, &project, "pnpm", "9.12.3", &expected)
+                .unwrap_err()
+                .to_string();
+        assert!(unreachable.contains("is not reachable"), "{unreachable}");
+        assert!(unreachable.contains(digest.hex()), "{unreachable}");
+    }
 
     #[test]
     fn exact_node_tool_versions_are_full_releases() {
