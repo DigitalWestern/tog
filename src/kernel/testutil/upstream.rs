@@ -225,11 +225,14 @@ impl FixtureUpstream {
                 Some(query) => format!("{}?{query}", url.path()),
                 None => url.path().to_string(),
             };
+            let mut routes = self.routes.lock().unwrap();
             let Some(marker) = row["request_has"].as_str() else {
-                self.set(&target, Behavior::Reply(reply));
+                if let Some(Behavior::ByBody(_)) = routes.get(&target) {
+                    panic!("{url} has rows with and without request_has");
+                }
+                routes.insert(target, Behavior::Reply(reply));
                 continue;
             };
-            let mut routes = self.routes.lock().unwrap();
             let entry = routes
                 .entry(target)
                 .or_insert_with(|| Behavior::ByBody(Vec::new()));
@@ -367,5 +370,51 @@ fn conditional(request: &Headers, reply: Reply) -> Reply {
         }
     } else {
         reply
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rows for one URL must all carry `request_has` or none: a mixed
+    /// index panics whichever row comes first.
+    #[test]
+    fn mixed_rows_for_one_url_are_refused_in_either_order() {
+        let body_row = |marker: Option<&str>| {
+            let mut row = serde_json::json!({
+                "url": "https://example.test/x",
+                "status": 200,
+                "sha256": hex::encode(Sha256::digest(b"")),
+            });
+            if let Some(marker) = marker {
+                row["request_has"] = serde_json::Value::String(marker.to_string());
+            }
+            row
+        };
+        let ca = FixtureCa::new();
+        for rows in [
+            vec![body_row(None), body_row(Some("a"))],
+            vec![body_row(Some("a")), body_row(None)],
+        ] {
+            let dir = crate::kernel::testutil::TempDir::named("upstream-mixed-rows");
+            std::fs::write(
+                dir.0.join("index.json"),
+                serde_json::to_vec(&serde_json::Value::Array(rows)).unwrap(),
+            )
+            .unwrap();
+            let upstream = FixtureUpstream::start(&ca, &["example.test"]);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                upstream.load_registry(&dir.0)
+            }));
+            let message = match refused.unwrap_err().downcast::<String>() {
+                Ok(message) => *message,
+                Err(_) => String::new(),
+            };
+            assert!(
+                message.contains("rows with and without request_has"),
+                "{message}"
+            );
+        }
     }
 }

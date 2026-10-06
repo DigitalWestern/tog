@@ -590,17 +590,22 @@ pub(crate) fn member_dirs(root: &ProjectRoot) -> io::Result<Members> {
 }
 
 /// A workspace manifest's `members` entries, placed ([`member_pattern`]),
-/// with the raw `members` and `exclude` lists cargo's exclusion rule reads.
+/// with the `members` and `exclude` lists cargo's exclusion rule reads.
+/// `rule_members` is the raw list with each entry written through another
+/// spelling of the root ([`through_root_spelling`]) replaced by its place
+/// inside the root, so the rule sees the member the entry names and the
+/// entry wins over `exclude` as a plain spelling of it would; compared raw,
+/// an absolute spelling is no prefix of a path under the root.
 struct Placed {
     inside: Vec<String>,
     outside: Vec<PathBuf>,
-    raw_members: Vec<String>,
+    rule_members: Vec<String>,
     raw_exclude: Vec<String>,
 }
 
 impl Placed {
     fn excluded(&self, root: &Path, dir: &Path) -> bool {
-        excluded(root, dir, &self.raw_members, &self.raw_exclude)
+        excluded(root, dir, &self.rule_members, &self.raw_exclude)
     }
 }
 
@@ -624,16 +629,25 @@ fn place_members(root: &Path, manifest: &toml::Table) -> io::Result<Placed> {
     let mut placed = Placed {
         inside: Vec::new(),
         outside: Vec::new(),
-        raw_members: raw("members"),
+        rule_members: Vec::new(),
         raw_exclude: raw("exclude"),
     };
     let mut refused = Vec::new();
-    for entry in &placed.raw_members {
-        match member_pattern(root, entry) {
-            Ok(Place::Inside(pattern)) => placed.inside.push(pattern),
+    for entry in raw("members") {
+        match member_pattern(root, &entry) {
+            Ok(Place::Inside(pattern)) => {
+                placed.inside.push(pattern);
+                placed.rule_members.push(entry);
+            }
             Ok(Place::Outside(pattern)) => match through_root_spelling(root, &pattern) {
-                Some(inside) => placed.inside.push(inside),
-                None => placed.outside.push(pattern),
+                Some(inside) => {
+                    placed.inside.push(inside.clone());
+                    placed.rule_members.push(inside);
+                }
+                None => {
+                    placed.outside.push(pattern);
+                    placed.rule_members.push(entry);
+                }
             },
             Err(why) => refused.push(format!("{entry:?} ({why})")),
         }
@@ -654,10 +668,14 @@ fn place_members(root: &Path, manifest: &toml::Table) -> io::Result<Placed> {
 
 /// An absolute members entry outside `root` as written that reaches it
 /// through another spelling (a symlink to the root, or to a directory above
-/// it): the entry relative to the root, which is where cargo, comparing
-/// real paths, places it. Only the leading parts up to the one that
-/// resolves to the root are resolved, so the rest stays a pattern and a
-/// symlink below the root is still seen as one.
+/// it): the entry relative to the root, where the member really is. Only
+/// the leading parts up to the one that resolves to the root are resolved,
+/// so the rest stays a pattern and a symlink below the root is still seen
+/// as one. cargo 1.98.1 itself refuses to load such a workspace (the
+/// member's root, found through the spelling, "is a member of the wrong
+/// workspace"), so no resolution runs on one; this placement is for a sync
+/// from a committed lock, which runs no cargo and names the member's
+/// manifest, inside the root, in its record.
 fn through_root_spelling(root: &Path, pattern: &Path) -> Option<String> {
     let real_root = std::fs::canonicalize(root).ok()?;
     let mut prefix = PathBuf::new();

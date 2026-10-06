@@ -200,6 +200,7 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::fs;
+    use std::process::Command;
 
     fn package(dir: &Path, name: &str) {
         fs::create_dir_all(dir).unwrap();
@@ -325,8 +326,11 @@ mod tests {
     /// is not listed.
     /// An absolute member written through another spelling of the root (a
     /// symlink to it, or to a directory above it) is the member inside the
-    /// root it names, as cargo places it: listed, an output, and no
-    /// external input. The rest of the entry stays a pattern.
+    /// root it names: listed and an output. The rest of the entry stays a
+    /// pattern. Under `exclude`, the entry still counts as naming its
+    /// member explicitly, so it wins over the exclusion as a plain spelling
+    /// would, while a member a glob reaches loses to it. (cargo refuses to
+    /// load such a workspace: `member_listing_matches_cargo_metadata`.)
     #[test]
     fn an_absolute_member_through_a_symlinked_root_spelling_is_inside() {
         let temp = TempDir::named("cargo-root-spelling");
@@ -335,15 +339,18 @@ mod tests {
         package(&root.join("crates/a"), "a");
         std::os::unix::fs::symlink(&root, temp.0.join("alias")).unwrap();
         std::os::unix::fs::symlink(&temp.0, temp.0.join("above")).unwrap();
-        fs::write(
-            root.join("Cargo.toml"),
-            format!(
-                "[workspace]\nmembers = [\"{}\", \"{}\"]\n",
-                temp.0.join("alias/app").display(),
-                temp.0.join("above/ws/crates/*").display()
-            ),
-        )
-        .unwrap();
+        let workspace = |exclude: &str| {
+            fs::write(
+                root.join("Cargo.toml"),
+                format!(
+                    "[workspace]\nmembers = [\"{}\", \"{}\"]\nexclude = [{exclude}]\n",
+                    temp.0.join("alias/app").display(),
+                    temp.0.join("above/ws/crates/*").display()
+                ),
+            )
+            .unwrap();
+        };
+        workspace("");
         let held = ProjectRoot::open(&root).unwrap();
         assert_eq!(
             cargo_door::member_dirs(&held).unwrap().listed,
@@ -360,7 +367,118 @@ mod tests {
             .map(PathBuf::from)
             .to_vec()
         );
-        refuse_external_inputs(&root).unwrap();
+
+        workspace("\"app\", \"crates\"");
+        assert_eq!(
+            cargo_door::member_dirs(&held).unwrap().listed,
+            ["app"].map(PathBuf::from).to_vec()
+        );
+        assert_eq!(
+            resolution_outputs(&held).unwrap(),
+            ["Cargo.toml", "Cargo.lock", "app/Cargo.toml"]
+                .map(PathBuf::from)
+                .to_vec()
+        );
+    }
+
+    /// The members tog lists are the ones the host `cargo metadata` lists,
+    /// with the explicit member winning over `exclude` and the glob-reached
+    /// one losing to it. The symlinked spellings of the test above are not
+    /// compared: cargo 1.98.1 finds a member's workspace root through the
+    /// spelling, not the real path, and refuses the workspace as a whole
+    /// ("member of the wrong workspace"), so tog's placement of them is
+    /// checked on its own there. Ignored: it needs a cargo on `PATH` (the
+    /// one that builds tog does), and runs offline.
+    #[test]
+    #[ignore]
+    fn member_listing_matches_cargo_metadata() {
+        if Command::new("cargo").arg("--version").output().is_err() {
+            eprintln!("skip member_listing_matches_cargo_metadata: no cargo on PATH");
+            return;
+        }
+        let temp = TempDir::named("cargo-root-spelling-metadata");
+        let root = temp.0.join("ws");
+        for (dir, name) in [("app", "app"), ("crates/a", "a")] {
+            // cargo loads each member, so a package needs a target.
+            package(&root.join(dir), name);
+            fs::create_dir(root.join(dir).join("src")).unwrap();
+            fs::write(root.join(dir).join("src/lib.rs"), "").unwrap();
+        }
+        std::os::unix::fs::symlink(&root, temp.0.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&temp.0, temp.0.join("above")).unwrap();
+        let real_root = root.canonicalize().unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        let metadata = || {
+            Command::new("cargo")
+                .args([
+                    "metadata",
+                    "--no-deps",
+                    "--offline",
+                    "--format-version",
+                    "1",
+                ])
+                .arg("--manifest-path")
+                .arg(root.join("Cargo.toml"))
+                .env_remove("CARGO_TARGET_DIR")
+                .output()
+                .unwrap()
+        };
+        let workspace = |members: &str, exclude: &str| {
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[workspace]\nmembers = [{members}]\nexclude = [{exclude}]\n"),
+            )
+            .unwrap();
+        };
+
+        workspace(
+            &format!(
+                "\"{}\", \"{}\"",
+                temp.0.join("alias/app").display(),
+                temp.0.join("above/ws/crates/*").display()
+            ),
+            "",
+        );
+        let output = metadata();
+        assert!(
+            !output.status.success(),
+            "cargo loaded the symlinked spelling"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("is a member of the wrong workspace"),
+            "{stderr}"
+        );
+
+        for exclude in ["", "\"app\", \"crates\""] {
+            workspace("\"app\", \"crates/*\"", exclude);
+            let output = metadata();
+            assert!(
+                output.status.success(),
+                "cargo metadata: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let mut by_cargo: Vec<PathBuf> = metadata["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|package| {
+                    Path::new(package["manifest_path"].as_str().unwrap())
+                        .parent()
+                        .unwrap()
+                        .strip_prefix(&real_root)
+                        .unwrap()
+                        .to_path_buf()
+                })
+                .collect();
+            by_cargo.sort();
+            assert_eq!(
+                cargo_door::member_dirs(&held).unwrap().listed,
+                by_cargo,
+                "exclude = [{exclude}]"
+            );
+        }
     }
 
     #[test]
