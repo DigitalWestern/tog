@@ -198,10 +198,12 @@ pub trait Tailor: Sync {
     fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()>;
 
     /// Host-side preparation that must precede planning for one ecosystem:
-    /// missing-lock generation with the ecosystem's own tool, the one place
-    /// a tailor writes project inputs. Runs for detected ecosystems only,
-    /// before that ecosystem plans, and never under `--frozen`; a plan that
-    /// then finds no lock refuses with [`missing_lock`].
+    /// missing-lock generation with the ecosystem's own tool. Every tailor
+    /// but Python implements it. Python compiles its requirements lock
+    /// inside `plan` instead, so this hook is not the only place a tailor
+    /// writes project inputs. Runs for detected ecosystems only, before
+    /// that ecosystem plans, and never under `--frozen`; a plan that then
+    /// finds no lock refuses with [`missing_lock`].
     ///
     /// The tool runs only through `door`, a missing-lock door on the
     /// ecosystem's own scope.
@@ -215,8 +217,10 @@ pub trait Tailor: Sync {
         Ok(())
     }
 
-    /// `tog plan`: the plan as pretty-printed JSON text, without
-    /// realizing anything. `None` when, after `prepare`, there is nothing of
+    /// `tog plan`: the plan as pretty-printed JSON text. Planning realizes
+    /// no dependency environment, but it may fetch the pinned toolchain
+    /// into the store, and Python's writes its requirements lock and stamp
+    /// into the project. `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
     /// A planner that asks the ecosystem's tool (a consistency gate, a lock
@@ -287,6 +291,9 @@ pub trait Tailor: Sync {
     /// up, when it is one of this ecosystem's package-manager verbs that
     /// would write into a projection (`pip install`, `npm install`). The
     /// refusal is the same in every project, so it needs no projection.
+    /// A refusal that depends on the project belongs in `run_env` instead:
+    /// .NET refuses `dotnet build` there, and only in a project that has
+    /// a .NET closure.
     fn refused_command(&self, _cmd: &[String]) -> Option<String> {
         None
     }
