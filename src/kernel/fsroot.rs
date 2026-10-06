@@ -1291,7 +1291,7 @@ fn is_directory_stat(stat: &libc::stat) -> bool {
 /// `AlreadyExists` instead of being replaced. On a Linux filesystem that
 /// lacks the flag, a hard link of the entry (which also refuses an existing
 /// name) followed by unlinking `old` gives the same result.
-fn rename_at_noreplace(dirfd: RawFd, old: &[u8], new: &[u8]) -> io::Result<()> {
+pub(crate) fn rename_at_noreplace(dirfd: RawFd, old: &[u8], new: &[u8]) -> io::Result<()> {
     let old_c = CString::new(old)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
     let new_c = CString::new(new)

@@ -174,14 +174,40 @@ fn hash_identified(path: &Path, algo: Algo) -> io::Result<(String, fs::Metadata)
 /// Remove the cache entry at `path` that failed verification, but only if
 /// it is still the file that was hashed (`seen`). Cache leases share
 /// `gc.lock`, so another process may have published good bytes there since:
-/// those are left in place for the lease that holds them. Any entry that is
-/// still wrong is replaced by the next download's rename either way.
+/// those are kept for the lease that holds them. A check and then an
+/// unlink would leave a window in which such a publish is deleted, so the
+/// entry is first renamed aside in one step, and only what was moved is
+/// judged: the poisoned file is deleted, good bytes are put back (unless
+/// another verified copy, the same bytes, has landed since). A reader
+/// opening `path` in that short window finds nothing and fetches again.
+/// Any entry that is still wrong is replaced by the next download's rename
+/// either way.
 fn remove_poisoned(path: &Path, seen: &fs::Metadata) {
     use std::os::unix::fs::MetadataExt;
-    if let Ok(now) = fs::symlink_metadata(path) {
-        if now.dev() == seen.dev() && now.ino() == seen.ino() {
-            let _ = fs::remove_file(path);
-        }
+    use std::os::unix::io::AsRawFd;
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let (Ok(handle), Ok(suffix)) = (fs::File::open(dir), crate::kernel::fsroot::random_suffix())
+    else {
+        return;
+    };
+    let aside = dir.join(format!(".poisoned-{suffix}"));
+    if fs::rename(path, &aside).is_err() {
+        return;
+    }
+    let moved = fs::symlink_metadata(&aside);
+    if moved.is_ok_and(|now| now.dev() == seen.dev() && now.ino() == seen.ino()) {
+        let _ = fs::remove_file(&aside);
+        return;
+    }
+    let restored = crate::kernel::fsroot::rename_at_noreplace(
+        handle.as_raw_fd(),
+        aside.file_name().unwrap().as_encoded_bytes(),
+        name.as_encoded_bytes(),
+    );
+    if restored.is_err() {
+        let _ = fs::remove_file(&aside);
     }
 }
 
@@ -467,7 +493,12 @@ pub(crate) fn fetch_text_or_missing(
     url: &str,
     timeout: Option<std::time::Duration>,
 ) -> io::Result<Option<String>> {
-    match fetch_text_within(url, timeout) {
+    none_when_missing(fetch_text_within(url, timeout))
+}
+
+/// A fetched text, `None` when the failure was a 404.
+fn none_when_missing(fetched: io::Result<String>) -> io::Result<Option<String>> {
+    match fetched {
         Ok(text) => Ok(Some(text)),
         Err(error) if http_status(&error) == Some(404) => Ok(None),
         Err(error) => Err(error),
@@ -640,19 +671,27 @@ pub fn cache_insert(
             .open(&tmp)
             .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?
     };
-    let copied = copy_and_rehash(src, &mut out).and_then(|h| {
-        if h == hex {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "cache insert {}: the file changed while it was copied",
-                    src.display()
-                ),
-            ))
-        }
-    });
+    // The create mode is masked by the umask; set it outright, as a
+    // verified download's `publish_read_only` does, so both agree.
+    let copied_read_only = |out: &fs::File| {
+        use std::os::unix::fs::PermissionsExt;
+        out.set_permissions(fs::Permissions::from_mode(0o444))
+    };
+    let copied = copy_and_rehash(src, &mut out)
+        .and_then(|h| {
+            if h == hex {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "cache insert {}: the file changed while it was copied",
+                        src.display()
+                    ),
+                ))
+            }
+        })
+        .and_then(|()| copied_read_only(&out));
     drop(out);
     if let Err(e) = copied {
         let _ = fs::remove_file(&tmp);
@@ -663,7 +702,10 @@ pub fn cache_insert(
         Err(_) if dest.is_file() => {
             let _ = fs::remove_file(&tmp);
         }
-        Err(e) => return Err(io::Error::new(e.kind(), format!("cache insert {hex}: {e}"))),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(io::Error::new(e.kind(), format!("cache insert {hex}: {e}")));
+        }
     }
     store::touch_path(&dest)?;
     Ok((hex, dest))
@@ -1742,6 +1784,111 @@ mod tests {
         assert_eq!(left, ["dl-0-planted", "ins-0-planted"]);
         // A second insert of the same bytes is a verified hit.
         assert_eq!(cache_insert(&store, activity, &input).unwrap().1, dest);
+    }
+
+    /// A rename that fails leaves no temporary behind, like every other
+    /// failure of an insert (#555).
+    #[test]
+    fn a_cache_insert_whose_rename_fails_leaves_no_temporary() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = TempDir::named("fetch-insert-rename");
+        let root = scratch.0.clone();
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store::for_test(root.clone());
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let input = root.join("artifact");
+        fs::write(&input, b"blocked").unwrap();
+        let cache = root.join("cache/sha256");
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o555)).unwrap();
+        let outcome = cache_insert(&store, activity, &input);
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(outcome.is_err());
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+    }
+
+    /// A poisoned entry is removed, but good bytes published at its name
+    /// after it was hashed are kept, and nothing is left aside (#555).
+    #[test]
+    fn removing_a_poisoned_entry_keeps_a_publish_that_replaced_it() {
+        let scratch = TempDir::named("fetch-poisoned");
+        let entry = scratch.0.join("entry");
+        let aside = || {
+            fs::read_dir(&scratch.0)
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".poisoned-")
+                })
+                .count()
+        };
+        fs::write(&entry, b"poisoned").unwrap();
+        let poisoned = fs::symlink_metadata(&entry).unwrap();
+        // Good bytes renamed over the entry after it was hashed.
+        let good = scratch.0.join("good");
+        fs::write(&good, b"good").unwrap();
+        fs::rename(&good, &entry).unwrap();
+        remove_poisoned(&entry, &poisoned);
+        assert_eq!(fs::read(&entry).unwrap(), b"good");
+        assert_eq!(aside(), 0);
+        // The poisoned file itself goes.
+        let still = fs::symlink_metadata(&entry).unwrap();
+        remove_poisoned(&entry, &still);
+        assert!(!entry.exists());
+        assert_eq!(aside(), 0);
+    }
+
+    /// A 404 is a missing text, and every other failure an error (#555).
+    #[test]
+    fn a_404_is_a_missing_text_and_other_failures_are_errors() {
+        let status = |code| {
+            Err(io::Error::other(StatusFailure {
+                code,
+                message: format!("status {code}"),
+            }))
+        };
+        assert_eq!(none_when_missing(status(404)).unwrap(), None);
+        assert!(none_when_missing(status(500)).is_err());
+        assert_eq!(
+            none_when_missing(Ok("text".into())).unwrap().as_deref(),
+            Some("text")
+        );
+        let scratch = TempDir::named("fetch-missing");
+        let file = scratch.0.join("text");
+        fs::write(&file, "body").unwrap();
+        let url = format!("file://{}", file.display());
+        assert_eq!(
+            fetch_text_or_missing(&url, None).unwrap().as_deref(),
+            Some("body")
+        );
+        // A file:// URL has no status: a missing file is an error.
+        let gone = format!("file://{}", scratch.0.join("gone").display());
+        assert!(fetch_text_or_missing(&gone, None).is_err());
+    }
+
+    /// An unpinned download past its cap refuses and leaves no `dest`;
+    /// one at the cap is kept whole (#555).
+    #[test]
+    fn an_unpinned_download_past_its_cap_is_refused_and_removed() {
+        let scratch = TempDir::named("fetch-unpinned");
+        let source = scratch.0.join("source");
+        fs::write(&source, [7u8; 64]).unwrap();
+        let url = format!("file://{}", source.display());
+        let dest = scratch.0.join("dest");
+        let error = download_unpinned(&url, &dest, 63).unwrap_err();
+        assert!(
+            error.to_string().contains("longer than 63 bytes"),
+            "{error}"
+        );
+        assert!(!dest.exists());
+        download_unpinned(&url, &dest, 64).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), [7u8; 64]);
     }
 
     #[test]
