@@ -1660,7 +1660,7 @@ mod tests {
             let (store, _root) = test_store("relay-fail");
             let activity = store.activity(ActivityMode::Shared).unwrap();
             // `exec`: the sleep is the direct child, so killing it closes
-            // both pipes (a grandchild holding one is a known limitation).
+            // both pipes at once (a grandchild holding one would add `DRAIN_AFTER_EXIT`).
             let mut command = Command::new("/bin/sh");
             command.args(["-c", "printf 'x\\n' >&2; exec sleep 600"]);
             let started = std::time::Instant::now();
