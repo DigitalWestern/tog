@@ -85,9 +85,9 @@ fn malformed_file(name: &str, what: &str) -> io::Error {
 }
 
 /// `pyproject.toml` as a TOML document. A file that is not UTF-8 TOML is
-/// refused in the parser's words, the way `rust_toolchain_table` refuses a
-/// toolchain file: a lock must never read a broken manifest as one that
-/// asks for nothing.
+/// refused by the error's position, never the parser's message, the way
+/// `rust_toolchain_table` refuses a toolchain file: a lock must never read
+/// a broken manifest as one that asks for nothing.
 fn pyproject_document(bytes: &[u8]) -> io::Result<toml::Value> {
     let text = std::str::from_utf8(bytes).map_err(|_| malformed("is not UTF-8"))?;
     toml::from_str(text).map_err(|error| {
@@ -327,9 +327,10 @@ fn toolchain_file_name(legacy: bool) -> &'static str {
 
 /// The `[toolchain]` table of a rustup toolchain file, or `None` for a
 /// legacy `rust-toolchain` that is a bare channel line. A file that cannot
-/// be read as the format its name promises is refused here, in the
-/// parser's words, rather than recorded as a file without the field: a lock
-/// must never read a malformed toolchain file as one that asks for nothing.
+/// be read as the format its name promises is refused here, by the error's
+/// position and never the parser's message, rather than recorded as a file
+/// without the field: a lock must never read a malformed toolchain file as
+/// one that asks for nothing.
 ///
 /// `rust-toolchain.toml` must be UTF-8 TOML with a `[toolchain]` table, as
 /// rustup requires. The legacy `rust-toolchain` is that TOML document when
