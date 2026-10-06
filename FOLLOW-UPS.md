@@ -82,7 +82,7 @@ None open.
   - #256 design: the Tailor trait has 35+ methods, a dozen used by one ecosystem, and its docs have drifted.
   - #255 design: the kernel knows every ecosystem by name, and tog run is hard-wired to Node.
   - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context.
-  - #258 design: an error type that separates refusals, staleness, network and bugs.
+  - #258 design: an error type that separates refusals, staleness, network and bugs. The `detected()` bug is fixed. Left is the `TogError` classes (Refused, Stale, Unsupported, Network, Interrupted) with distinct exit codes, starting with `fsroot::refusal`.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #316 review (2026-09-26).** One issue and one PR each:
   - #317 archive: hard links in registry packages are refused; allow contained ones.
