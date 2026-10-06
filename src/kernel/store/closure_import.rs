@@ -5,6 +5,7 @@
 use super::*;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::ui;
+use std::sync::OnceLock;
 
 pub(super) fn invalid_root_import(path: &Path, detail: String) -> io::Error {
     io::Error::new(
@@ -24,10 +25,7 @@ pub(super) fn validate_closure_envelope<'a>(
         .get("ecosystem")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_root_import(path, "missing closure ecosystem".into()))?;
-    if !matches!(
-        ecosystem,
-        "python" | "node" | "cargo" | "go" | "ruby" | "elixir" | "dotnet"
-    ) {
+    if !known_ecosystem(ecosystem) {
         return Err(invalid_root_import(
             path,
             format!("unknown closure ecosystem {ecosystem}"),
@@ -36,6 +34,25 @@ pub(super) fn validate_closure_envelope<'a>(
     value
         .get("body")
         .ok_or_else(|| invalid_root_import(path, "missing closure body".into()))
+}
+
+static CLOSURE_ECOSYSTEMS: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// Install the ecosystems whose closures a root import accepts: every
+/// tailor's id, so the kernel names none and a new tailor's closures are
+/// imported without a kernel edit. The first call wins.
+pub fn install_closure_ecosystems(ids: Vec<&'static str>) {
+    CLOSURE_ECOSYSTEMS.get_or_init(|| ids);
+}
+
+/// Whether a tailor writes closures named `ecosystem`. Unit tests install
+/// the shipped tailors' ids on first use, as every binary entry point does.
+fn known_ecosystem(ecosystem: &str) -> bool {
+    #[cfg(test)]
+    tests::install_shipped_ecosystems();
+    CLOSURE_ECOSYSTEMS
+        .get()
+        .is_some_and(|ids| ids.contains(&ecosystem))
 }
 
 /// How strictly a legacy closure import treats a reference it cannot
@@ -293,4 +310,36 @@ pub(super) fn validate_object_reference(store: &Store, id: &str, path: &Path) ->
 
 pub(super) fn path_under_objects(store: &Store, path: &Path) -> bool {
     path.starts_with(store.root.join("objects"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(super) fn install_shipped_ecosystems() {
+        crate::tailors::install_kernel_tables();
+    }
+
+    /// Every shipped tailor's closure is imported, and a name no tailor
+    /// writes is refused.
+    #[test]
+    fn a_closure_of_every_registered_ecosystem_is_imported() {
+        let path = Path::new(".tog/closures/x.json");
+        let envelope =
+            |name: &str| serde_json::json!({"schema": "closure/1", "ecosystem": name, "body": {}});
+        for tailor in crate::tailors::registry() {
+            assert!(
+                validate_closure_envelope(&envelope(tailor.id()), path).is_ok(),
+                "{}",
+                tailor.id()
+            );
+        }
+        for name in ["zig", "", "rust"] {
+            let error = validate_closure_envelope(&envelope(name), path).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown closure ecosystem"),
+                "{error}"
+            );
+        }
+    }
 }

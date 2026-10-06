@@ -12,6 +12,8 @@ use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
+use crate::kernel::toolchain::input::{InputRow, Sources};
+use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
@@ -91,6 +93,13 @@ impl Tailor for Go {
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
         Ok(project.is_input_file(Path::new("go.mod")))
+    }
+
+    fn toolchain_sources(&self) -> Sources {
+        Sources {
+            discover: toolchain_rows,
+            request: toolchain_request,
+        }
     }
 
     fn input_files(&self) -> &'static str {
@@ -355,4 +364,50 @@ fn go_status(platform: Platform, project: &ProjectRoot, body: &Value) -> io::Res
         ));
     }
     Ok(State::Synced)
+}
+
+/// The files this ecosystem's toolchain version is read from, in its own
+/// tools' precedence order ([`Tailor::toolchain_sources`]).
+fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    use crate::kernel::toolchain::input::{read_go_mod, read_go_mod_toolchain, row_for};
+    Ok(vec![
+        row_for(root, "go.mod", "go", read_go_mod)?,
+        row_for(root, "go.mod", "toolchain", read_go_mod_toolchain)?,
+    ])
+}
+
+/// The selection request [`toolchain_rows`] state.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::invalid;
+    use crate::kernel::toolchain::resolve::{parse_version, value, UPDATE_HINT};
+    use crate::kernel::toolchain::select::{Op, Specifier};
+    use crate::kernel::toolchain::VersionRequest;
+    let mut request = Request::newest();
+    let minimum = match value(rows, "go.mod", "go") {
+        Some(text) => Some(parse_version("go.mod go directive", text)?),
+        None => None,
+    };
+    match value(rows, "go.mod", "toolchain") {
+        Some(text) => {
+            let exact = parse_version("go.mod toolchain directive", text)?;
+            if let Some(minimum) = &minimum {
+                if &exact < minimum {
+                    return Err(invalid(format!(
+                        "go.mod: toolchain go{exact} does not satisfy the go {minimum} minimum; {UPDATE_HINT}"
+                    )));
+                }
+            }
+            request = request.with("go", VersionRequest::Exact(exact));
+        }
+        None => {
+            if let Some(minimum) = minimum {
+                request = request.with(
+                    "go",
+                    VersionRequest::Specifiers(vec![Specifier::new(Op::Ge, minimum)
+                        .map_err(|error| invalid(format!("go.mod: {error}")))?]),
+                );
+            }
+        }
+    }
+    Ok(request)
 }

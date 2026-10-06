@@ -332,6 +332,76 @@ fn layers_point_one_way() {
     );
 }
 
+/// The kernel branches on no ecosystem by name: a `match` arm or a
+/// `matches!` alternative that is a tailor's id or lock ecosystem means an
+/// eighth ecosystem would have to edit the kernel. What an ecosystem knows
+/// goes through a `Tailor` method or a table the tailors install (#255).
+#[test]
+fn the_kernel_branches_on_no_ecosystem_name() {
+    let mut names: Vec<&str> = tog::tailors::registry()
+        .iter()
+        .flat_map(|tailor| [tailor.id(), tailor.lock_ecosystem()])
+        .collect();
+    names.sort();
+    names.dedup();
+    let root = src();
+    let mut files = Vec::new();
+    rust_files(&root.join("kernel"), &mut files);
+    let mut violations = Vec::new();
+    for file in &files {
+        let text = fs::read_to_string(file).unwrap();
+        for (number, line) in non_test(&text).lines().enumerate() {
+            if let Some(name) = ecosystem_arm(line, &names) {
+                violations.push(format!(
+                    "{}:{}: \"{name}\"",
+                    file.strip_prefix(&root).unwrap().display(),
+                    number + 1
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "the kernel matches on an ecosystem name; give the tailors a method or a table instead:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The ecosystem `line` branches on: a quoted name followed by `=>` or
+/// `|`, or preceded by `|`.
+fn ecosystem_arm<'a>(line: &str, names: &[&'a str]) -> Option<&'a str> {
+    let code = line.split("//").next().unwrap_or(line);
+    names.iter().copied().find(|name| {
+        let quoted = format!("\"{name}\"");
+        code.match_indices(&quoted).any(|(at, _)| {
+            let after = code[at + quoted.len()..].trim_start();
+            let before = code[..at].trim_end();
+            after.starts_with("=>") || after.starts_with('|') || before.ends_with('|')
+        })
+    })
+}
+
+#[test]
+fn the_ecosystem_arm_scan_sees_every_spelling() {
+    let names = ["go", "python"];
+    for line in [
+        "        \"python\" => {",
+        "        \"go\" | \"python\" => true,",
+        "    matches!(name, \"node\" | \"go\")",
+        "        \"python\"=> 1,",
+    ] {
+        assert!(ecosystem_arm(line, &names).is_some(), "{line}");
+    }
+    for line in [
+        "    let tool = \"go\";",
+        "    run(&[\"go\", \"build\"]);",
+        "    // \"python\" => no longer here",
+        "        \"golang\" => {",
+    ] {
+        assert_eq!(ecosystem_arm(line, &names), None, "{line}");
+    }
+}
+
 /// Every spelling of a path into another layer is seen: nested groups,
 /// `self` in a group, `super` chains, `$crate`, whitespace inside a group;
 /// and paths that stay in the layer are not reported.

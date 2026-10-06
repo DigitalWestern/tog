@@ -12,6 +12,8 @@ use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox;
+use crate::kernel::toolchain::input::{InputRow, Sources};
+use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::ruby;
@@ -47,6 +49,13 @@ impl Tailor for Ruby {
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
         Ok(project.is_input_file(Path::new("Gemfile")))
+    }
+
+    fn toolchain_sources(&self) -> Sources {
+        Sources {
+            discover: toolchain_rows,
+            request: toolchain_request,
+        }
     }
 
     fn input_files(&self) -> &'static str {
@@ -241,4 +250,39 @@ impl Tailor for Ruby {
     fn toolchain_kinds(&self) -> &'static [&'static str] {
         &["ruby"]
     }
+}
+
+/// The files this ecosystem's toolchain version is read from, in its own
+/// tools' precedence order ([`Tailor::toolchain_sources`]).
+fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    use crate::kernel::toolchain::input::{read_ruby_version, read_tool_versions, row_for};
+    Ok(vec![
+        row_for(root, ".ruby-version", "version", read_ruby_version)?,
+        row_for(root, ".tool-versions", "ruby", |bytes| {
+            read_tool_versions(bytes, "ruby")
+        })?,
+    ])
+}
+
+/// The selection request [`toolchain_rows`] state.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::invalid;
+    use crate::kernel::toolchain::resolve::{exact_or_prefix, parse_version, value, UPDATE_HINT};
+    let mut request = Request::newest();
+    let pinned = value(rows, ".ruby-version", "version");
+    let tools = value(rows, ".tool-versions", "ruby");
+    if let (Some(a), Some(b)) = (pinned, tools) {
+        if a != b {
+            return Err(invalid(format!(
+                ".ruby-version says {a} and .tool-versions says {b}; make them agree, then {UPDATE_HINT}"
+            )));
+        }
+    }
+    if let Some(text) = pinned.or(tools) {
+        request = request.with(
+            "ruby",
+            exact_or_prefix(parse_version(".ruby-version", text)?),
+        );
+    }
+    Ok(request)
 }

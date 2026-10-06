@@ -10,6 +10,8 @@ use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
+use crate::kernel::toolchain::input::{InputRow, Sources};
+use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
@@ -47,6 +49,13 @@ impl Tailor for Python {
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
         inputs::has_python_input(project)
+    }
+
+    fn toolchain_sources(&self) -> Sources {
+        Sources {
+            discover: toolchain_rows,
+            request: toolchain_request,
+        }
     }
 
     fn input_files(&self) -> &'static str {
@@ -276,4 +285,54 @@ impl Tailor for Python {
     fn toolchain_kinds(&self) -> &'static [&'static str] {
         &["cpython", "uv", "native-libs"]
     }
+}
+
+/// The files this ecosystem's toolchain version is read from, in its own
+/// tools' precedence order ([`Tailor::toolchain_sources`]).
+fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    use crate::kernel::toolchain::input::{
+        checked_row_for, read_pyproject_poetry_python, read_pyproject_requires_python,
+        read_python_version, read_setup_cfg_python, read_setup_py_python, row_for,
+    };
+    Ok(vec![
+        row_for(root, ".python-version", "version", read_python_version)?,
+        checked_row_for(
+            root,
+            "pyproject.toml",
+            "project.requires-python",
+            read_pyproject_requires_python,
+        )?,
+        checked_row_for(
+            root,
+            "pyproject.toml",
+            "tool.poetry.dependencies.python",
+            read_pyproject_poetry_python,
+        )?,
+        row_for(
+            root,
+            "setup.cfg",
+            "options.python_requires",
+            read_setup_cfg_python,
+        )?,
+        row_for(root, "setup.py", "python_requires", read_setup_py_python)?,
+    ])
+}
+
+/// The selection request [`toolchain_rows`] state.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::resolve::{
+        python_specifiers, python_version_request, value, PYTHON_SPECIFIER_ROWS,
+    };
+    let mut request = Request::newest();
+    if let Some(text) = value(rows, ".python-version", "version") {
+        request = request.with("cpython", python_version_request(text)?);
+    }
+    for (path, field) in PYTHON_SPECIFIER_ROWS {
+        if let Some(text) = value(rows, path, field) {
+            if let Some(specifiers) = python_specifiers(field, text)? {
+                request = request.with("cpython", specifiers);
+            }
+        }
+    }
+    Ok(request)
 }

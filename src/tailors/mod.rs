@@ -23,7 +23,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
-use crate::kernel::toolchain::{Catalog, Selected};
+use crate::kernel::toolchain::{input, Catalog, Selected};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
@@ -213,6 +213,12 @@ pub trait Tailor: Sync {
     fn lock_ecosystem(&self) -> &'static str {
         self.id()
     }
+
+    /// The declarative files this ecosystem's toolchain version is read
+    /// from, and the selection request they state. The kernel reads them
+    /// through the table [`install_kernel_tables`] fills, by
+    /// [`Tailor::lock_ecosystem`].
+    fn toolchain_sources(&self) -> input::Sources;
 
     /// Are this ecosystem's inputs present in the project directory itself?
     /// The one test `sync`, `plan`, `status`, `deps`, and `fmt` all use.
@@ -817,6 +823,22 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<crate::kernel::type
 /// points call it before they can publish. Idempotent.
 pub fn install_kinds() {
     crate::kernel::objmeta::install_kinds(kind_adapters());
+}
+
+/// Hand the kernel what it reads per ecosystem without naming one: every
+/// tailor's toolchain sources, under its lock ecosystem, and every id whose
+/// closures a root import accepts. The binary calls this before it parses
+/// anything, and unit tests on first use. Idempotent.
+pub fn install_kernel_tables() {
+    crate::kernel::toolchain::input::install_sources(
+        registry()
+            .iter()
+            .map(|tailor| (tailor.lock_ecosystem(), tailor.toolchain_sources()))
+            .collect(),
+    );
+    crate::kernel::store::install_closure_ecosystems(
+        registry().iter().map(|tailor| tailor.id()).collect(),
+    );
 }
 
 /// The tailors whose inputs are present in `dir`, in registry order.

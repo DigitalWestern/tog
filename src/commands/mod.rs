@@ -232,6 +232,7 @@ pub fn relay(invocation: cli::RelayInvocation) -> i32 {
 /// them, so `x` joins nothing.
 fn install_tailor_tables(command: &cli::Command) {
     crate::tailors::install_kinds();
+    crate::tailors::install_kernel_tables();
     if !matches!(
         command,
         cli::Command::X { .. } | cli::Command::XClean { .. }
