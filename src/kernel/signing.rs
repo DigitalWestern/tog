@@ -128,6 +128,20 @@ impl fmt::Debug for SigningKey {
     }
 }
 
+/// The text of a key file, reading at most `cap + 1` bytes of `reader`: a
+/// reader that has more than `cap` is refused, never read to its end.
+fn read_key_text(reader: impl Read, cap: u64) -> Result<String, String> {
+    let mut text = String::new();
+    reader
+        .take(cap + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| format!("cannot read it as UTF-8 text: {error}"))?;
+    if text.len() as u64 > cap {
+        return Err(format!("longer than {cap} bytes; not a key file"));
+    }
+    Ok(text)
+}
+
 impl SigningKey {
     fn from_seed(seed: &[u8; 32]) -> io::Result<Self> {
         let pair = Ed25519KeyPair::from_seed_unchecked(seed)
@@ -190,14 +204,7 @@ impl SigningKey {
         }
         // The size check above is a fast path; the read itself is bounded
         // too, so a file whose reported size lies cannot be read whole.
-        let mut text = String::new();
-        (&file)
-            .take(MAX_KEY_FILE_BYTES + 1)
-            .read_to_string(&mut text)
-            .map_err(|error| refuse(format!("cannot read it as UTF-8 text: {error}")))?;
-        if text.len() as u64 > MAX_KEY_FILE_BYTES {
-            return Err(refuse("longer than 1024 bytes; not a key file".into()));
-        }
+        let text = read_key_text(&file, MAX_KEY_FILE_BYTES).map_err(refuse)?;
         let seed = parse_seed(&text).map_err(refuse)?;
         Self::from_seed(&seed)
     }
@@ -379,6 +386,24 @@ pub fn verify(envelope: &Value) -> Verification {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The read is bounded: an endless reader is refused after `cap + 1`
+    /// bytes instead of being read forever, and exactly `cap` bytes pass.
+    #[test]
+    fn the_key_read_stops_one_byte_past_the_cap() {
+        assert_eq!(
+            read_key_text(std::io::repeat(b'a'), 16).unwrap_err(),
+            "longer than 16 bytes; not a key file"
+        );
+        assert_eq!(
+            read_key_text(&[b'a'; 17][..], 16).unwrap_err(),
+            "longer than 16 bytes; not a key file"
+        );
+        assert_eq!(read_key_text(&[b'a'; 16][..], 16).unwrap(), "a".repeat(16));
+        assert!(read_key_text(&[0xff, 0xfe][..], 16)
+            .unwrap_err()
+            .starts_with("cannot read it as UTF-8 text"));
+    }
     use crate::kernel::testutil::TempDir;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
@@ -889,10 +914,9 @@ mod tests {
             error(&fifo)
         );
         // A file whose reported size lies (procfs says 0) passes the size
-        // check, so the length of what was read is what refuses it. This
-        // pins that check; the `.take()` bounding the read is not visible
-        // here, since an unbounded read of a finite file ends in the same
-        // refusal, only after reading more.
+        // check, so the length of what was read is what refuses it. The
+        // bound on the read itself is `read_key_text`'s, tested on an
+        // endless reader below.
         let environ = Path::new("/proc/self/environ");
         if environ.exists() {
             assert_eq!(fs::metadata(environ).unwrap().len(), 0);
