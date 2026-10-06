@@ -282,16 +282,11 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn absolute_requirements_replaced_by_a_unix_socket_are_changed() {
-        use std::os::fd::AsRawFd;
         let temp = crate::kernel::testutil::TempDir::new();
         let project = ProjectRoot::open(&temp.0).unwrap();
-        let directory = fs::File::open(&temp.0).unwrap();
-        // Keep the socket pathname short even with a long TMPDIR.
-        let alias = format!("/proc/self/fd/{}/socket", directory.as_raw_fd());
-        let _listener = std::os::unix::net::UnixListener::bind(alias).unwrap();
+        let _listener = crate::kernel::testutil::bind_socket(&temp.0.join("socket"));
         let body = json!({"inputs": [{"path": temp.0.join("socket"), "sha256": "old"}]});
         assert!(matches!(
             recorded_inputs_state(&project, &body).unwrap(),

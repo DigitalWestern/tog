@@ -20,6 +20,41 @@ pub(crate) fn tar_create() -> Command {
     command
 }
 
+/// A Unix socket listening at `path`, however long `path` is. A socket
+/// address holds about 108 bytes, which a long `TMPDIR` exceeds. On Linux
+/// the socket is bound through the parent directory's `/proc/self/fd`
+/// alias, so it is made where it lives, on that filesystem, with no
+/// process-wide `chdir`. Elsewhere a long path is bound under `/tmp` and
+/// renamed in, which needs `TMPDIR` on the same filesystem as `/tmp`.
+pub(crate) fn bind_socket(path: &std::path::Path) -> std::os::unix::net::UnixListener {
+    use std::os::unix::net::UnixListener;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        let parent = path.parent().expect("a socket path has a parent");
+        let name = path.file_name().expect("a socket path names a file");
+        let directory = std::fs::File::open(parent).unwrap();
+        let alias = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name);
+        UnixListener::bind(alias).unwrap()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if path.as_os_str().len() < 100 {
+            return UnixListener::bind(path).unwrap();
+        }
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let short = PathBuf::from(format!(
+            "/tmp/tog-sock-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&short);
+        let listener = UnixListener::bind(&short).unwrap();
+        std::fs::rename(&short, path).unwrap();
+        listener
+    }
+}
+
 /// A scratch directory named `tog-<label>-<pid>-<nanos>-<seq>`, gone on
 /// drop even when a store inside it has made its objects read-only: a plain
 /// `remove_dir_all` fails on those and leaves the tree behind, and enough
@@ -159,5 +194,26 @@ impl DoorScope {
             &mut self.attribution,
         )
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    /// A socket path longer than a socket address holds is bound where it
+    /// is, as a socket, on the filesystem of its own directory.
+    #[test]
+    fn bind_socket_takes_a_path_past_the_address_limit() {
+        use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+        let temp = TempDir::named("bind-socket");
+        let deep = temp.0.join("d".repeat(60)).join("e".repeat(60));
+        std::fs::create_dir_all(&deep).unwrap();
+        let path = deep.join("listener.sock");
+        assert!(path.as_os_str().len() > 108, "{}", path.display());
+        let _listener = bind_socket(&path);
+        let stat = std::fs::symlink_metadata(&path).unwrap();
+        assert!(stat.file_type().is_socket());
+        assert_eq!(stat.dev(), std::fs::metadata(&deep).unwrap().dev());
     }
 }

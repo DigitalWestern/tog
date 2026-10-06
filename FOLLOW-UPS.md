@@ -54,8 +54,7 @@ None open.
   - #562 node: say when the locked Node is too old to run a `.ts` file. Pick: refuse naming `tog update --toolchain node`, with `--experimental-strip-types` for 22.6 to 22.17.
   - #564 run: a mixed project where one tailor adds no PATH entry can resolve the program on the host. Pick: confirm, then every `run_env` puts its runtime first and a runtime name never falls through.
   - #565 ci: the `dco` job is skipped by `paths-ignore`, so a pointer-only pull request (allowed since 2026-10-06) merges with no sign-off check. Pick: its own workflow file, when there are outside contributors.
-- **#462: tests: fsroot socket fixture renames across filesystems under a long TMPDIR.** fsroot test socket fixture crosses filesystems with a long TMPDIR. Pick: bind through the held directory fd alias.
-- **#463: tests: sandbox socket fixtures fail before assertions under a long TMPDIR.** sandbox socket fixtures exceed SUN_LEN with a long TMPDIR. Pick: a shared Linux fd-alias binding helper, batched with required sandbox work.
+- **#463: tests: sandbox socket fixtures fail before assertions under a long TMPDIR.** sandbox socket fixtures exceed SUN_LEN with a long TMPDIR. The shared helper is `kernel::testutil::bind_socket` (#462); left is calling it from `sandbox.rs`, batched with required sandbox work.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
@@ -80,7 +79,6 @@ None open.
   - #349 product and CI problems found by the audit.
   - #367 tests: the artifact size caps in kernel::fetch (8 GiB artifact, 256 MiB text) have no test (from the #363 review).
   - #373 sandbox: host-socket scan leftovers (from the #372 review).
-  - #411 tests: an objmeta socket test fails under a long TMPDIR, path over SUN_LEN (found during #400).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:

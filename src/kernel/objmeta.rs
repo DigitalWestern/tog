@@ -1563,15 +1563,10 @@ mod record_value_tests {
             "object metadata id \"not-an-id\" is malformed"
         );
 
-        // A socket cannot be opened at all. Bind through the held directory's
-        // short Linux fd alias so a long TMPDIR cannot exceed sockaddr_un's
-        // pathname limit. The socket still lives at `meta` and is read there.
-        #[cfg(target_os = "linux")]
+        // A socket cannot be opened at all. The socket lives at `meta` and
+        // is read there, however long TMPDIR makes that path.
         {
-            use std::os::fd::AsRawFd;
-            let directory = fs::File::open(&temp.0).unwrap();
-            let alias = format!("/proc/self/fd/{}/{id}.json", directory.as_raw_fd());
-            let listener = std::os::unix::net::UnixListener::bind(alias).unwrap();
+            let listener = crate::kernel::testutil::bind_socket(&meta);
             let error = read_record_at(&meta).map(drop).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
             assert_eq!(
