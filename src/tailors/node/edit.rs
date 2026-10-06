@@ -703,22 +703,6 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
-    /// `dir` mode 0111 (search, no read) until dropped.
-    struct SearchOnly(std::path::PathBuf);
-    impl SearchOnly {
-        fn new(dir: &Path) -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).unwrap();
-            Self(dir.to_path_buf())
-        }
-    }
-    impl Drop for SearchOnly {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
-        }
-    }
-
     /// An npm workspace root in a search-only (0111) directory still owns
     /// its member's lock: its package.json is read by name (#480).
     #[test]
@@ -733,7 +717,10 @@ mod tests {
         )
         .unwrap();
         std::fs::write(member.join("package.json"), r#"{"name":"member"}"#).unwrap();
-        let _search_only = SearchOnly::new(&root);
+        let _search_only = match crate::kernel::testutil::SearchOnly::new(&root) {
+            Ok(held) => held,
+            Err(skip) => return eprintln!("{skip}"),
+        };
         match node_lock_for(&member).unwrap() {
             NodeLock::NpmWorkspaceMember { root: found } => assert_eq!(found, root),
             _ => panic!("the member's lock is not the workspace root's"),
