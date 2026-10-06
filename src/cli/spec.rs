@@ -176,7 +176,8 @@ locked plan into the immutable store, and projects it into the project
 (.venv, node_modules, .tog/...), then prints the command list. Outside a
 project it prints the command list and exits 0. No other verb is needed
 to get here: 'tog run', 'tog env', 'tog build', 'tog <script>' and
-'tog <file>' do the same first whenever the project is not set up or its inputs changed. With
+'tog <file>' do the same first whenever the project is not set up or its
+inputs changed. With
 --frozen, --fresh or --strict the command list is not printed, so a CI
 log ends with the result. A found manifest with no dependencies sets up
 an interpreter-only environment. Adding a dependency is

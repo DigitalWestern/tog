@@ -91,7 +91,6 @@ None open.
   - #328 sandbox: opt Python sdist builds and npm addons into HostView::RuntimeOnly.
   - #329 ruby: give native gem builds tog's pinned native-libs set.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:
-  - #402 selfupdate: `update --self`, `doctor` and `install.sh` cannot read a release while the repository is private.
   - #334 sandbox: RuntimeOnly setup costs ~2 s per native gem; measure on the runner.
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
   - #332 hostview: LD_LIBRARY_PATH outranks DT_RUNPATH for relocated host libraries.

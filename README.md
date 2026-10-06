@@ -71,34 +71,12 @@ is on, `tog doctor` names it.
 
 ## Install
 
-Releases start at `v0.1.0`, built for Linux x86_64 only (macOS arm64
-waits on #66). The repository is private, so the installer below cannot
-download a release yet: install from source. You need a Rust
-toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
-in `~/.cargo/bin`, which rustup already added to PATH:
-
-```sh
-git clone https://github.com/DigitalWestern/tog
-cd tog
-cargo install --path . --locked
-tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
-```
-
-`cargo install --git https://github.com/DigitalWestern/tog --locked` does
-the same without keeping a checkout. The repository is private for now, so
-both need your GitHub access. Do not `cargo install tog` from crates.io:
-that name belongs to an unrelated crate. To update a source install, pull
-and run `cargo install --path . --locked` again.
-
-### The one-line installer, once the repository is public
-
 Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
-tag. Once the repository can be read without logging in (it is private
-now), this is one line on Linux x86_64. It downloads the release binary for
-your machine, checks its sha256, puts it in `~/.local/bin`, adds that
-directory to PATH if it is not already there, and installs bash, zsh, and
-fish completions:
+tag, for Linux x86_64 only (macOS arm64 waits on #66). On Linux x86_64
+this is one line. It downloads the release binary for your machine, checks
+its sha256, puts it in `~/.local/bin`, adds that directory to PATH if it is
+not already there, and installs bash, zsh, and fish completions:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
@@ -111,6 +89,24 @@ store is and roughly how big it gets, and names the version it replaced when
 one was already there. Options: `--dir=<path>`, `--version=<tag>`,
 `--no-modify-path`, `--no-completions`; the header of
 [install.sh](install.sh) lists every file it touches.
+
+### From source
+
+On any other machine, or to run the current `main`: you need a Rust
+toolchain from [rustup](https://rustup.rs); `cargo install` puts the binary
+in `~/.cargo/bin`, which rustup already added to PATH:
+
+```sh
+git clone https://github.com/DigitalWestern/tog
+cd tog
+cargo install --path . --locked
+tog completions zsh > ~/.zfunc/_tog   # bash | zsh | fish; optional
+```
+
+`cargo install --git https://github.com/DigitalWestern/tog --locked` does
+the same without keeping a checkout. Do not `cargo install tog` from
+crates.io: that name belongs to an unrelated crate. To update a source
+install, pull and run `cargo install --path . --locked` again.
 
 To undo it, run the same script with `--uninstall`:
 
@@ -136,10 +132,8 @@ doctor` says when a newer release exists (one request; "not checked" when
 offline, or while no release can be read; an `ok` row naming this machine
 when that release has no build for it), and `tog --version` prints the
 commit and its date, so a stale binary can be told from a current one.
-Nothing checks in the background. While the repository is private, `tog
-update --self` reports that it cannot read the latest release: it asks
-GitHub without logging in, and GitHub answers 404. Releases are built for
-Linux x86_64 only for now.
+Nothing checks in the background. Both ask GitHub without logging in.
+Releases are built for Linux x86_64 only for now.
 
 ## Use
 
