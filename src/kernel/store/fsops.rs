@@ -653,28 +653,42 @@ pub(crate) fn remove_tree_at(dirfd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-/// Remove a possibly read-only staged tree (restore write bits on its
-/// directories first). Unlinking a file needs a writable directory, never a
+/// Remove a possibly read-only or unreadable staged tree (owner rwx is
+/// restored on its directories as they are reached). Unlinking a file needs a writable directory, never a
 /// writable file, so file modes are left alone: an object's file may be a
 /// hard link shared with another object (an assembled Rust toolchain links
 /// its base), and removing one name must not change the other.
 pub fn remove_tree(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fn unlock(p: &Path) -> io::Result<()> {
-        let md = fs::symlink_metadata(p)?;
-        if !md.is_dir() {
-            return Ok(());
+    // The tree goes through the same held-descriptor removal GC uses: the
+    // parent is opened once, the entry is removed only while it is still
+    // the one stat saw, and nothing below it is reached by a pathname. A
+    // directory with no read or search permission (mode 000) has its
+    // owner bits restored through its own descriptor, a symlink is
+    // unlinked and never followed, and file modes are left alone.
+    let (parent, name) = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => (parent, name),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} names no directory entry to remove", path.display()),
+            ))
         }
-        let mut perms = md.permissions();
-        perms.set_mode(perms.mode() | 0o200);
-        let _ = fs::set_permissions(p, perms);
-        for entry in fs::read_dir(p)? {
-            unlock(&entry?.path())?;
-        }
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let parent = fs::File::open(parent)?;
+    let expected = stat_at(parent.as_raw_fd(), name.as_bytes())?;
+    if remove_tree_entry_if_same(parent.as_raw_fd(), name.as_bytes(), &expected)? {
         Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            format!("{} was replaced while it was removed", path.display()),
+        ))
     }
-    let _ = unlock(path);
-    fs::remove_dir_all(path)
 }
 
 /// Open an advisory lock without ever following a replacement or symlink at
@@ -793,4 +807,116 @@ pub fn restore_write_bits(path: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `remove_tree` and the cleanups built on it (a commit's rollback of its
+/// staged tree, `TempDir` teardown) remove directories with no read or
+/// search permission, and never reach through a symlink.
+#[cfg(test)]
+mod remove_tree_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Under `root`: a mode-000 directory and a search-only one, each
+    /// holding a read-only file; a symlink to `outside`; and a hard link to
+    /// `shared`, a read-only file outside the tree. `root` itself ends up
+    /// mode 000.
+    fn plant(root: &Path, outside: &Path, shared: &Path) {
+        for (dir, bits) in [("closed", 0o000), ("search-only", 0o100)] {
+            let dir = root.join("nested").join(dir);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("file"), "data").unwrap();
+            mode(&dir.join("file"), 0o444);
+            mode(&dir, bits);
+        }
+        std::os::unix::fs::symlink(outside, root.join("link")).unwrap();
+        fs::hard_link(shared, root.join("shared")).unwrap();
+        mode(root, 0o000);
+    }
+
+    /// The external symlink target and the hard-linked file survive,
+    /// with the file's mode untouched.
+    fn assert_outside_kept(outside: &Path, shared: &Path) {
+        assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "outside");
+        assert_eq!(fs::read_to_string(shared).unwrap(), "shared");
+        let kept = fs::metadata(shared).unwrap();
+        assert_eq!(kept.permissions().mode() & 0o777, 0o444);
+        assert_eq!(std::os::unix::fs::MetadataExt::nlink(&kept), 1);
+    }
+
+    fn outside(temp: &TempDir) -> (PathBuf, PathBuf) {
+        let outside = temp.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), "outside").unwrap();
+        let shared = temp.0.join("shared");
+        fs::write(&shared, "shared").unwrap();
+        mode(&shared, 0o444);
+        (outside, shared)
+    }
+
+    #[test]
+    fn unreadable_and_search_only_directories_are_removed() {
+        let temp = TempDir::named("remove-tree-closed");
+        let (outside, shared) = outside(&temp);
+        let root = temp.0.join("tree");
+        fs::create_dir(&root).unwrap();
+        plant(&root, &outside, &shared);
+        remove_tree(&root).unwrap();
+        assert!(fs::symlink_metadata(&root).is_err());
+        assert_outside_kept(&outside, &shared);
+    }
+
+    #[test]
+    fn a_symlink_given_as_the_tree_is_unlinked_not_followed() {
+        let temp = TempDir::named("remove-tree-link");
+        let (outside, shared) = outside(&temp);
+        let link = temp.0.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        remove_tree(&link).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_outside_kept(&outside, &shared);
+    }
+
+    #[test]
+    fn a_temp_dir_holding_unreadable_directories_is_torn_down() {
+        let keep = TempDir::named("remove-tree-teardown-keep");
+        let (outside, shared) = outside(&keep);
+        let temp = TempDir::named("remove-tree-teardown");
+        let root = temp.0.clone();
+        plant(&root, &outside, &shared);
+        drop(temp);
+        assert!(fs::symlink_metadata(&root).is_err());
+        assert_outside_kept(&outside, &shared);
+    }
+
+    /// A commit that finds its object already published (a cache hit)
+    /// rolls its staged tree back with `remove_tree`.
+    #[test]
+    fn a_cache_hit_rolls_back_an_unreadable_staged_tree() {
+        let temp = TempDir::named("remove-tree-rollback");
+        let (outside, shared) = outside(&temp);
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let id = store.publish_bare_test("rollback", "1");
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let staged = store.stage_with_activity(&activity).unwrap();
+        fs::create_dir(staged.join("tree")).unwrap();
+        plant(&staged.join("tree"), &outside, &shared);
+        let identity = crate::kernel::types::Identity {
+            kind: "test".into(),
+            name: "rollback".into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        };
+        assert_eq!(identity.object_id(), id);
+        store
+            .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &ObjectDeps::new())
+            .unwrap();
+        assert!(fs::symlink_metadata(&staged).is_err());
+        assert_outside_kept(&outside, &shared);
+    }
 }
