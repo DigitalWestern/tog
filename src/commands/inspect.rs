@@ -801,7 +801,7 @@ fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
         let Ok(MetaFile::File(file)) = store.open_object_meta(id) else {
             continue;
         };
-        let Ok(value) = serde_json::from_reader::<_, Value>(io::BufReader::new(file)) else {
+        let Ok(Ok(value)) = crate::kernel::store::read_meta_json(&file) else {
             continue;
         };
         let identity = &value["identity"];
