@@ -1010,20 +1010,11 @@ pub fn prepare_run_home(scratch_home: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Env for `tog run` (MIX_ENV passes through from the user's shell —
-/// it's on the remove-prefix list, so re-set it when present).
-pub fn run_env(
-    beam_obj: &Path,
-    deps_path: &Path,
-    build_root: &Path,
-    scratch_home: &Path,
-) -> io::Result<(Vec<&'static str>, Vec<&'static str>, Vec<(String, String)>)> {
+/// [`forced_env`] with the child's home moved under `scratch_home`
+/// ([`prepare_run_home`]): the host's HOME and XDG config would let
+/// `.erlang`, `.iex.exs` and rebar3 global plugins back in.
+fn homed_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(String, String)> {
     let mut set = forced_env(beam_obj, deps_path, scratch_home);
-    set.push((
-        "MIX_BUILD_ROOT".to_string(),
-        build_root.display().to_string(),
-    ));
-    // Host HOME/XDG config would let rebar3 global plugins back in.
     set.push(("HOME".to_string(), scratch_home.display().to_string()));
     set.push((
         "XDG_CONFIG_HOME".to_string(),
@@ -1032,6 +1023,34 @@ pub fn run_env(
     set.push((
         "XDG_CACHE_HOME".to_string(),
         scratch_home.join("xdg-cache").display().to_string(),
+    ));
+    set
+}
+
+/// Env for a lone script (`tog t.exs` with no Elixir project): the scrub
+/// of [`run_env`] with no deps and no build root. `HEX_OFFLINE=1` and the
+/// scratch Mix and Hex homes mean a `Mix.install` in the script cannot
+/// fetch, and finds nothing the host installed.
+pub fn lone_env(beam_obj: &Path, scratch_home: &Path) -> crate::tailors::EnvScrub {
+    (
+        ENV_REMOVE_PREFIXES.to_vec(),
+        ENV_REMOVE.to_vec(),
+        homed_env(beam_obj, &scratch_home.join("deps"), scratch_home),
+    )
+}
+
+/// Env for `tog run` (MIX_ENV passes through from the user's shell —
+/// it's on the remove-prefix list, so re-set it when present).
+pub fn run_env(
+    beam_obj: &Path,
+    deps_path: &Path,
+    build_root: &Path,
+    scratch_home: &Path,
+) -> io::Result<crate::tailors::EnvScrub> {
+    let mut set = homed_env(beam_obj, deps_path, scratch_home);
+    set.push((
+        "MIX_BUILD_ROOT".to_string(),
+        build_root.display().to_string(),
     ));
     if let Ok(env) = std::env::var("MIX_ENV") {
         // Strict: nonempty, bounded, loud on garbage — never silently dev.

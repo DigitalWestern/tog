@@ -137,7 +137,10 @@ impl Tailor for Ruby {
         Ok(true)
     }
 
-    /// A lone script runs on the interpreter alone, with no gems.
+    /// A lone script runs on the interpreter alone, with no gems: an
+    /// empty gem home in the store's run home for this directory, and the
+    /// host's RUBYOPT, GEM_PATH and Bundler settings removed as `tog run`
+    /// removes them.
     fn lone_file(
         &self,
         ctx: &Context,
@@ -145,7 +148,11 @@ impl Tailor for Ruby {
         _extension: &str,
     ) -> io::Result<Option<LoneFile>> {
         let runtime = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        Ok(Some(LoneFile::in_bin(&runtime, "ruby")))
+        let gem_home = ctx.store.run_home(&ctx.project_dir(), "ruby")?.join("gems");
+        std::fs::create_dir_all(&gem_home)?;
+        Ok(Some(
+            LoneFile::in_bin(&runtime, "ruby").scrubbed(ruby::lone_env(&gem_home)),
+        ))
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {

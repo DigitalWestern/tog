@@ -125,11 +125,13 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
 /// `tog <file>`: a first word that names a source file runs it with its
 /// ecosystem's program inside the project's environment, so `tog app.py`
 /// is `tog run python app.py`. The extension picks the tailor
-/// ([`Tailor::source_files`]), and the project has to have that ecosystem:
-/// an npm-only project does not run `app.py` with whatever `python` the
-/// host has. A package.json script of the same name was already taken by
-/// the caller, so an explicit script wins over a file. `None`: the word is
-/// not an existing file.
+/// ([`Tailor::source_files`]). When the project lacks that ecosystem, or
+/// there is no project, the file runs on the ecosystem's runtime alone
+/// ([`cli::Command::File`], `file.rs`): an npm-only project runs `app.py`
+/// on a store CPython, never on whatever `python` the host has. A
+/// package.json script of the same name was already taken by the caller,
+/// so an explicit script wins over a file. `None`: the word is not an
+/// existing file.
 fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Resolved>> {
     let path = Path::new(name);
     if !path.is_file() {
