@@ -283,7 +283,7 @@ pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
     let mut policy: Policy = toml::from_str(text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("parse {}: {e}", path.display()),
+            crate::kernel::tomlerr::describe(&path.display().to_string(), text, &e),
         )
     })?;
     // One spelling from here on: a file may name a kind either way, and
@@ -2364,7 +2364,7 @@ deny = ["git-dependency"]"#,
             let error = parse_file(path, text).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{what}");
             assert!(
-                error.to_string().starts_with("parse policy.toml"),
+                error.to_string().starts_with("policy.toml is not valid TOML"),
                 "{what}: {error}"
             );
         }
@@ -2373,6 +2373,34 @@ deny = ["git-dependency"]"#,
             toml::to_string(&policy).unwrap(),
             format!("strict = false\ndeny = []\n\n[signing]\ntrusted = [\"{lower}\"]\n")
         );
+    }
+
+    /// A policy file whose value has the wrong type: serde's message quotes
+    /// the value, and a policy file can be a link to the signing key, so
+    /// the refusal names where and never what.
+    #[test]
+    fn a_wrongly_typed_policy_value_is_refused_without_its_text() {
+        let secret = "ed25519:c2VjcmV0LXNlZWQtYnl0ZXMtdGhhdC1tdXN0LW5vdC1sZWFr";
+        for text in [
+            format!("[signing]\ntrusted = \"{secret}\"\n"),
+            format!("strict = \"{secret}\"\n"),
+            format!("strict = false\ndeny = \"{secret}\"\n"),
+        ] {
+            let error = toml::from_str::<Policy>(&text).unwrap_err();
+            assert!(
+                error.message().contains("c2VjcmV0"),
+                "the premise: serde quotes the value: {}",
+                error.message()
+            );
+            let error = parse_file(Path::new("policy.toml"), &text)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("c2VjcmV0"), "{error}");
+            assert!(
+                error.starts_with("policy.toml is not valid TOML at line "),
+                "{error}"
+            );
+        }
     }
 
     #[test]

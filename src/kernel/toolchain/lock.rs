@@ -154,8 +154,13 @@ impl ToolchainLock {
     pub fn parse(bytes: &[u8]) -> io::Result<Self> {
         let text =
             std::str::from_utf8(bytes).map_err(|_| invalid("tog-toolchain.toml is not UTF-8"))?;
-        let inner: LockFile =
-            toml::from_str(text).map_err(|e| invalid(format!("tog-toolchain.toml: {e}")))?;
+        let inner: LockFile = toml::from_str(text).map_err(|e| {
+            invalid(crate::kernel::tomlerr::describe(
+                "tog-toolchain.toml",
+                text,
+                &e,
+            ))
+        })?;
         let lock = Self { inner };
         lock.validate()?;
         Ok(lock)

@@ -335,7 +335,15 @@ fn read_text(project: &ProjectRoot, path: &Path) -> io::Result<String> {
 }
 
 fn parse_toml(path: &Path, text: &str) -> io::Result<toml::Value> {
-    toml::from_str(text).map_err(|e| unreadable(path, e))
+    toml::from_str(text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}; the manifest is broken, or this is a tog bug",
+                crate::kernel::tomlerr::describe(&path.display().to_string(), text, &e)
+            ),
+        )
+    })
 }
 
 fn toml_json(value: &toml::Value) -> io::Result<serde_json::Value> {
