@@ -22,8 +22,22 @@ use std::io::Read;
 use sha2::{Digest as _, Sha256, Sha512};
 use tog::kernel::toolchain::{ArtifactRow, Bundle};
 
+/// One agent for every request, with timeouts: a stalled upstream fails
+/// the test instead of hanging the shard. The read timeout bounds each
+/// stall, not a whole download, so a large archive on a slow link passes.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(30))
+            .timeout_read(std::time::Duration::from_secs(60))
+            .build()
+    })
+}
+
 fn get(url: &str) -> Vec<u8> {
-    let response = ureq::get(url)
+    let response = agent()
+        .get(url)
         .call()
         .unwrap_or_else(|e| panic!("GET {url}: {e}"));
     let mut body = Vec::new();

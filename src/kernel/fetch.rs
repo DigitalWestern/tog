@@ -713,15 +713,20 @@ fn download_toolchain_artifact_under(
 /// CDN URL a redirect leads to carries its signature in the query string,
 /// and a mirror URL may carry credentials before its host; neither belongs
 /// in a message a user pastes into an issue (#348).
+///
+/// The credentials go first, on the raw string: a password may hold a `?`
+/// or `#`, so cutting the query first would keep the part before it.
 pub(crate) fn shown_url(url: &str) -> std::borrow::Cow<'_, str> {
-    let url = url.split(['?', '#']).next().unwrap_or(url);
+    fn without_query(url: &str) -> &str {
+        url.split(['?', '#']).next().unwrap_or(url)
+    }
     let Some((scheme, rest)) = url.split_once("://") else {
-        return url.into();
+        return without_query(url).into();
     };
     let authority_end = rest.find('/').unwrap_or(rest.len());
     match rest[..authority_end].rfind('@') {
-        Some(at) => format!("{scheme}://{}", &rest[at + 1..]).into(),
-        None => url.into(),
+        Some(at) => format!("{scheme}://{}", without_query(&rest[at + 1..])).into(),
+        None => without_query(url).into(),
     }
 }
 
@@ -1477,11 +1482,61 @@ mod tests {
                 "https://user:pass@mirror.example/x?y",
                 "https://mirror.example/x",
             ),
+            ("https://user:p?ss@host.example/x", "https://host.example/x"),
+            (
+                "https://user:p#ss@host.example/x?sig=s",
+                "https://host.example/x",
+            ),
+            ("https://u:a@b@host.example/x", "https://host.example/x"),
+            ("https://user:p?ss@host.example", "https://host.example"),
             ("https://mirror.example/a@b", "https://mirror.example/a@b"),
             ("https://mirror.example", "https://mirror.example"),
             ("not a url?q", "not a url"),
         ] {
             assert_eq!(shown_url(url), shown, "{url}");
+        }
+    }
+
+    /// A transport failure tog has no sentence for (a malformed reply)
+    /// falls back to ureq's kind and detail, still without the URL ureq's
+    /// own text leads with (#348).
+    #[test]
+    fn an_unexplained_transport_failure_names_no_url() {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = io::Read::read(&mut stream, &mut request);
+            let _ = stream.write_all(b"not an http reply\r\n\r\n");
+        });
+        let url =
+            format!("http://user:secret@127.0.0.1:{port}/signed/path?X-Amz-Signature=s1gn4ture");
+        let error = ureq::AgentBuilder::new()
+            .build()
+            .get(&url)
+            .call()
+            .unwrap_err();
+        server.join().unwrap();
+        let ureq::Error::Transport(transport) = &error else {
+            panic!("not a transport failure: {error}");
+        };
+        assert!(
+            transport.to_string().contains("/signed/path"),
+            "{transport}"
+        );
+        assert!(transport_cause_with(transport.kind(), "").is_none());
+        let cause = network_cause(&error);
+        assert!(cause.starts_with(&transport.kind().to_string()), "{cause}");
+        for leak in [
+            "127.0.0.1",
+            "/signed/path",
+            "secret",
+            "X-Amz-Signature",
+            "s1gn4ture",
+        ] {
+            assert!(!cause.contains(leak), "{leak}: {cause}");
         }
     }
 
