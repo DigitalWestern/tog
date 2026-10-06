@@ -792,20 +792,17 @@ pub(super) fn pnpm_nodes(
             _ => None,
         });
         if yaml_str(resolution.and_then(|map| map.get("type"))) == Some("directory") {
-            // pnpm 6 represents workspace source roots as a synthetic
-            // packages entry such as 'file:'; importer edges become NpmLink.
+            // pnpm 6 writes a workspace source root as a synthetic 'file:'
+            // entry (an NpmLink) and a named one as a package (`v6_directory_snapshots`).
             continue;
         }
-        let Some(snapshot_key) = normalize_pnpm_snapshot_key(raw_key) else {
-            return Err(err(format!(
+        let bad = || {
+            err(format!(
                 "packages entry {raw_key:?} has no name@version identity"
-            )));
+            ))
         };
-        let Some((name, version)) = normalize_pnpm_identity(&snapshot_key) else {
-            return Err(err(format!(
-                "packages entry {raw_key:?} has no name@version identity"
-            )));
-        };
+        let snapshot_key = normalize_pnpm_snapshot_key(raw_key).ok_or_else(bad)?;
+        let (name, version) = normalize_pnpm_identity(&snapshot_key).ok_or_else(bad)?;
         // pnpm keeps npm's list when a package has several hashes.
         let integrity = resolution
             .and_then(|resolution| yaml_str(resolution.get("integrity")))
@@ -878,6 +875,9 @@ pub(super) fn pnpm_nodes(
                     yaml_map(value, &format!("packages {raw_key}"))?.clone(),
                 );
             }
+        }
+        for (snapshot_key, snapshot) in v6_directory_snapshots(packages)? {
+            snapshots.entry(snapshot_key).or_insert(snapshot);
         }
     }
 

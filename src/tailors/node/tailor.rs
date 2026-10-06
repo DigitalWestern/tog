@@ -537,6 +537,14 @@ impl Tailor for Node {
             // integrity is an SRI string (base64), not a hex digest;
             // recorded as a property rather than a malformed hash entry.
             push_property(&mut c, "tog:integrity", &required(eco, &p, "integrity")?);
+            // A `file:` directory package is packed from the project, not
+            // fetched from the registry: a registry purl would name a
+            // package that may exist there with other contents. Its
+            // identity is its directory, and the integrity of the pack.
+            if let Some(dir) = p["local"].as_str() {
+                c.as_object_mut().unwrap().remove("purl");
+                push_property(&mut c, "tog:local", dir);
+            }
             out.push(c);
         }
         out.push(toolchain_component(
@@ -1181,5 +1189,50 @@ mod tests {
         let mut mode = fs::metadata(&object).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
         fs::set_permissions(&object, mode).unwrap();
+    }
+
+    /// A `file:` directory package is a copy of a project directory, not a
+    /// registry package: its SBOM component names the directory and
+    /// carries no registry purl, which would claim a package that may
+    /// exist on the registry with other contents.
+    #[test]
+    fn a_file_directory_package_is_not_given_a_registry_purl() {
+        let body = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [
+                {"path": "node_modules/b", "version": "1.0.0", "integrity": "sha512-b"},
+                {
+                    "path": "node_modules/local",
+                    "version": "2.1.0",
+                    "integrity": "sha256-l",
+                    "local": "vendor/local",
+                },
+            ],
+        });
+        let mut out = Vec::new();
+        Node.sbom_components("node", &body, &mut out).unwrap();
+        let property = |c: &Value, name: &str| -> Option<String> {
+            c["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == name)
+                .map(|p| p["value"].as_str().unwrap().to_string())
+        };
+        let registry = out.iter().find(|c| c["name"] == "b").unwrap();
+        assert_eq!(registry["purl"], "pkg:npm/b@1.0.0");
+        assert_eq!(property(registry, "tog:local"), None);
+        let local = out.iter().find(|c| c["name"] == "local").unwrap();
+        assert!(local.get("purl").is_none(), "{local}");
+        assert_eq!(local["version"], "2.1.0");
+        assert_eq!(
+            property(local, "tog:local").as_deref(),
+            Some("vendor/local")
+        );
+        assert_eq!(
+            property(local, "tog:integrity").as_deref(),
+            Some("sha256-l")
+        );
     }
 }
