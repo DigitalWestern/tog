@@ -437,8 +437,9 @@ deps are loaded), `.go` (go run).
 A TypeScript file runs on the project's Node as it is from 23.6 and
 22.18, which strip types themselves, and with `--experimental-strip-types`
 from 22.6. An older Node is refused before the sync, naming the version:
-raise the version the project asks for, then `tog update --toolchain node`
-moves the lock.
+raise the version the project asks for (and run `tog update --toolchain node`
+if `tog-toolchain.toml` pins Node). The check applies to `tog <file>` only:
+`tog run node app.ts` hands the file to Node as it is.
 Uppercase extensions and paths with directories count. In a project
 without that ecosystem, or outside any project, the file runs on the
 ecosystem's runtime alone, the one `tog x` would use there, realized into
@@ -453,7 +454,8 @@ and a private home, so a `Mix.install` cannot fetch): `python3` runs a
 `.py`, `node` a `.js` or `.ts` (by the TypeScript rule above), `ruby` a
 `.rb` with no gems, `elixir` a `.exs`, and `go run` a `.go` with module
 mode off and scratch caches, so a go.mod above the file does not apply and
-only the standard library resolves (`GOPROXY=off`). A `.rs` or `.cs` file is refused with
+only the standard library resolves (`GOPROXY=off`). A `.rs` or `.cs` file
+is refused with
 a pointer to `tog build`: Rust builds a crate, never a lone file, and a
 .NET file-based app would restore packages outside the lock. A file with any other extension is a usage error that names
 `tog run <program> <file>`. A package.json script with the same name as

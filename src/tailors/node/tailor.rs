@@ -713,8 +713,9 @@ fn typescript_runner(version: &str) -> Result<&'static [&'static str], String> {
         Some(22) if minor >= 6 => Ok(&["node", "--experimental-strip-types"]),
         _ => Err(format!(
             "the project's Node is {version}, which cannot run TypeScript (Node strips types \
-             from 22.6 on); raise the Node version the project asks for, then 'tog update \
-             --toolchain node' moves the lock in tog-toolchain.toml"
+             from 22.6 on); raise the Node version the project asks for (its .node-version, \
+             package.json engines or similar), and if tog-toolchain.toml pins Node, run 'tog \
+             update --toolchain node' to move that pin"
         )),
     }
 }
@@ -778,6 +779,7 @@ mod tests {
         for version in ["22.5.1", "21.7.3", "20.19.0", "garbage"] {
             let why = typescript_runner(version).unwrap_err();
             assert!(why.contains(&format!("Node is {version}")), "{why}");
+            assert!(why.contains(".node-version"), "{why}");
             assert!(why.contains("tog update --toolchain node"), "{why}");
         }
     }
