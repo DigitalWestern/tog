@@ -558,6 +558,13 @@ fn tree_digest_refreshed(root: &Path, cache: Option<&Path>) -> io::Result<Digest
     tree_digest_quiet(root, cache, false, quiet_before())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Run between the tree walk and the cache rewrite, for the test that
+    /// the store's lease is held across both.
+    static AFTER_TREE_WALK: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
 /// A file changed in the same clock tick as its hash could keep its key
 /// with other bytes, so only files quiet for a while are remembered.
 fn quiet_before() -> i64 {
@@ -621,6 +628,10 @@ fn tree_digest_quiet(
         hasher.entry(path, &entry, Some(&sha256));
         Ok(())
     })?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_TREE_WALK.with(std::cell::Cell::get) {
+        hook();
+    }
     if let Some(cache) = cache {
         if learned != stored {
             save_cache(cache, &learned);
@@ -699,7 +710,11 @@ fn cache_path(store: &Store, tree: &Path) -> PathBuf {
 /// The cache of the active store, when there is one, with the shared lease
 /// that keeps it from being swept while `select` reads and writes it. The
 /// store is only located, never created, and a busy one is skipped: the
-/// cache is a shortcut, and without it the files are read.
+/// cache is a shortcut, and without it the files are read. So is a store
+/// that fails to open or lease, its error dropped. That includes a store
+/// this thread already holds exclusively: the shared lease cannot be had
+/// alongside it, so `select` waits out the lease's retries (about 45 ms)
+/// and then hashes the tree without the cache.
 fn store_cache(tree: &Path) -> Option<(PathBuf, StoreActivity)> {
     Store::existing_shared()
         .ok()
@@ -1106,6 +1121,55 @@ mod tests {
 
     fn no_cache(_: &Path) -> Option<(PathBuf, StoreActivity)> {
         None
+    }
+
+    thread_local! {
+        static LEASED_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+        static EXCLUSIVE_AFTER_WALK: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// `store_cache` for the store at `LEASED_ROOT`.
+    fn leased_cache(tree: &Path) -> Option<(PathBuf, StoreActivity)> {
+        let store = Store::for_test(LEASED_ROOT.with_borrow(Clone::clone)?);
+        let activity = store.try_activity_shared().unwrap()?;
+        Some((cache_path(&store, tree), activity))
+    }
+
+    /// `select` holds the cache's shared lease from before the tree walk
+    /// to past the cache rewrite: an exclusive job cannot start between
+    /// them (#434).
+    #[test]
+    fn the_cache_lease_is_held_while_the_tree_is_hashed() {
+        if !crate::kernel::sandbox::linux_ready("the_cache_lease_is_held_while_the_tree_is_hashed")
+        {
+            return;
+        }
+        let dir = temp("leased");
+        fake_toolchain(&dir.0.join("tree"), host(), "1.96.1");
+        let root = dir.0.join("store");
+        for sub in ["objects", "meta", "tmp", "cache"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        LEASED_ROOT.set(Some(root.clone()));
+        AFTER_TREE_WALK.set(Some(|| {
+            let root = LEASED_ROOT.with_borrow(Clone::clone).unwrap();
+            let exclusive = Store::for_test(root).try_activity_exclusive().unwrap();
+            EXCLUSIVE_AFTER_WALK.set(Some(exclusive.is_some()));
+        }));
+        let selected = select_with(host(), &dir.0, &[path_row("tree")], leased_cache);
+        AFTER_TREE_WALK.set(None);
+        LEASED_ROOT.set(None);
+        selected.unwrap().unwrap();
+        assert_eq!(
+            EXCLUSIVE_AFTER_WALK.get(),
+            Some(false),
+            "an exclusive lease was free between the tree walk and the cache rewrite"
+        );
+        // Control: once `select` returns, the lease is released.
+        assert!(Store::for_test(root)
+            .try_activity_exclusive()
+            .unwrap()
+            .is_some());
     }
 
     /// Links are resolved against the tree on disk, through the links they
