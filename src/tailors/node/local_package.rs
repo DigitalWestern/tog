@@ -14,8 +14,14 @@
 //! an edit to the source is a change, as an edit to package.json is.
 //!
 //! The directory is read through the held project descriptor. A symlink
-//! inside it is followed, as a pathname read inside the project would
-//! follow it; a FIFO, socket or device is refused. `node_modules` and
+//! inside it is followed when its target lies inside the project, and
+//! refused when it leads outside (an absolute target, or one that climbs
+//! past the project root): the copy holds the project's own files, never
+//! what a link happens to point at. A directory reached twice on one path
+//! (a link to an ancestor) is refused rather than walked again, and a
+//! directory past `MAX_ENTRIES` names or `MAX_BYTES` of content is refused
+//! rather than packed. A FIFO, socket or device is skipped, as `npm pack`
+//! skips everything that is not a file or a directory. `node_modules` and
 //! `.git` directories are left out, at any depth, as `npm pack` leaves
 //! them out. Other `npm pack` rules (the `files` list, `.npmignore`) are
 //! not applied: the copy holds everything else in the directory.
@@ -33,9 +39,29 @@ use std::path::{Path, PathBuf};
 /// from the project and placed in the cache under its integrity.
 pub(crate) const URL_PREFIX: &str = "file:";
 
-/// Directory nesting past this is refused: a symlink to an ancestor would
-/// otherwise be followed forever.
+/// Directory nesting past this is refused. A link to an ancestor is
+/// caught by the directory identities on the path; this is the backstop.
 const MAX_DEPTH: usize = 64;
+
+/// What a `file:` directory may hold before packing it is refused: more
+/// than this is not a package but a tree someone pointed a `file:` at by
+/// mistake, and packing it would fill the store.
+#[derive(Clone, Copy)]
+struct Limits {
+    /// Names walked, files, directories and skipped entries alike.
+    entries: usize,
+    /// Bytes of file content.
+    bytes: u64,
+}
+
+const LIMITS: Limits = Limits {
+    entries: 200_000,
+    bytes: 4 << 30,
+};
+
+/// The largest size the 12-byte octal ustar field holds; a larger member
+/// carries its size in a PAX record.
+const USTAR_MAX_SIZE: u64 = 0o77777777777;
 
 /// The project-relative directory of a `file:` directory package.
 pub(crate) fn source_dir(package: &NpmPackage) -> Option<&str> {
@@ -118,7 +144,8 @@ pub(crate) fn stage(
 /// The `file:` directory packages of a closure's `packages` rows (each
 /// names its directory as `local`) whose directory no
 /// longer packs to the recorded integrity, by directory. A directory that
-/// cannot be packed any more (removed, or holding a FIFO) is changed too.
+/// cannot be packed any more (removed, or now holding a symlink out of
+/// the project) is changed too.
 pub(crate) fn changed(project: &ProjectRoot, packages: &[serde_json::Value]) -> Vec<String> {
     let mut changed = Vec::new();
     for package in packages {
@@ -157,17 +184,37 @@ enum Member {
 
 /// Write the gzipped tarball of `dir` to `out`.
 pub(crate) fn pack(project: &ProjectRoot, dir: &str, out: &mut impl Write) -> io::Result<()> {
-    if project.input_entry(Path::new(dir))? != Entry::Directory {
+    pack_within(project, dir, out, LIMITS)
+}
+
+fn pack_within(
+    project: &ProjectRoot,
+    dir: &str,
+    out: &mut impl Write,
+    limits: Limits,
+) -> io::Result<()> {
+    // The directory itself may be reached through a symlink: resolve it
+    // once, and walk the directory it names, inside the project.
+    let base = resolve_inside(project, Path::new(dir))?
+        .ok_or_else(|| err(format!("the file: package {dir} does not exist")))?;
+    if project.input_entry(&base)? != Entry::Directory {
         return Err(err(format!("the file: package {dir} is not a directory")));
     }
-    let mut members = Vec::new();
-    collect(project, Path::new(dir), "", 0, &mut members)?;
+    let mut walk = Walk {
+        project,
+        limits,
+        on_path: Vec::new(),
+        entries: 0,
+        members: Vec::new(),
+    };
+    walk.collect(&base, "", 0)?;
     let mut gzip = flate2::GzBuilder::new()
         .mtime(0)
         .operating_system(255)
         .write(out, flate2::Compression::default());
     write_member(&mut gzip, "package/", b'5', 0o755, 0, &mut io::empty())?;
-    for member in members {
+    let mut bytes = 0u64;
+    for member in walk.members {
         match member {
             Member::Dir(name) => {
                 write_member(&mut gzip, &name, b'5', 0o755, 0, &mut io::empty())?;
@@ -180,6 +227,14 @@ pub(crate) fn pack(project: &ProjectRoot, dir: &str, out: &mut impl Write) -> io
                 if !meta.is_file() {
                     return Err(err(format!(
                         "{} is not a regular file; a file: package holds files and directories only",
+                        path.display()
+                    )));
+                }
+                bytes = bytes.saturating_add(meta.len());
+                if bytes > limits.bytes {
+                    return Err(err(format!(
+                        "the file: package {dir} holds more than {} bytes of files (at {}); a file: package is a copy of a package, not of a data set",
+                        limits.bytes,
                         path.display()
                     )));
                 }
@@ -198,53 +253,119 @@ pub(crate) fn pack(project: &ProjectRoot, dir: &str, out: &mut impl Write) -> io
     gzip.finish()?.flush()
 }
 
-/// Every member below `dir`, depth first in name order.
-fn collect(
-    project: &ProjectRoot,
-    dir: &Path,
-    prefix: &str,
-    depth: usize,
-    members: &mut Vec<Member>,
-) -> io::Result<()> {
-    if depth > MAX_DEPTH {
-        return Err(err(format!(
-            "{} nests deeper than {MAX_DEPTH} directories; a symlink loop?",
-            dir.display()
-        )));
-    }
-    let names = project
-        .read_input_dir(dir)?
-        .ok_or_else(|| err(format!("{} vanished while packing", dir.display())))?;
-    for name in names {
-        let text = name
-            .to_str()
-            .ok_or_else(|| err(format!("{}: a name that is not UTF-8", dir.display())))?;
-        if text == "node_modules" || text == ".git" {
-            continue;
+/// Where the project-relative `path` leads once every symlink in it is
+/// followed, as a project-relative path again: `None` when it leads to
+/// nothing, an error when it leads outside the project or to the project
+/// root itself. The check is against the held root's path, which `open`
+/// made canonical and nothing here resolves again.
+fn resolve_inside(project: &ProjectRoot, path: &Path) -> io::Result<Option<PathBuf>> {
+    let target = match std::fs::canonicalize(project.path().join(path)) {
+        Ok(target) => target,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("{}: cannot follow the symlink: {error}", path.display()),
+            ))
         }
-        let path = dir.join(&name);
-        let member = format!("package/{prefix}{text}");
-        match project.input_entry(&path)? {
-            Entry::Regular => members.push(Member::File { name: member, path }),
-            Entry::Directory => {
-                members.push(Member::Dir(format!("{member}/")));
-                collect(project, &path, &format!("{prefix}{text}/"), depth + 1, members)?;
-            }
-            // A symlink whose target is gone names nothing to copy.
-            Entry::Absent => {}
-            Entry::Other | Entry::Symlink => {
-                return Err(err(format!(
-                    "{} is not a regular file or directory; a file: package holds files and directories only",
-                    path.display()
-                )))
-            }
-        }
+    };
+    match project.relative(&target) {
+        Some(relative) if relative.as_os_str().is_empty() => Err(err(format!(
+            "{} is a symlink to the project root; a file: package cannot hold the project",
+            path.display()
+        ))),
+        Some(relative) => Ok(Some(relative.to_path_buf())),
+        None => Err(err(format!(
+            "{} is a symlink to {}, outside the project; a file: package holds the project's own files",
+            path.display(),
+            target.display()
+        ))),
     }
-    Ok(())
 }
 
-/// One ustar member. A name past the 100 bytes ustar holds goes in a PAX
-/// `path` record before it.
+/// The depth-first walk of a `file:` directory.
+struct Walk<'a> {
+    project: &'a ProjectRoot,
+    limits: Limits,
+    /// The identity (device, inode) of every directory on the current
+    /// path, root first: a directory already here is a loop.
+    on_path: Vec<(u64, u64)>,
+    entries: usize,
+    members: Vec<Member>,
+}
+
+impl Walk<'_> {
+    /// Every member below `dir` (a resolved project-relative path, no
+    /// symlink in it), depth first in name order.
+    fn collect(&mut self, dir: &Path, prefix: &str, depth: usize) -> io::Result<()> {
+        if depth > MAX_DEPTH {
+            return Err(err(format!(
+                "{} nests deeper than {MAX_DEPTH} directories",
+                dir.display()
+            )));
+        }
+        let held = self
+            .project
+            .input_subdir(dir)?
+            .ok_or_else(|| err(format!("{} vanished while packing", dir.display())))?;
+        use std::os::fd::AsRawFd;
+        let identity =
+            crate::kernel::store::stat_identity(&crate::kernel::store::fd_stat(held.as_raw_fd())?);
+        if self.on_path.contains(&identity) {
+            return Err(err(format!(
+                "{} is reached again through a symlink to one of its own ancestors; a file: package cannot contain itself",
+                dir.display()
+            )));
+        }
+        self.on_path.push(identity);
+        let names = held
+            .read_input_dir(Path::new("."))?
+            .ok_or_else(|| err(format!("{} vanished while packing", dir.display())))?;
+        for name in names {
+            let text = name
+                .to_str()
+                .ok_or_else(|| err(format!("{}: a name that is not UTF-8", dir.display())))?;
+            if text == "node_modules" || text == ".git" {
+                continue;
+            }
+            self.entries += 1;
+            if self.entries > self.limits.entries {
+                return Err(err(format!(
+                    "{} holds more than {} entries (at {text}); a file: package is a copy of a package, not of a tree",
+                    dir.display(),
+                    self.limits.entries
+                )));
+            }
+            let path = dir.join(&name);
+            let member = format!("package/{prefix}{text}");
+            // Seen without following, from the directory just listed.
+            let (kind, path) = match held.entry(Path::new(&name))? {
+                Entry::Symlink => match resolve_inside(self.project, &path)? {
+                    // A symlink to nothing names nothing to copy.
+                    None => continue,
+                    Some(target) => (self.project.entry(&target)?, target),
+                },
+                kind => (kind, path),
+            };
+            match kind {
+                Entry::Regular => self.members.push(Member::File { name: member, path }),
+                Entry::Directory => {
+                    self.members.push(Member::Dir(format!("{member}/")));
+                    self.collect(&path, &format!("{prefix}{text}/"), depth + 1)?;
+                }
+                // A FIFO, socket or device is not part of a package, as
+                // `npm pack` leaves it out; a resolved target cannot be a
+                // symlink, and one that vanished names nothing to copy.
+                Entry::Other | Entry::Symlink | Entry::Absent => {}
+            }
+        }
+        self.on_path.pop();
+        Ok(())
+    }
+}
+
+/// One ustar member. A name past the 100 bytes ustar holds, or a size
+/// past the 8 GiB its octal field holds, goes in a PAX record before it.
 fn write_member(
     out: &mut impl Write,
     name: &str,
@@ -253,24 +374,37 @@ fn write_member(
     size: u64,
     data: &mut impl Read,
 ) -> io::Result<()> {
+    out.write_all(&member_header(name, typeflag, mode, size))?;
+    let copied = io::copy(&mut data.take(size), out)?;
+    if copied != size {
+        return Err(err(format!("{name} changed size while packing")));
+    }
+    pad(out, size)
+}
+
+/// The header blocks of one member: a PAX header when the name or size
+/// does not fit ustar, then the ustar header.
+fn member_header(name: &str, typeflag: u8, mode: u32, size: u64) -> Vec<u8> {
+    let mut blocks = Vec::new();
+    let mut records = String::new();
     if name.len() > 100 {
-        let record = pax_record("path", name);
-        out.write_all(&header("././@PaxHeader", b'x', 0o644, record.len() as u64))?;
-        out.write_all(record.as_bytes())?;
-        pad(out, record.len() as u64)?;
+        records.push_str(&pax_record("path", name));
+    }
+    if size > USTAR_MAX_SIZE {
+        records.push_str(&pax_record("size", &size.to_string()));
+    }
+    if !records.is_empty() {
+        blocks.extend_from_slice(&header("././@PaxHeader", b'x', 0o644, records.len() as u64));
+        blocks.extend_from_slice(records.as_bytes());
+        pad(&mut blocks, records.len() as u64).expect("a Vec write cannot fail");
     }
     // The ustar field keeps what fits; the PAX record above names it whole.
     let mut cut = name.len().min(100);
     while !name.is_char_boundary(cut) {
         cut -= 1;
     }
-    let short = &name[..cut];
-    out.write_all(&header(short, typeflag, mode, size))?;
-    let copied = io::copy(&mut data.take(size), out)?;
-    if copied != size {
-        return Err(err(format!("{name} changed size while packing")));
-    }
-    pad(out, size)
+    blocks.extend_from_slice(&header(&name[..cut], typeflag, mode, size));
+    blocks
 }
 
 /// `<length> <key>=<value>\n`, where the length counts itself.
@@ -288,6 +422,8 @@ fn pad(out: &mut impl Write, size: u64) -> io::Result<()> {
     out.write_all(&vec![0u8; rest as usize])
 }
 
+/// A ustar header. A size past the octal field is written as zero; the
+/// PAX `size` record `member_header` put before it carries the value.
 fn header(name: &str, typeflag: u8, mode: u32, size: u64) -> [u8; 512] {
     let mut header = [0u8; 512];
     let name = &name.as_bytes()[..name.len().min(100)];
@@ -295,6 +431,7 @@ fn header(name: &str, typeflag: u8, mode: u32, size: u64) -> [u8; 512] {
     header[100..108].copy_from_slice(format!("{mode:07o}\0").as_bytes());
     header[108..116].copy_from_slice(b"0000000\0");
     header[116..124].copy_from_slice(b"0000000\0");
+    let size = if size > USTAR_MAX_SIZE { 0 } else { size };
     header[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
     header[136..148].copy_from_slice(b"00000000000\0");
     header[148..156].copy_from_slice(b"        ");
@@ -387,8 +524,30 @@ mod tests {
         assert_eq!(version(&project, "vendor/local").unwrap(), "2.1.0");
     }
 
+    /// The member names of the tarball `pack` writes for `dir`.
+    fn packed_names(project: &ProjectRoot, dir: &str) -> Vec<String> {
+        let tarball = project.path().join("packed.tgz");
+        let mut file = fs::File::create(&tarball).unwrap();
+        pack(project, dir, &mut file).unwrap();
+        drop(file);
+        let (_lease_dir, activity) = crate::kernel::testutil::detached_lease();
+        let names = crate::kernel::archive::list_with_activity(
+            &activity,
+            &tarball,
+            crate::kernel::archive::Compression::Gzip,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name.trim_end_matches('/').to_string())
+        .collect();
+        fs::remove_file(&tarball).unwrap();
+        names
+    }
+
+    /// A FIFO or a socket in the directory is left out, as `npm pack`
+    /// leaves out everything that is not a file or a directory.
     #[test]
-    fn a_fifo_in_the_directory_is_refused() {
+    fn a_fifo_in_the_directory_is_skipped() {
         use std::os::unix::ffi::OsStrExt;
         let temp = crate::kernel::testutil::TempDir::new();
         package_dir(&temp.0);
@@ -397,18 +556,175 @@ mod tests {
         // SAFETY: the NUL-terminated name remains valid for the call.
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         let project = ProjectRoot::open(&temp.0).unwrap();
+        let names = packed_names(&project, "vendor/local");
+        assert!(!names.iter().any(|name| name.contains("pipe")), "{names:?}");
+        assert!(names.contains(&"package/bin.js".to_string()), "{names:?}");
+    }
+
+    /// A project with the package at `project/vendor/local` and a file
+    /// beside the project, where no symlink may lead.
+    fn project_beside_outside() -> (crate::kernel::testutil::TempDir, ProjectRoot) {
+        let temp = crate::kernel::testutil::TempDir::new();
+        fs::create_dir_all(temp.0.join("project")).unwrap();
+        package_dir(&temp.0.join("project"));
+        fs::write(temp.0.join("outside.txt"), "secret\n").unwrap();
+        let project = ProjectRoot::open(&temp.0.join("project")).unwrap();
+        (temp, project)
+    }
+
+    #[test]
+    fn a_symlink_out_of_the_project_is_refused_and_named() {
+        let (temp, project) = project_beside_outside();
+        let outside = temp.0.join("outside.txt").canonicalize().unwrap();
+        // Absolute.
+        let link = temp.0.join("project/vendor/local/lib/abs");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
         let error = integrity(&project, "vendor/local").unwrap_err().to_string();
-        assert!(error.contains("pipe"), "{error}");
+        assert!(error.contains("lib/abs"), "{error}");
+        assert!(error.contains("outside the project"), "{error}");
+        assert!(error.contains(&outside.display().to_string()), "{error}");
+        fs::remove_file(&link).unwrap();
+        // Climbing with `..` past the project root.
+        std::os::unix::fs::symlink(
+            "../../../../outside.txt",
+            temp.0.join("project/vendor/local/lib/climb"),
+        )
+        .unwrap();
+        let error = integrity(&project, "vendor/local").unwrap_err().to_string();
+        assert!(error.contains("lib/climb"), "{error}");
+        assert!(error.contains("outside the project"), "{error}");
+        // The package directory itself, reached through a link out.
+        std::os::unix::fs::symlink(&temp.0, temp.0.join("project/vendor/away")).unwrap();
+        let error = integrity(&project, "vendor/away").unwrap_err().to_string();
+        assert!(error.contains("vendor/away"), "{error}");
+        assert!(error.contains("outside the project"), "{error}");
+    }
+
+    /// A symlink that stays inside the project is followed: the copy
+    /// holds the target's contents under the link's name.
+    #[test]
+    fn a_symlink_inside_the_project_is_followed() {
+        let (temp, project) = project_beside_outside();
+        let root = temp.0.join("project");
+        fs::create_dir_all(root.join("shared")).unwrap();
+        fs::write(root.join("shared/util.js"), "shared\n").unwrap();
+        // A file, climbing out of the package but not out of the project,
+        // and a directory, by an absolute path inside the project.
+        std::os::unix::fs::symlink(
+            "../../../shared/util.js",
+            root.join("vendor/local/lib/util.js"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            root.canonicalize().unwrap().join("shared"),
+            root.join("vendor/local/shared"),
+        )
+        .unwrap();
+        let names = packed_names(&project, "vendor/local");
+        for want in [
+            "package/lib/util.js",
+            "package/shared",
+            "package/shared/util.js",
+        ] {
+            assert!(names.contains(&want.to_string()), "{want} in {names:?}");
+        }
+        // A dangling link names nothing to copy.
+        std::os::unix::fs::symlink("nowhere", root.join("vendor/local/lib/gone")).unwrap();
+        assert_eq!(packed_names(&project, "vendor/local"), names);
     }
 
     #[test]
     fn a_symlink_loop_is_refused_not_followed_forever() {
         let temp = crate::kernel::testutil::TempDir::new();
         package_dir(&temp.0);
+        // Two links to the parent: the first one walked is the loop.
         std::os::unix::fs::symlink("..", temp.0.join("vendor/local/lib/up")).unwrap();
+        std::os::unix::fs::symlink("..", temp.0.join("vendor/local/lib/up2")).unwrap();
         let project = ProjectRoot::open(&temp.0).unwrap();
         let error = integrity(&project, "vendor/local").unwrap_err().to_string();
-        assert!(error.contains("nests deeper"), "{error}");
+        assert!(error.contains("reached again through a symlink"), "{error}");
+        assert!(error.contains("vendor/local"), "{error}");
+        // A link to the project root is refused before any walk.
+        fs::remove_file(temp.0.join("vendor/local/lib/up")).unwrap();
+        fs::remove_file(temp.0.join("vendor/local/lib/up2")).unwrap();
+        std::os::unix::fs::symlink("../../..", temp.0.join("vendor/local/lib/root")).unwrap();
+        let error = integrity(&project, "vendor/local").unwrap_err().to_string();
+        assert!(error.contains("symlink to the project root"), "{error}");
+    }
+
+    #[test]
+    fn a_directory_past_the_entry_or_byte_limit_is_refused() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        package_dir(&temp.0);
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let mut sink = io::sink();
+        let within = Limits {
+            entries: 100,
+            bytes: 1 << 20,
+        };
+        pack_within(&project, "vendor/local", &mut sink, within).unwrap();
+        let error = pack_within(
+            &project,
+            "vendor/local",
+            &mut sink,
+            Limits {
+                entries: 3,
+                ..within
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("more than 3 entries"), "{error}");
+        assert!(error.contains("vendor/local"), "{error}");
+        let error = pack_within(
+            &project,
+            "vendor/local",
+            &mut sink,
+            Limits {
+                bytes: 10,
+                ..within
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("more than 10 bytes"), "{error}");
+        assert!(error.contains("vendor/local"), "{error}");
+    }
+
+    /// A member of 8 GiB or more does not fit the ustar size field: it
+    /// gets a PAX `size` record, which the archive reader prefers, and
+    /// the ustar field reads zero instead of overflowing.
+    #[test]
+    fn a_member_too_large_for_ustar_carries_its_size_in_a_pax_record() {
+        let size = 1u64 << 33;
+        let blocks = member_header("package/big.bin", b'0', 0o644, size);
+        assert_eq!(
+            blocks.len(),
+            512 * 3,
+            "a PAX header, its record, the ustar header"
+        );
+        assert_eq!(blocks[156], b'x');
+        let record = std::str::from_utf8(&blocks[512..1024]).unwrap();
+        assert!(record.contains(" size=8589934592\n"), "{record:?}");
+        let ustar = &blocks[1024..];
+        assert_eq!(&ustar[124..136], b"00000000000\0");
+        let sum: u32 = ustar
+            .iter()
+            .enumerate()
+            .map(|(i, byte)| {
+                if (148..156).contains(&i) {
+                    32
+                } else {
+                    *byte as u32
+                }
+            })
+            .sum();
+        assert_eq!(&ustar[148..155], format!("{sum:06o}\0").as_bytes());
+        // A size that fits needs no PAX header.
+        assert_eq!(
+            member_header("package/small", b'0', 0o644, USTAR_MAX_SIZE).len(),
+            512
+        );
     }
 
     #[test]

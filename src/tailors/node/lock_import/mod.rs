@@ -1109,6 +1109,32 @@ fn file_directory_node(
     }))
 }
 
+/// The `file:` directory packages of a pnpm v6 lock as the snapshots a
+/// v9 lock gives them. v6 keys such a package `file:<dir>`, with its
+/// name on the entry and its dependency edges beside it; keyed
+/// `<name>@file:<dir>`, the entry is the snapshot [`file_directory_node`]
+/// and the dependency walk read. The synthetic entry for a workspace
+/// root has no name and is left out.
+fn v6_directory_snapshots(
+    packages: &BTreeMap<String, YamlValue>,
+) -> io::Result<BTreeMap<String, BTreeMap<String, YamlValue>>> {
+    let mut snapshots = BTreeMap::new();
+    for (raw_key, value) in packages {
+        let entry = yaml_map(value, &format!("packages {raw_key}"))?;
+        let Some(YamlValue::Map(resolution)) = entry.get("resolution") else {
+            continue;
+        };
+        if yaml_str(resolution.get("type")) != Some("directory") {
+            continue;
+        }
+        let directory = yaml_str(resolution.get("directory"));
+        if let (Some(name), Some(directory)) = (yaml_str(entry.get("name")), directory) {
+            snapshots.insert(format!("{name}@file:{directory}"), entry.clone());
+        }
+    }
+    Ok(snapshots)
+}
+
 /// Add the node of every `file:` directory snapshot that has none
 /// ([`file_directory_node`]) to `nodes`.
 fn add_file_directory_nodes<'a>(
@@ -1426,6 +1452,73 @@ packages:
             .iter()
             .any(|package| package.path == "node_modules/a"));
         assert!(plan.packages.iter().any(|package| package.name == "b"));
+    }
+
+    /// pnpm 6 keys a `file:` directory package `file:<dir>` with its name
+    /// on the entry and its dependencies beside it. It is the same copy
+    /// with its own node_modules that a v9 lock gives it (#188).
+    #[test]
+    fn pnpm_v6_file_directory_is_a_package_with_its_own_dependencies() {
+        let dir = project();
+        fs::create_dir_all(dir.0.join("vendor/local")).unwrap();
+        fs::write(
+            dir.0.join("vendor/local/package.json"),
+            r#"{"name":"local","version":"2.1.0"}"#,
+        )
+        .unwrap();
+        let lock = format!(
+            r#"lockfileVersion: '6.0'
+dependencies:
+  b:
+    specifier: ^1.0.0
+    version: 1.0.0
+  local:
+    specifier: file:vendor/local
+    version: file:vendor/local
+packages:
+  /b@1.0.0:
+    resolution: {{integrity: {SRI}}}
+  /b@2.0.0:
+    resolution: {{integrity: {SRI}}}
+  file:vendor/local:
+    resolution: {{directory: vendor/local, type: directory}}
+    name: local
+    version: 2.1.0
+    dependencies:
+      b: 2.0.0
+    dev: false
+"#
+        );
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap();
+        let placed = |path: &str| {
+            plan.packages
+                .iter()
+                .find(|package| package.path == path)
+                .map(|package| (package.version.as_str(), package.url.as_str()))
+        };
+        assert_eq!(
+            placed("node_modules/local"),
+            Some(("2.1.0", "file:vendor/local")),
+            "{:?}",
+            plan.packages
+        );
+        assert_eq!(
+            placed("node_modules/local/node_modules/b").map(|(version, _)| version),
+            Some("2.0.0"),
+            "{:?}",
+            plan.packages
+        );
+        assert_eq!(
+            placed("node_modules/b").map(|(version, _)| version),
+            Some("1.0.0")
+        );
+        assert!(plan.links.is_empty(), "{:?}", plan.links);
     }
 
     #[test]
