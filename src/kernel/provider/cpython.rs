@@ -166,17 +166,7 @@ pub fn row(
     if selected.ecosystem != "python" {
         return Err(not_python(selected));
     }
-    let spec = selected.artifact(platform, component)?;
-    if spec.recipe != recipe {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "python: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
-                spec.recipe
-            ),
-        ));
-    }
-    Ok(spec)
+    selected.checked_artifact(platform, component, recipe, "sha256")
 }
 
 /// The shipped catalog's selection for one CPython version, exact
