@@ -118,6 +118,16 @@ impl Store {
         Ok(f)
     }
 
+    /// Every name under `meta/`, listed from held descriptors the way
+    /// [`Store::open_object_meta`] opens a record; nothing when `meta/`
+    /// does not exist.
+    pub(crate) fn object_meta_names(&self) -> io::Result<Vec<OsString>> {
+        match self.open_namespace(&["meta"])? {
+            Some(dir) => read_dir_names_at(dir.as_raw_fd()),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Open `meta/<id>.json` from held descriptors: the store root, then
     /// `meta/`, then the record, none of them through a symlink.
     pub(crate) fn open_object_meta(&self, id: &str) -> io::Result<MetaFile> {

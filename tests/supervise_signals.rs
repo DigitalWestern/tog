@@ -991,10 +991,22 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                    exit 0"#
             ));
             let code = report(supervise::status(&mut command, activity));
+            // A wrapped error, which lost its record, still names the signal.
+            let retry = || std::io::Error::new(std::io::ErrorKind::Interrupted, "retry later");
+            say(&format!(
+                "STOP_BEFORE {:?}",
+                supervise::stop_signal(&retry())
+            ));
             // The next child in the same process starts from a clean
             // session: the interrupt was reported once and is not replayed.
             let after = supervise::status(&mut shell("exit 7"), activity).unwrap();
             say(&format!("AFTER {}", code_of(after)));
+            // Once a child has run to the end, a store retry is not the
+            // earlier signal's (it would exit 128+2 otherwise).
+            say(&format!(
+                "STOP_AFTER {:?}",
+                supervise::stop_signal(&retry())
+            ));
             code
         }
         // Two sessions at once. Each child waits until the other has
@@ -1888,9 +1900,12 @@ fn an_interrupt_the_child_never_sees_is_still_reported() {
     wait_until_delivered(harness.pid(), libc::SIGINT);
     assert!(alive(child), "INT sent to the supervisor reached the child");
     release_fifo(&fifo);
-    harness.markers.wait_for("AFTER 7");
+    harness.markers.wait_for("STOP_AFTER");
     let text = harness.markers.text();
     assert!(text.contains("INTERRUPTED 2"), "{text}");
+    assert!(text.contains("AFTER 7"), "{text}");
+    assert!(text.contains("STOP_BEFORE Some(2)"), "{text}");
+    assert!(text.contains("STOP_AFTER None"), "{text}");
     assert!(text.contains("EXIT 0"), "{text}");
     assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();

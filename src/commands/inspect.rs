@@ -793,8 +793,7 @@ fn free_bytes(path: &Path) -> io::Result<u64> {
 /// where a FIFO would block the report for good.
 fn realized_toolchains(store: &Store) -> io::Result<Vec<String>> {
     let mut found = Vec::new();
-    for entry in fs::read_dir(store.root.join("meta"))? {
-        let name = entry?.file_name();
+    for name in store.object_meta_names()? {
         let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
             continue;
         };

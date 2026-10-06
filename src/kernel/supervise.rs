@@ -76,10 +76,10 @@ static SESSION_INT: AtomicU64 = AtomicU64::new(0);
 static SESSION_HUP: AtomicU64 = AtomicU64::new(0);
 static SESSION_QUIT: AtomicU64 = AtomicU64::new(0);
 static CHLD_RECEIVED: AtomicU32 = AtomicU32::new(0);
-/// The signal behind the last [`Interrupted`] error a session returned, or
-/// 0. A caller that wraps the error in a new message keeps its kind but
-/// drops the record, and `stop_signal` reads this to still tell an
-/// interrupt from the store's own "retry" use of the same kind.
+/// The signal behind the last [`Interrupted`] error a session returned; 0
+/// once a later session ends with none. A caller that wraps the error keeps
+/// its kind but drops the record, and `stop_signal` reads this to still tell
+/// an interrupt from the store's own "retry" use of the same kind.
 static STOPPED_BY: AtomicI32 = AtomicI32::new(0);
 /// The global self-pipe, created at the first install and never closed, so
 /// the handler never writes into a reused descriptor.
@@ -921,17 +921,15 @@ impl Session {
     /// after a clean exit still counts, since it asked tog to stop too.
     fn conclude<T>(mut self, status: ExitStatus, value: T) -> io::Result<T> {
         let received = self.finish();
-        match TERMINATING
+        let found = TERMINATING
             .into_iter()
-            .find(|signal| received & signal_bit(*signal) != 0)
-        {
-            Some(signal) => {
-                STOPPED_BY.store(signal, Ordering::SeqCst);
-                Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    Interrupted { signal, status },
-                ))
-            }
+            .find(|signal| received & signal_bit(*signal) != 0);
+        STOPPED_BY.store(found.unwrap_or(0), Ordering::SeqCst);
+        match found {
+            Some(signal) => Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                Interrupted { signal, status },
+            )),
             None => Ok(value),
         }
     }

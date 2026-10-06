@@ -87,9 +87,11 @@ impl MetaIndex {
         let held = store::open_real_directory(&meta_dir, "object metadata directory")?;
         let mut entries = BTreeMap::new();
         let mut unusable = BTreeMap::new();
-        for entry in fs::read_dir(&meta_dir)? {
-            let entry = entry?;
-            let path = entry.path();
+        // Listed from the same held descriptor the records are read
+        // through, so a `meta/` renamed in between cannot list one
+        // directory's names and read another's records.
+        for name in store::read_dir_names_at(std::os::unix::io::AsRawFd::as_raw_fd(&held))? {
+            let path = meta_dir.join(&name);
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
@@ -103,8 +105,7 @@ impl MetaIndex {
                 // cannot be listed) is not about a record at all, and
                 // stops the read.
                 Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    unusable.insert(name, error.to_string());
+                    unusable.insert(name.to_string_lossy().into_owned(), error.to_string());
                 }
                 Err(error) => return Err(error),
             }

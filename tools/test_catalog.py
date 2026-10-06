@@ -1229,8 +1229,11 @@ class Python(Base):
     def test_a_uv_asset_github_does_not_list_is_an_error_and_one_without_a_digest_is_not(self):
         existing = self.shipped()
         self.uv_asset(DARWIN, digest=None)
-        out, _ = self.generate(existing)
+        out, report = self.generate(existing)
         self.assertEqual(list(out), ["cpython-3.12.1"])
+        # The run says the GitHub check could not be made.
+        self.assertIn(f"uv uv-{DARWIN}.tar.gz: GitHub records no digest, so its .sha256 is its only check",
+                      report.notes)
         self.uv_asset(DARWIN)
         with self.assertRaises(catalog.Failure) as cm:
             self.generate(existing)
