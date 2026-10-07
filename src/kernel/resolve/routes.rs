@@ -74,20 +74,50 @@ impl RequestClass {
     }
 }
 
-/// A digest a registry published for an artifact URL, read from metadata
-/// the proxy served. The bytes of that URL must hash to it.
+/// The digests a registry published for an artifact URL, read from
+/// metadata the proxy served. The bytes of that URL must hash to one of
+/// them. Usually one: an npm `integrity` list may name several of its
+/// strongest algorithm, and any of them admits the bytes. Never empty,
+/// all of one algorithm, sorted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Claim(pub Digest);
+pub struct Claim(Vec<Digest>);
 
 impl Claim {
-    /// `sha512:<hex>`: how the ledger writes a claim.
+    /// A claim of exactly one digest.
+    pub fn one(digest: Digest) -> Claim {
+        Claim(vec![digest])
+    }
+
+    /// A claim allowing any of `digests`, or `None` when they are empty or
+    /// mix algorithms.
+    pub fn any(mut digests: Vec<Digest>) -> Option<Claim> {
+        let first = digests.first()?.algo();
+        if digests.iter().any(|digest| digest.algo() != first) {
+            return None;
+        }
+        digests.sort();
+        digests.dedup();
+        Some(Claim(digests))
+    }
+
+    /// Every digest the bytes may match.
+    pub fn digests(&self) -> &[Digest] {
+        &self.0
+    }
+
+    /// The claim's algorithm.
+    pub fn algo(&self) -> &'static str {
+        self.0[0].algo()
+    }
+
+    /// `sha512:<hex>` (several joined by `|`): how the ledger writes a claim.
     pub fn describe(&self) -> String {
-        format!("{}:{}", self.0.algo(), self.0.hex())
+        crate::kernel::digest::describe_candidates(&self.0)
     }
 
     /// A SHA-1 claim pins nothing collision-resistant: `weak-integrity`.
     pub fn is_weak(&self) -> bool {
-        self.0.algo() == "sha1"
+        self.algo() == "sha1"
     }
 }
 
@@ -654,16 +684,18 @@ pub(crate) mod testing {
             };
             claims
                 .iter()
-                .filter_map(|(target, digest)| {
-                    let (algo, hex) = digest.as_str()?.split_once(':')?;
-                    let digest = match algo {
-                        "sha1" => Digest::sha1(hex),
-                        "sha256" => Digest::sha256(hex),
-                        "sha512" => Digest::sha512(hex),
-                        _ => return None,
-                    }
-                    .ok()?;
-                    Some((url.join(target).ok()?, Claim(digest)))
+                .filter_map(|(target, digests)| {
+                    // `algo:hex`, several joined by `|` as an SRI list
+                    // allows (any one admits the bytes).
+                    let digests = digests
+                        .as_str()?
+                        .split('|')
+                        .map(|digest| {
+                            let (algo, hex) = digest.split_once(':')?;
+                            Digest::from_parts(algo, hex).ok()
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    Some((url.join(target).ok()?, Claim::any(digests)?))
                 })
                 .collect()
         }

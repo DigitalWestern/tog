@@ -132,7 +132,7 @@ pub(crate) fn stage(
         let (hex, _) =
             staged.map_err(|e| io::Error::new(e.kind(), format!("pack {}: {e}", package.path)))?;
         let packed = crate::kernel::digest::Digest::sha256(&hex)?;
-        if crate::kernel::digest::Digest::from_sri(&package.integrity)? != packed {
+        if !crate::kernel::digest::sri_candidates(&package.integrity)?.contains(&packed) {
             return Err(err(format!(
                 "{dir} changed while tog synced it; run 'tog' again to plan the new contents"
             )));

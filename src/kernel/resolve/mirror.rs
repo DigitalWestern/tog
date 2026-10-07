@@ -780,12 +780,12 @@ impl Exchange<'_> {
         let mut opened = false;
         // Claimed bytes are always fetched whole, even for a HEAD: they are
         // verified before anything is served.
-        let downloaded = fetch::cache_from_reader(
+        let downloaded = fetch::cache_from_reader_any(
             &config.store,
             &config.activity,
             // Only named in error text, so it is the redacted form.
             &record.url,
-            &claim.0,
+            claim.digests(),
             || -> io::Result<Box<dyn Read>> {
                 opened = true;
                 if config.mode == Mode::Offline {
@@ -815,8 +815,8 @@ impl Exchange<'_> {
             },
         );
         record.hops = hops;
-        let lease = match downloaded {
-            Ok(lease) => lease,
+        let (lease, matched) = match downloaded {
+            Ok(downloaded) => downloaded,
             Err(error) => {
                 let received = hex::encode(
                     sha.lock()
@@ -830,8 +830,8 @@ impl Exchange<'_> {
         // The verified entry, opened under the lease. A failure here still
         // answers the tool and records the request.
         let opened_entry = (|| -> io::Result<(String, std::fs::File, u64)> {
-            let sha256 = match claim.0.algo {
-                Algo::Sha256 => claim.0.hex().to_string(),
+            let sha256 = match matched.algo {
+                Algo::Sha256 => matched.hex().to_string(),
                 _ => fetch::hash_file(&lease, Algo::Sha256)?,
             };
             let file = std::fs::File::open(&*lease)?;
@@ -1234,7 +1234,7 @@ mod tests {
         assert_eq!(
             strong.body,
             fixture("art/strong-pkg-1.0.tgz"),
-            "sha512 claims verify too"
+            "sha512 claims verify too, against any hash the claim allows"
         );
 
         let report = session.finish();

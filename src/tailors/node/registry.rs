@@ -24,7 +24,7 @@
 //! dependency are not this route's: they reach the proxy as unattested
 //! hosts or git fetches (see `kernel::resolve::intercept`).
 
-use crate::kernel::digest::strongest_sri;
+use crate::kernel::digest::{sri_candidates, strongest_sri};
 use crate::kernel::fetch::Digest;
 use crate::kernel::resolve::routes::{
     Claim, Endpoint, RegistryProtocol, RequestClass, Route, Upstream,
@@ -100,8 +100,7 @@ impl RegistryProtocol for NpmRegistry {
                 if tarball.host_str() != Some(REGISTRY_HOST) || !is_tarball_path(tarball.path()) {
                     return None;
                 }
-                let digest = dist_digest(dist)?;
-                Some((tarball, Claim(digest)))
+                Some((tarball, dist_claim(dist)?))
             })
             .collect()
     }
@@ -117,16 +116,19 @@ impl RegistryProtocol for NpmRegistry {
     }
 }
 
-/// The digest a `dist` object claims for its tarball: the strongest
-/// `integrity` entry, else the sha1 `shasum`. `None` when it claims
-/// nothing tog can read (an unknown algorithm, malformed hex).
-fn dist_digest(dist: &serde_json::Value) -> Option<Digest> {
+/// What a `dist` object claims for its tarball: every `integrity` entry of
+/// the strongest algorithm (the tarball may match any), else the sha1
+/// `shasum`. `None` when it claims nothing tog can read (an unknown
+/// algorithm, malformed hex).
+fn dist_claim(dist: &serde_json::Value) -> Option<Claim> {
     if let Some(list) = dist.get("integrity").and_then(|i| i.as_str()) {
-        if let Some(sri) = strongest_sri(list) {
-            return Digest::from_sri(sri).ok();
+        if strongest_sri(list).is_some() {
+            return Claim::any(sri_candidates(list).ok()?);
         }
     }
-    Digest::sha1(dist.get("shasum")?.as_str()?).ok()
+    Some(Claim::one(
+        Digest::sha1(dist.get("shasum")?.as_str()?).ok()?,
+    ))
 }
 
 /// Whether `path` is a tarball's (`/.../-/<file>.tgz`).
@@ -321,8 +323,11 @@ mod tests {
             std::fs::read(fixtures.join("npm/registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz.body"))
                 .unwrap();
         let assert_sha512 = |claim: &Claim| {
-            assert_eq!(claim.0.algo(), "sha512");
-            assert_eq!(claim.0.hex(), hex::encode(Sha512::digest(&bytes)));
+            assert_eq!(claim.algo(), "sha512");
+            assert_eq!(
+                claim.digests()[0].hex(),
+                hex::encode(Sha512::digest(&bytes))
+            );
         };
         for registry in ["npm", "pnpm"] {
             let body = std::fs::read(
@@ -363,6 +368,20 @@ mod tests {
         );
         assert!(claims[0].1.is_weak());
         assert!(NPM_REGISTRY.claims(&tarball, b"not json").is_empty());
+        // Two sha512 entries claim both: the tarball may match either.
+        let (one, two) = (
+            format!("sha512-{}", crate::kernel::base64::encode(&[1; 64])),
+            format!("sha512-{}", crate::kernel::base64::encode(&[2; 64])),
+        );
+        let listed = serde_json::json!({"versions": {"1.0.0": {"dist": {
+            "tarball": "https://registry.npmjs.org/two/-/two-1.0.0.tgz",
+            "integrity": format!("{two} sha1-qvTGHdzF6KLavt4PO0gs2a6pQ00= {one}")}}}});
+        let url = Url::parse("https://registry.npmjs.org/two").unwrap();
+        let claims = NPM_REGISTRY.claims(&url, listed.to_string().as_bytes());
+        assert_eq!(claims.len(), 1, "{claims:?}");
+        assert_eq!(claims[0].1.algo(), "sha512");
+        assert_eq!(claims[0].1.digests().len(), 2);
+        assert_eq!(claims[0].1.describe().matches('|').count(), 1);
     }
 
     #[test]

@@ -3422,9 +3422,9 @@ Node doors, each the flexible option that still fails closed:
 - **The npm route lives in the tailor** (`tailors/node/registry.rs`),
   since only the Node tailor runs npm or pnpm: packuments (full and
   abbreviated; a scoped one as `/@scope%2fname`, `%2F`, or `/@scope/name`)
-  and tarballs on `registry.npmjs.org`, each tarball claimed by its
-  version's strongest `integrity` entry or, failing that, its sha1
-  `shasum` (`weak-integrity`). Everything else on the host is refused,
+  and tarballs on `registry.npmjs.org`, each tarball claimed by every
+  `integrity` entry of its strongest algorithm (the bytes may match any
+  one, #508) or, failing that, its sha1 `shasum` (`weak-integrity`). Everything else on the host is refused,
   which also covers the audit `POST` and the notifier fetch should a flag
   ever fail to turn them off.
 - **The route grammar takes an encoded slash only where a protocol says

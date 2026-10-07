@@ -730,6 +730,23 @@ pub(crate) fn download_verified_digest_held(
     })
 }
 
+/// The same for a digest list that allows several hashes (an SRI list with
+/// more than one entry of its strongest algorithm, see
+/// [`crate::kernel::digest::sri_candidates`]): the bytes are admitted when
+/// they match any candidate, and the one they matched comes back, since
+/// that is the cache entry the lease holds. Every candidate must share one
+/// algorithm. The digest sources are the same as the single form's.
+pub(crate) fn download_verified_any_held(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    candidates: &[Digest],
+) -> io::Result<(CacheLease, Digest)> {
+    cache_or_download_narrated(store, activity, url, candidates, true, MAX_ARTIFACT, || {
+        open_url(url, "download", None)
+    })
+}
+
 /// Download one toolchain artifact row: the bytes a catalog or lock row
 /// names by `url` and `digest`, published by the row's `provider`. The
 /// effective [`SourcePolicy`] must authorize `url` for `publisher` before
@@ -954,6 +971,9 @@ pub struct HashMismatch {
     /// The URL as requested. The message names it through [`shown_url`].
     pub url: String,
     pub expected: Digest,
+    /// The other digests the bytes were allowed to match, all of the
+    /// expected one's algorithm: an SRI list may name several.
+    pub alternatives: Vec<Digest>,
     /// The hex digest of the bytes received, under the expected algorithm.
     pub got: String,
 }
@@ -962,12 +982,20 @@ impl std::fmt::Display for HashMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "hash mismatch for {}\n  expected {} {}\n  got      {}",
+            "hash mismatch for {}\n  expected {} {}",
             shown_url(&self.url),
             self.expected.algo(),
-            self.expected.hex(),
-            self.got
-        )
+            self.expected.hex()
+        )?;
+        for alternative in &self.alternatives {
+            write!(
+                f,
+                "\n  or       {} {}",
+                alternative.algo(),
+                alternative.hex()
+            )?;
+        }
+        write!(f, "\n  got      {}", self.got)
     }
 }
 
@@ -980,21 +1008,29 @@ impl HashMismatch {
     }
 }
 
-/// Stream `reader` into the verified artifact cache under `digest`, with
-/// no progress narration: the resolution proxy's upstream fetches run
-/// while a tool owns the terminal. A cache hit is served without reading
-/// `reader`. A mismatch is an `InvalidData` error carrying [`HashMismatch`]
-/// and leaves nothing behind.
-pub(crate) fn cache_from_reader(
+/// Stream `reader` into the verified artifact cache under whichever of
+/// `candidates` (one or more digests of one algorithm) it matches, with no
+/// progress narration: the resolution proxy's upstream fetches run while a
+/// tool owns the terminal. A cache hit is served without reading `reader`.
+/// The digest the bytes matched comes back with the lease. A mismatch is
+/// an `InvalidData` error carrying [`HashMismatch`] and leaves nothing
+/// behind.
+pub(crate) fn cache_from_reader_any(
     store: &Store,
     activity: &StoreActivity,
     url: &str,
-    digest: &Digest,
+    candidates: &[Digest],
     open: impl FnOnce() -> io::Result<Box<dyn Read>>,
-) -> io::Result<CacheLease> {
-    cache_or_download_narrated(store, activity, url, digest, false, MAX_ARTIFACT, || {
-        open().map(|reader| (reader, None))
-    })
+) -> io::Result<(CacheLease, Digest)> {
+    cache_or_download_narrated(
+        store,
+        activity,
+        url,
+        candidates,
+        false,
+        MAX_ARTIFACT,
+        || open().map(|reader| (reader, None)),
+    )
 }
 
 /// A verified cache entry for `digest`, fetched through `open` only when
@@ -1006,41 +1042,60 @@ fn cache_or_download(
     digest: &Digest,
     open: impl FnOnce() -> io::Result<(Box<dyn Read>, Option<u64>)>,
 ) -> io::Result<CacheLease> {
-    cache_or_download_narrated(store, activity, url, digest, true, MAX_ARTIFACT, open)
+    let digests = std::slice::from_ref(digest);
+    cache_or_download_narrated(store, activity, url, digests, true, MAX_ARTIFACT, open)
+        .map(|(lease, _)| lease)
 }
 
 fn cache_or_download_narrated(
     store: &Store,
     activity: &StoreActivity,
     url: &str,
-    digest: &Digest,
+    candidates: &[Digest],
     narrate: bool,
     max: u64,
     open: impl FnOnce() -> io::Result<(Box<dyn Read>, Option<u64>)>,
-) -> io::Result<CacheLease> {
+) -> io::Result<(CacheLease, Digest)> {
     store.require_activity(activity, "a verified download")?;
+    let digest = match candidates {
+        [first, rest @ ..] if rest.iter().all(|other| other.algo == first.algo) => first,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{}: a verified download needs one or more digests of one algorithm",
+                    shown_url(url)
+                ),
+            ))
+        }
+    };
     let activity = activity.clone();
     let gc_lock = acquire_cache_lock(store)?;
-    let dest = store.cache_path(digest.algo(), digest.hex());
-    if dest.is_file() {
+    for candidate in candidates {
+        let dest = store.cache_path(candidate.algo(), candidate.hex());
+        if !dest.is_file() {
+            continue;
+        }
         // Re-verify on every hit: read-only bits stop accidents, not disk
         // corruption or same-user replacement. A concurrent publisher can
         // replace/briefly unlink the entry, so a read race falls through
         // to a fresh download instead of failing.
-        match hash_identified(&dest, digest.algo) {
-            Ok((h, _)) if h == digest.hex() => {
+        match hash_identified(&dest, candidate.algo) {
+            Ok((h, _)) if h == candidate.hex() => {
                 store::touch_path(&dest)?;
-                return Ok(CacheLease {
+                let lease = CacheLease {
                     path: dest,
                     _activity: activity.clone(),
                     _gc_lock: gc_lock,
-                });
+                };
+                return Ok((lease, candidate.clone()));
             }
             Ok((_, seen)) => remove_poisoned(&dest, &seen), // corrupt: refetch
             Err(_) => {}
         }
     }
-    fs::create_dir_all(dest.parent().unwrap())
+    let cache_dir = store.cache_path(digest.algo(), digest.hex());
+    fs::create_dir_all(cache_dir.parent().unwrap())
         .map_err(|e| io::Error::new(e.kind(), format!("cache dir: {e}")))?;
     // Unique per attempt: two concurrent downloads of the same artifact
     // (other processes, or threads of this one) must never share a tmp
@@ -1111,23 +1166,26 @@ fn cache_or_download_narrated(
         Algo::Sha256 => hex::encode(h256.finalize()),
         Algo::Sha512 => hex::encode(h512.finalize()),
     };
-    if got != digest.hex() {
+    let Some(matched) = candidates.iter().find(|candidate| candidate.hex() == got) else {
         let _ = fs::remove_file(&tmp);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             HashMismatch {
                 url: url.to_string(),
                 expected: digest.clone(),
+                alternatives: candidates[1..].to_vec(),
                 got,
             },
         ));
-    }
+    };
+    let dest = store.cache_path(matched.algo(), matched.hex());
     publish_read_only(&tmp, &dest)?;
-    Ok(CacheLease {
+    let lease = CacheLease {
         path: dest,
         _activity: activity,
         _gc_lock: gc_lock,
-    })
+    };
+    Ok((lease, matched.clone()))
 }
 
 /// Publish a verified download at `dest`, read-only and atomically. A
@@ -1337,6 +1395,66 @@ mod tests {
         let wrong = Digest::from_sri("sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
         let error = download_verified_digest(&store, activity, &url, &wrong).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// An SRI list naming two sha512 hashes admits bytes matching either,
+    /// whichever order the list gives them in, and hands back the one they
+    /// matched; bytes matching only a weaker entry are refused (#508).
+    #[test]
+    fn a_download_matching_any_strongest_candidate_is_admitted() {
+        let scratch = TempDir::named("fetch-any");
+        for sub in ["objects", "meta", "cache/sha512", "tmp"] {
+            fs::create_dir_all(scratch.0.join(sub)).unwrap();
+        }
+        let store = Store::for_test(scratch.0.clone());
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let sri = |bytes: &[u8]| {
+            format!(
+                "sha512-{}",
+                crate::kernel::base64::encode(&Sha512::digest(bytes))
+            )
+        };
+        let input = scratch.0.join("artifact");
+        fs::write(&input, b"hello").unwrap();
+        let url = format!("file://{}", input.display());
+        let (real, other) = (sri(b"hello"), sri(b"other"));
+        let want = Digest::from_sri(&real).unwrap();
+        for list in [format!("{real} {other}"), format!("{other} {real}")] {
+            let candidates = crate::kernel::digest::sri_candidates(&list).unwrap();
+            assert_eq!(candidates.len(), 2);
+            let (lease, matched) =
+                download_verified_any_held(&store, activity, &url, &candidates).unwrap();
+            assert_eq!(matched, want);
+            assert_eq!(fs::read(&*lease).unwrap(), b"hello");
+        }
+        // The sha1 entry matches these bytes, but sha512 is the strongest
+        // algorithm the list names, so only its entries count.
+        let only_weak = format!("{other} sha1-qvTGHdzF6KLavt4PO0gs2a6pQ00=");
+        let candidates = crate::kernel::digest::sri_candidates(&only_weak).unwrap();
+        let input = scratch.0.join("fresh");
+        fs::write(&input, b"hello").unwrap();
+        let fresh = format!("file://{}", input.display());
+        let error = download_verified_any_held(&store, activity, &fresh, &candidates)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // And two candidates that both miss name both in the mismatch.
+        let both =
+            crate::kernel::digest::sri_candidates(&format!("{other} {}", sri(b"third"))).unwrap();
+        let error = download_verified_any_held(&store, activity, &fresh, &both)
+            .map(drop)
+            .unwrap_err();
+        let mismatch = HashMismatch::of(&error).unwrap();
+        assert_eq!(mismatch.alternatives.len(), 1);
+        assert!(error.to_string().contains("\n  or       sha512 "));
+        // Candidates of two algorithms are a caller's mistake.
+        let mixed = [want.clone(), Digest::sha1(&"a".repeat(40)).unwrap()];
+        let error = download_verified_any_held(&store, activity, &fresh, &mixed)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -2019,7 +2137,7 @@ mod integrity_tests {
                 &store,
                 activity,
                 "https://x/big?sig=secret",
-                &digest,
+                std::slice::from_ref(&digest),
                 false,
                 1024,
                 || Ok((Box::new(io::Cursor::new(body)) as Box<dyn Read>, None)),

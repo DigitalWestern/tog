@@ -56,10 +56,12 @@ pub enum Freshness {
 /// proxy would not forward, or `offline-miss` for one it could not serve
 /// without the network. `sha256` is the digest of the upstream bytes (never
 /// the rewritten body a tool may have been served), present only for a 2xx
-/// body or a claimed artifact. `claimed` is the
-/// registry's digest (`sha512:<hex>`), and `verified` says the bytes matched
-/// it. `freshness` is absent when nothing was served (a refusal, an
-/// offline miss, a failure).
+/// body or a claimed artifact. `claimed` is the registry's digest
+/// (`sha512:<hex>`), or every digest it allows joined by `|` when its
+/// metadata names several of one algorithm, and `verified` says the bytes
+/// matched one of them; which one is not recorded separately (for a
+/// sha256 claim `sha256` is it). `freshness` is absent when nothing was
+/// served (a refusal, an offline miss, a failure).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub class: String,

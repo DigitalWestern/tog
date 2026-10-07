@@ -137,7 +137,7 @@ struct Inner {
     facts: Facts,
     /// Artifact claims learned from served metadata, by URL without its
     /// fragment.
-    claims: HashMap<String, BTreeSet<ClaimKey>>,
+    claims: HashMap<String, UrlClaims>,
     /// The last portable entry per (method, url), to count retries.
     last: HashMap<(String, String), Entry>,
     /// Last-good responses per endpoint origin.
@@ -157,18 +157,46 @@ struct Inner {
     closed: bool,
 }
 
-/// A claim, ordered so the strongest algorithm sorts last.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ClaimKey(u8, String, String);
+/// What served metadata claims for one URL: per algorithm, the digests
+/// every document agreed on. Keyed so the strongest algorithm sorts last.
+///
+/// A claim may allow several digests (an npm `integrity` list naming two
+/// sha512 hashes), and two documents may allow overlapping sets: a
+/// packument listing both and a lock-shaped document listing one. The bytes
+/// must satisfy every document, so the claim for an algorithm is the
+/// intersection, and two documents conflict only when nothing satisfies
+/// both. An empty set stays empty, so a conflict, once seen, holds.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct UrlClaims(BTreeMap<(u8, String), BTreeSet<String>>);
 
-impl ClaimKey {
-    fn new(claim: &Claim) -> Self {
-        let rank = match claim.0.algo() {
+impl UrlClaims {
+    fn add(&mut self, claim: &Claim) {
+        let rank = match claim.algo() {
             "sha512" => 3,
             "sha256" => 2,
             _ => 1,
         };
-        ClaimKey(rank, claim.0.algo().to_string(), claim.0.hex().to_string())
+        let hexes: BTreeSet<String> = claim
+            .digests()
+            .iter()
+            .map(|digest| digest.hex().to_string())
+            .collect();
+        self.0
+            .entry((rank, claim.algo().to_string()))
+            .and_modify(|agreed| agreed.retain(|hex| hexes.contains(hex)))
+            .or_insert(hexes);
+    }
+
+    /// The strongest algorithm's claim: what the bytes are verified
+    /// against, or `None` for an empty intersection (a conflict).
+    fn strongest(&self) -> Option<(&str, Option<Claim>)> {
+        let ((_, algo), hexes) = self.0.iter().next_back()?;
+        let digests = hexes
+            .iter()
+            .map(|hex| crate::kernel::fetch::Digest::from_parts(algo, hex))
+            .collect::<io::Result<Vec<_>>>()
+            .ok();
+        Some((algo, digests.and_then(Claim::any)))
     }
 }
 
@@ -505,11 +533,7 @@ impl State {
     pub(crate) fn add_claims(&self, claims: Vec<(Url, Claim)>) {
         let mut inner = self.inner();
         for (url, claim) in claims {
-            inner
-                .claims
-                .entry(claim_key(&url))
-                .or_default()
-                .insert(ClaimKey::new(&claim));
+            inner.claims.entry(claim_key(&url)).or_default().add(&claim);
         }
     }
 
@@ -518,29 +542,13 @@ impl State {
         let Some(claims) = inner.claims.get(&claim_key(url)) else {
             return Claimed::None;
         };
-        let Some(strongest) = claims.last() else {
-            return Claimed::None;
-        };
-        let rivals: Vec<&ClaimKey> = claims
-            .iter()
-            .filter(|claim| claim.1 == strongest.1)
-            .collect();
-        if rivals.len() > 1 {
-            return Claimed::Conflict(format!(
-                "registry metadata claims {} different {} digests for {}",
-                rivals.len(),
-                strongest.1,
+        match claims.strongest() {
+            None => Claimed::None,
+            Some((_, Some(claim))) => Claimed::One(claim),
+            Some((algo, None)) => Claimed::Conflict(format!(
+                "registry metadata disagrees about the {algo} digest of {}: no digest is in every claim",
                 claim_key(url)
-            ));
-        }
-        let digest = match strongest.1.as_str() {
-            "sha512" => crate::kernel::fetch::Digest::sha512(&strongest.2),
-            "sha256" => crate::kernel::fetch::Digest::sha256(&strongest.2),
-            _ => crate::kernel::fetch::Digest::sha1(&strongest.2),
-        };
-        match digest {
-            Ok(digest) => Claimed::One(Claim(digest)),
-            Err(error) => Claimed::Conflict(error.to_string()),
+            )),
         }
     }
 
@@ -659,6 +667,46 @@ mod tests {
             cut,
             format!("{}...", "a".repeat(MAX_UNAUTHENTICATED_TEXT - 1))
         );
+    }
+
+    #[test]
+    fn overlapping_claims_narrow_to_what_every_document_allows() {
+        fn claim(hexes: &[&str]) -> Claim {
+            Claim::any(
+                hexes
+                    .iter()
+                    .map(|hex| crate::kernel::fetch::Digest::sha512(&hex.repeat(128)).unwrap())
+                    .collect(),
+            )
+            .unwrap()
+        }
+        let mut claims = UrlClaims::default();
+        claims.add(&claim(&["a", "b"]));
+        claims.add(&claim(&["a", "b"]));
+        assert_eq!(
+            claims.strongest(),
+            Some(("sha512", Some(claim(&["a", "b"]))))
+        );
+        claims.add(&claim(&["b", "c"]));
+        assert_eq!(claims.strongest(), Some(("sha512", Some(claim(&["b"])))));
+        // A weaker algorithm's claim never reaches the verification.
+        claims.add(&Claim::one(
+            crate::kernel::fetch::Digest::sha1(&"f".repeat(40)).unwrap(),
+        ));
+        assert_eq!(claims.strongest(), Some(("sha512", Some(claim(&["b"])))));
+        claims.add(&claim(&["d"]));
+        assert_eq!(
+            claims.strongest(),
+            Some(("sha512", None)),
+            "nothing satisfies both"
+        );
+        claims.add(&claim(&["d"]));
+        assert_eq!(
+            claims.strongest(),
+            Some(("sha512", None)),
+            "a conflict holds"
+        );
+        assert_eq!(UrlClaims::default().strongest(), None);
     }
 
     #[test]

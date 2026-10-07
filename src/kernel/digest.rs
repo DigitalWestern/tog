@@ -118,15 +118,58 @@ pub(crate) fn hash_reader(reader: &mut impl Read, algo: Algo) -> io::Result<Stri
     })
 }
 
-/// The strongest entry tog supports in an SRI list such as
-/// `"sha512-... sha1-..."` (npm, pnpm and yarn all write lists), or `None`
-/// when no entry names sha512, sha256 or sha1.
-pub fn strongest_sri(list: &str) -> Option<&str> {
-    list.split_whitespace()
+/// Every entry of the strongest algorithm tog supports in an SRI list such
+/// as `"sha512-... sha1-..."` (npm, pnpm and yarn all write lists), as one
+/// canonical list: sorted, without duplicates, space-separated. A list may
+/// carry several hashes of that algorithm, and the bytes are allowed when
+/// they match any one of them (the W3C SRI rule, and npm's ssri), so the
+/// order a lock wrote them in means nothing and two orders give the same
+/// list. `None` when no entry names sha512, sha256 or sha1.
+pub fn strongest_sri(list: &str) -> Option<String> {
+    let entries: Vec<(Algo, &str)> = list
+        .split_whitespace()
         .filter_map(|entry| Some((algo_named(entry.split_once('-')?.0)?, entry)))
-        // Preserve the first entry on ties, as Yarn did before sharing this.
-        .reduce(|best, next| if next.0 > best.0 { next } else { best })
+        .collect();
+    let strongest = entries.iter().map(|(algo, _)| *algo).max()?;
+    let mut chosen: Vec<&str> = entries
+        .into_iter()
+        .filter(|(algo, _)| *algo == strongest)
         .map(|(_, entry)| entry)
+        .collect();
+    chosen.sort_unstable();
+    chosen.dedup();
+    Some(chosen.join(" "))
+}
+
+/// The digests an SRI list allows: every entry of its strongest algorithm
+/// (see [`strongest_sri`]), parsed, sorted and without duplicates. Never a
+/// weaker one: bytes that match only a weaker entry are refused. A
+/// malformed entry of the strongest algorithm is an error, not skipped: a
+/// lock that names a hash tog cannot read was not written by the tool it
+/// claims. A list with no supported entry is the error `from_sri` gives
+/// for it.
+pub fn sri_candidates(list: &str) -> io::Result<Vec<Digest>> {
+    let Some(strongest) = strongest_sri(list) else {
+        return Digest::from_sri(list.trim()).map(|digest| vec![digest]);
+    };
+    let mut digests = strongest
+        .split(' ')
+        .map(Digest::from_sri)
+        .collect::<io::Result<Vec<_>>>()?;
+    digests.sort();
+    digests.dedup();
+    Ok(digests)
+}
+
+/// Candidates as identities and records spell them: `algo:hex`, joined by
+/// `|` when there are several. One candidate reads exactly as a single
+/// digest always has, so a lock with one hash keeps its identity.
+pub fn describe_candidates(candidates: &[Digest]) -> String {
+    candidates
+        .iter()
+        .map(|digest| format!("{}:{}", digest.algo(), digest.hex()))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn algo_named(name: &str) -> Option<Algo> {
@@ -191,11 +234,55 @@ mod tests {
 
     #[test]
     fn the_strongest_supported_sri_in_a_list_wins() {
-        assert_eq!(strongest_sri("sha1-a sha512-b sha256-c"), Some("sha512-b"));
-        assert_eq!(strongest_sri("  sha256-c\tsha1-a "), Some("sha256-c"));
-        assert_eq!(strongest_sri("sha384-x sha1-a"), Some("sha1-a"));
+        assert_eq!(
+            strongest_sri("sha1-a sha512-b sha256-c").as_deref(),
+            Some("sha512-b")
+        );
+        assert_eq!(
+            strongest_sri("  sha256-c\tsha1-a ").as_deref(),
+            Some("sha256-c")
+        );
+        assert_eq!(strongest_sri("sha384-x sha1-a").as_deref(), Some("sha1-a"));
+        // Every strongest entry is kept, in one order whatever the lock's.
+        assert_eq!(
+            strongest_sri("sha512-y sha1-a sha512-x sha512-y").as_deref(),
+            Some("sha512-x sha512-y")
+        );
+        assert_eq!(
+            strongest_sri("sha512-x sha512-y"),
+            strongest_sri("sha512-y sha512-x")
+        );
         assert_eq!(strongest_sri("sha384-x md5-y"), None);
         assert_eq!(strongest_sri(""), None);
+    }
+
+    #[test]
+    fn sri_candidates_keep_every_strongest_hash_and_refuse_bad_ones() {
+        let sri = |bytes: &[u8]| {
+            let mut hasher = Sha512::new();
+            hasher.update(bytes);
+            format!(
+                "sha512-{}",
+                crate::kernel::base64::encode(&hasher.finalize())
+            )
+        };
+        let (a, b) = (sri(b"a"), sri(b"b"));
+        let weak = "sha1-qvTGHdzF6KLavt4PO0gs2a6pQ00=";
+        let forward = sri_candidates(&format!("{a} {weak} {b}")).unwrap();
+        let backward = sri_candidates(&format!("{b} {a}")).unwrap();
+        assert_eq!(forward.len(), 2);
+        assert!(forward.iter().all(|digest| digest.algo() == "sha512"));
+        assert_eq!(forward, backward);
+        assert_eq!(
+            describe_candidates(&forward),
+            describe_candidates(&backward)
+        );
+        assert_eq!(describe_candidates(&forward[..1]).matches('|').count(), 0);
+        // A malformed strongest entry fails the list; a weaker entry is
+        // never what is left to verify against.
+        assert!(sri_candidates(&format!("{a} sha512-!!!")).is_err());
+        assert!(sri_candidates("sha384-x md5-y").is_err());
+        assert_eq!(sri_candidates(weak).unwrap()[0].algo(), "sha1");
     }
 
     #[test]
