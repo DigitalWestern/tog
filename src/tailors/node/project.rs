@@ -497,9 +497,10 @@ fn record_clone_reasons<'a>(
     plan: &NpmPlan,
     env_obj: &Path,
     mutable: &'a [String],
+    attribution: &crate::kernel::policy::Attribution,
 ) -> io::Result<CloneReasons<'a>> {
     if !mutable.is_empty() {
-        crate::kernel::policy::record(
+        attribution.record(
             crate::kernel::policy::UNATTESTED_MUTABLE_STATE,
             &mutable.join(", "),
             "mutable package projection is unattested",
@@ -507,7 +508,7 @@ fn record_clone_reasons<'a>(
     }
     let dependents = workspace_dependents(plan, env_obj);
     for dependent in &dependents {
-        crate::kernel::policy::record(
+        attribution.record(
             crate::kernel::policy::UNATTESTED_MUTABLE_STATE,
             dependent,
             "depends on a workspace package, which Node only finds from a real path inside the project, so node_modules is projected as a writable copy that tog does not attest",
@@ -863,7 +864,7 @@ pub fn project_node_env_recorded(
     helpers: &serde_json::Value,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
-    let reasons = record_clone_reasons(plan, env_obj, mutable)?;
+    let reasons = record_clone_reasons(plan, env_obj, mutable, attribution)?;
     let project_dir = project.path();
     let nm = Path::new("node_modules");
     let workspaces = workspace_set(plan);

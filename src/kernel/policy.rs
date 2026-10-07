@@ -918,6 +918,11 @@ pub struct Attribution {
     id: u64,
     ecosystem: String,
     active: bool,
+    // The policy `record` judges by; `None` is the process policy. Only a
+    // test sets one (`with_policy`): production always records under the
+    // process policy.
+    #[cfg(test)]
+    policy: Option<Policy>,
 }
 
 impl Attribution {
@@ -951,8 +956,31 @@ impl Attribution {
                 id,
                 ecosystem: ecosystem.to_string(),
                 active: true,
+                #[cfg(test)]
+                policy: None,
             })
         })
+    }
+
+    /// This frame with `policy` in place of the process policy for what
+    /// is recorded through [`Attribution::record`]: a caller (a test) that
+    /// must not depend on `TOG_STRICT` in the environment. Test-only, so
+    /// no production path can record under a policy other than the
+    /// process one.
+    #[cfg(test)]
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Record an exception into the innermost frame, judged by this
+    /// attribution's policy.
+    pub fn record(&self, kind: &str, subject: &str, detail: &str) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(policy) = &self.policy {
+            return record_with(policy, kind, subject, detail);
+        }
+        record_with(current(), kind, subject, detail)
     }
 
     /// Open a child realization owned by this token's thread. Records while
@@ -990,6 +1018,8 @@ impl Attribution {
                 id,
                 ecosystem: ecosystem.to_string(),
                 active: true,
+                #[cfg(test)]
+                policy: None,
             })
         })
     }
