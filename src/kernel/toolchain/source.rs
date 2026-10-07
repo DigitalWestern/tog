@@ -299,7 +299,10 @@ impl SourcePolicy {
         let refuse = |why: &str| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!("source policy refuses {url} for {publisher}: {why}"),
+                format!(
+                    "source policy refuses {} for {publisher}: {why}",
+                    crate::kernel::fetch::shown_url(url)
+                ),
             )
         };
         if !url.starts_with("https://") {
