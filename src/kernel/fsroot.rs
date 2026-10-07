@@ -1291,20 +1291,31 @@ fn is_directory_stat(stat: &libc::stat) -> bool {
 /// `AlreadyExists` instead of being replaced. On a Linux filesystem that
 /// lacks the flag, a hard link of the entry (which also refuses an existing
 /// name) followed by unlinking `old` gives the same result.
-fn rename_at_noreplace(dirfd: RawFd, old: &[u8], new: &[u8]) -> io::Result<()> {
+pub(crate) fn rename_at_noreplace(dirfd: RawFd, old: &[u8], new: &[u8]) -> io::Result<()> {
+    rename_between_noreplace(dirfd, old, dirfd, new)
+}
+
+/// [`rename_at_noreplace`] from one held directory into another on the
+/// same filesystem.
+pub(crate) fn rename_between_noreplace(
+    from: RawFd,
+    old: &[u8],
+    to: RawFd,
+    new: &[u8],
+) -> io::Result<()> {
     let old_c = CString::new(old)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
     let new_c = CString::new(new)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: dirfd is an open directory and both names are
+        // SAFETY: both descriptors are open directories and both names are
         // NUL-terminated relative names that outlive the call.
         let status = unsafe {
             libc::renameat2(
-                dirfd,
+                from,
                 old_c.as_ptr(),
-                dirfd,
+                to,
                 new_c.as_ptr(),
                 libc::RENAME_NOREPLACE,
             )
@@ -1321,27 +1332,21 @@ fn rename_at_noreplace(dirfd: RawFd, old: &[u8], new: &[u8]) -> io::Result<()> {
         }
         // SAFETY: as above; flags 0 links the entry itself, never a
         // symlink's target.
-        if unsafe { libc::linkat(dirfd, old_c.as_ptr(), dirfd, new_c.as_ptr(), 0) } != 0 {
+        if unsafe { libc::linkat(from, old_c.as_ptr(), to, new_c.as_ptr(), 0) } != 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: as above.
-        if unsafe { libc::unlinkat(dirfd, old_c.as_ptr(), 0) } != 0 {
+        if unsafe { libc::unlinkat(from, old_c.as_ptr(), 0) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
     }
     #[cfg(target_os = "macos")]
     {
-        // SAFETY: dirfd is an open directory and both names are
+        // SAFETY: both descriptors are open directories and both names are
         // NUL-terminated relative names that outlive the call.
         let status = unsafe {
-            libc::renameatx_np(
-                dirfd,
-                old_c.as_ptr(),
-                dirfd,
-                new_c.as_ptr(),
-                libc::RENAME_EXCL,
-            )
+            libc::renameatx_np(from, old_c.as_ptr(), to, new_c.as_ptr(), libc::RENAME_EXCL)
         };
         if status != 0 {
             return Err(io::Error::last_os_error());
@@ -1350,7 +1355,7 @@ fn rename_at_noreplace(dirfd: RawFd, old: &[u8], new: &[u8]) -> io::Result<()> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (dirfd, old_c, new_c);
+        let _ = (from, to, old_c, new_c);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "an exclusive rename is not available on this platform",

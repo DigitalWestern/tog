@@ -535,6 +535,8 @@ pub(super) const TMP_LEFTOVERS: &[(&str, libc::mode_t)] = &[
     // kernel::fetch: a download, and a local file being inserted
     ("dl-", libc::S_IFREG),
     ("ins-", libc::S_IFREG),
+    // kernel::fetch: a cache entry that failed verification, moved aside
+    (crate::kernel::fetch::POISONED_PREFIX, libc::S_IFREG),
     // Store::commit's record before its rename
     ("meta-", libc::S_IFREG),
     // kernel::resolve::ledger

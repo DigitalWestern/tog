@@ -101,10 +101,13 @@ pub(crate) fn hash_reader(reader: &mut impl Read, algo: Algo) -> io::Result<Stri
     let mut h512 = Sha512::new();
     let mut h1 = Sha1::new();
     loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
+        // A read cut short by a signal read nothing: try it again.
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
         match algo {
             Algo::Sha1 => h1.update(&buf[..n]),
             Algo::Sha256 => h256.update(&buf[..n]),
@@ -283,6 +286,24 @@ mod tests {
         assert!(sri_candidates(&format!("{a} sha512-!!!")).is_err());
         assert!(sri_candidates("sha384-x md5-y").is_err());
         assert_eq!(sri_candidates(weak).unwrap()[0].algo(), "sha1");
+    }
+
+    /// A read a signal interrupts is retried, not the end of the hash.
+    #[test]
+    fn hash_reader_retries_an_interrupted_read() {
+        struct Flaky(bool, &'static [u8]);
+        impl Read for Flaky {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if std::mem::replace(&mut self.0, false) {
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.1.read(buf)
+            }
+        }
+        assert_eq!(
+            hash_reader(&mut Flaky(true, b""), Algo::Sha1).unwrap(),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
     }
 
     #[test]
