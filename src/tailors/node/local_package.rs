@@ -187,7 +187,7 @@ fn pack_within(
 ) -> io::Result<()> {
     // The directory itself may be reached through a symlink: resolve it
     // once, and walk the directory it names, inside the project.
-    let base = resolve_inside(project, Path::new(dir))?
+    let base = resolve_inside(project, project, Path::new(dir), Path::new(dir))?
         .ok_or_else(|| err(format!("the file: package {dir} does not exist")))?;
     if project.input_entry(&base)? != Entry::Directory {
         return Err(err(format!("the file: package {dir} is not a directory")));
@@ -206,34 +206,55 @@ fn pack_within(
     walk.tarball.finish()
 }
 
-/// Where the project-relative `path` leads once every symlink in it is
-/// followed, as a project-relative path again: `None` when it leads to
-/// nothing, an error when it leads outside the project or to the project
-/// root itself. The check is against the held root's path, which `open`
-/// made canonical and nothing here resolves again.
-fn resolve_inside(project: &ProjectRoot, path: &Path) -> io::Result<Option<PathBuf>> {
-    let target = match std::fs::canonicalize(project.path().join(path)) {
+/// Where `name`, below the held directory `from`, leads once every symlink
+/// in it is followed, as a path relative to `project`: `None` when it leads
+/// to nothing, an error when it leads outside the project or to the project
+/// root itself. Both ends are resolved from their descriptors
+/// (`/proc/self/fd/<n>` on Linux), never from the paths they were opened
+/// at, so a directory renamed or replaced since it was held cannot make a
+/// link resolve inside the replacement (#612). `shown` names the link in
+/// messages.
+fn resolve_inside(
+    project: &ProjectRoot,
+    from: &ProjectRoot,
+    name: &Path,
+    shown: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let follow = |error: io::Error| {
+        io::Error::new(
+            error.kind(),
+            format!("{}: cannot follow the symlink: {error}", shown.display()),
+        )
+    };
+    let target = match std::fs::canonicalize(held_name(from).join(name)) {
         Ok(target) => target,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
-                format!("{}: cannot follow the symlink: {error}", path.display()),
-            ))
-        }
+        Err(error) => return Err(follow(error)),
     };
-    match project.relative(&target) {
-        Some(relative) if relative.as_os_str().is_empty() => Err(err(format!(
+    let root = std::fs::canonicalize(held_name(project)).map_err(follow)?;
+    match target.strip_prefix(&root) {
+        Ok(relative) if relative.as_os_str().is_empty() => Err(err(format!(
             "{} is a symlink to the project root; a file: package cannot hold the project",
-            path.display()
+            shown.display()
         ))),
-        Some(relative) => Ok(Some(relative.to_path_buf())),
-        None => Err(err(format!(
+        Ok(relative) => Ok(Some(relative.to_path_buf())),
+        Err(_) => Err(err(format!(
             "{} is a symlink to {}, outside the project; a file: package holds the project's own files",
-            path.display(),
+            shown.display(),
             target.display()
         ))),
     }
+}
+
+/// A name that reaches the directory `dir` holds, wherever it is now.
+fn held_name(dir: &ProjectRoot) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    dir.path().to_path_buf()
 }
 
 /// The directory at the resolved project-relative `dir` (no symlink in it),
@@ -331,28 +352,35 @@ impl<W: Write> Walk<'_, W> {
                     self.tarball.dir(&format!("{member}/"))?;
                     self.collect(child, &path, &format!("{prefix}{text}/"), depth + 1)?;
                 }
-                Entry::Symlink => match resolve_inside(self.project, &path)? {
-                    // A symlink to nothing names nothing to copy.
-                    None => {}
-                    Some(target) => match self.project.entry(&target)? {
-                        // The resolved target had no symlink in it when it
-                        // was resolved; the strict walk from the project
-                        // root follows none, so a component swapped since
-                        // refuses rather than redirects.
-                        Entry::Regular => {
-                            let file = self.project.open_file(&target)?;
-                            self.file(&member, &target, file)?;
-                        }
-                        Entry::Directory => {
-                            let child = open_dir(self.project, &target)?;
-                            self.tarball.dir(&format!("{member}/"))?;
-                            self.collect(child, &target, &format!("{prefix}{text}/"), depth + 1)?;
-                        }
-                        // A resolved target cannot be a symlink, and one
-                        // that vanished names nothing to copy.
-                        Entry::Other | Entry::Symlink | Entry::Absent => {}
-                    },
-                },
+                Entry::Symlink => {
+                    match resolve_inside(self.project, &held, Path::new(&name), &path)? {
+                        // A symlink to nothing names nothing to copy.
+                        None => {}
+                        Some(target) => match self.project.entry(&target)? {
+                            // The resolved target had no symlink in it when it
+                            // was resolved; the strict walk from the project
+                            // root follows none, so a component swapped since
+                            // refuses rather than redirects.
+                            Entry::Regular => {
+                                let file = self.project.open_file(&target)?;
+                                self.file(&member, &target, file)?;
+                            }
+                            Entry::Directory => {
+                                let child = open_dir(self.project, &target)?;
+                                self.tarball.dir(&format!("{member}/"))?;
+                                self.collect(
+                                    child,
+                                    &target,
+                                    &format!("{prefix}{text}/"),
+                                    depth + 1,
+                                )?;
+                            }
+                            // A resolved target cannot be a symlink, and one
+                            // that vanished names nothing to copy.
+                            Entry::Other | Entry::Symlink | Entry::Absent => {}
+                        },
+                    }
+                }
                 // A FIFO, socket or device is not part of a package, as
                 // `npm pack` leaves it out; a name that vanished since the
                 // listing names nothing to copy.
@@ -492,9 +520,8 @@ mod tests {
     /// The pack reads the tree tog holds, not whatever its path names now:
     /// with the project moved away and another tree put at its path, the
     /// packed bytes are the held tree's (#612). Every file is opened from
-    /// the descriptor of the directory it was listed in; the one by-path
-    /// step left is `resolve_inside`, which only needs the package
-    /// directory to exist at the path.
+    /// the descriptor of the directory it was listed in, and every symlink
+    /// is resolved from descriptors too.
     #[test]
     fn packing_reads_the_held_tree_not_its_path() {
         let temp = crate::kernel::testutil::TempDir::new();
@@ -523,6 +550,38 @@ mod tests {
             .unwrap();
             assert_eq!(bytes, want, "{member}");
         }
+    }
+
+    /// A symlink in the package resolves in the tree tog holds: with the
+    /// project moved away and an impostor at its path whose link of the
+    /// same name points elsewhere, the member holds the held link's
+    /// target, not the impostor's (#612).
+    #[test]
+    fn a_symlink_resolves_in_the_held_tree_not_its_path() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let path = temp.0.join("project");
+        fs::create_dir_all(&path).unwrap();
+        package_dir(&path);
+        fs::create_dir_all(path.join("shared")).unwrap();
+        fs::write(path.join("shared/other.js"), "not the link's target\n").unwrap();
+        std::os::unix::fs::symlink("lib/index.js", path.join("vendor/local/link.js")).unwrap();
+        let project = ProjectRoot::open(&path).unwrap();
+        fs::rename(&path, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(path.join("vendor/local")).unwrap();
+        std::os::unix::fs::symlink("../../shared/other.js", path.join("vendor/local/link.js"))
+            .unwrap();
+        let tarball = temp.0.join("packed.tgz");
+        let mut file = fs::File::create(&tarball).unwrap();
+        pack(&project, "vendor/local", &mut file).unwrap();
+        drop(file);
+        let bytes = crate::kernel::archive::read_member(
+            &tarball,
+            crate::kernel::archive::Compression::Gzip,
+            "package/link.js",
+            1 << 20,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"module.exports = 1;\n");
     }
 
     /// A directory is opened with the strict walk, so one swapped for a
