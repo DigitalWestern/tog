@@ -98,7 +98,7 @@ pub(super) fn poetry_manifest(
         )?;
     }
     let lock_path = dir.join("poetry.lock");
-    let (requirements, locked) = if is_project_file(project, &lock_path) {
+    let (requirements, locked) = if is_project_file(project, &lock_path)? {
         let lock_text = read_text(project, &lock_path)?;
         let lock = parse_toml(&lock_path, &lock_text)?;
         check_poetry_content_hash(value, &lock)?;
@@ -110,7 +110,7 @@ pub(super) fn poetry_manifest(
     } else {
         (requirements, false)
     };
-    let provenance = if is_project_file(project, &lock_path) && locked {
+    let provenance = if is_project_file(project, &lock_path)? && locked {
         "pyproject.toml [tool.poetry] (+ poetry.lock)"
     } else {
         "pyproject.toml [tool.poetry]"
@@ -123,6 +123,7 @@ pub(super) fn poetry_manifest(
         python: PythonInputs::default(),
         provenance: provenance.into(),
         source_path: None,
+        external_includes: Vec::new(),
         locked_packages: None,
         uv_lock: None,
         has_index_options: false,

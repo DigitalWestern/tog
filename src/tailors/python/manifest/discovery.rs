@@ -11,7 +11,7 @@ pub(super) struct TogPythonConfig {
 
 pub(super) fn config(project: &ProjectRoot) -> io::Result<TogPythonConfig> {
     let path = project.path().join("tog.toml");
-    if !is_project_file(project, &path) {
+    if !is_project_file(project, &path)? {
         return Ok(TogPythonConfig::default());
     }
     let value = parse_toml(&path, &read_text(project, &path)?)?;
@@ -76,18 +76,18 @@ pub(super) fn project_dependencies_are_dynamic(value: &toml::Value) -> bool {
 pub fn has_manifest(project: &ProjectRoot) -> io::Result<bool> {
     let dir = project.path();
     let is_file = |name: &str| is_project_file(project, &dir.join(name));
-    if is_file("requirements.lock.txt") || is_file("requirements.txt") {
+    if is_file("requirements.lock.txt")? || is_file("requirements.txt")? {
         return Ok(true);
     }
     let pyproject = dir.join("pyproject.toml");
-    if is_file("pyproject.toml") {
+    if is_file("pyproject.toml")? {
         let value = parse_toml(&pyproject, &read_text(project, &pyproject)?)?;
         let (project, poetry, groups) = pyproject_sections(&value);
         if project || poetry || groups {
             return Ok(true);
         }
     }
-    if is_file("setup.cfg") || is_file("setup.py") {
+    if is_file("setup.cfg")? || is_file("setup.py")? {
         return Ok(true);
     }
     Ok(requirements_directory_candidate(project, &config(project)?)?.is_some())
@@ -116,15 +116,15 @@ pub fn discover(
     let is_file = |name: &str| is_project_file(project, &dir.join(name));
     let cfg = config(project)?;
     let collected_python = python_inputs(project)?;
-    let dynamic_dependencies = if is_file("pyproject.toml") {
+    let dynamic_dependencies = if is_file("pyproject.toml")? {
         let path = dir.join("pyproject.toml");
         project_dependencies_are_dynamic(&parse_toml(&path, &read_text(project, &path)?)?)
     } else {
         false
     };
-    let mut manifest = if is_file("requirements.txt") {
+    let mut manifest = if is_file("requirements.txt")? {
         requirements_manifest(project, &dir.join("requirements.txt"), "requirements.txt")?
-    } else if is_file("pyproject.toml") {
+    } else if is_file("pyproject.toml")? {
         let path = dir.join("pyproject.toml");
         let text = read_text(project, &path)?;
         let value = parse_toml(&path, &text)?;
@@ -146,12 +146,12 @@ pub fn discover(
         } else {
             setup_or_requirements_manifest(project, &cfg)?
         }
-    } else if is_file("setup.cfg")
-        || is_file("setup.py")
+    } else if is_file("setup.cfg")?
+        || is_file("setup.py")?
         || requirements_directory_candidate(project, &cfg)?.is_some()
     {
         setup_or_requirements_manifest(project, &cfg)?
-    } else if is_file("requirements.lock.txt") {
+    } else if is_file("requirements.lock.txt")? {
         // With no discoverable source, a lock is an explicitly supplied
         // requirements file. The generated-lock cache path is only reached
         // after a live source has been discovered above.
@@ -221,7 +221,7 @@ pub(super) fn setup_or_requirements_manifest(
     let dir = project.path();
     let setup_cfg_path = dir.join("setup.cfg");
     let setup_py_path = dir.join("setup.py");
-    if is_project_file(project, &setup_cfg_path) {
+    if is_project_file(project, &setup_cfg_path)? {
         let text = read_text(project, &setup_cfg_path)?;
         let parsed = pyselect::parse_setup_cfg(&text);
         let mut requirements = parsed.install_requires.clone();
@@ -238,7 +238,7 @@ pub(super) fn setup_or_requirements_manifest(
                 }
             }
         }
-        let setup_py_safe = if !is_project_file(project, &setup_py_path) {
+        let setup_py_safe = if !is_project_file(project, &setup_py_path)? {
             true
         } else {
             let setup_py = read_text(project, &setup_py_path)?;
@@ -257,6 +257,7 @@ pub(super) fn setup_or_requirements_manifest(
                 provenance: "setup.cfg [options]".into(),
                 source: text,
                 source_path: Some(setup_cfg_path),
+                external_includes: Vec::new(),
                 locked_packages: None,
                 uv_lock: None,
                 has_index_options: false,
@@ -267,7 +268,7 @@ pub(super) fn setup_or_requirements_manifest(
             });
         }
     }
-    if is_project_file(project, &setup_py_path) {
+    if is_project_file(project, &setup_py_path)? {
         return Ok(Manifest {
             input: "setup.py".into(),
             requirements: Vec::new(),
@@ -276,6 +277,7 @@ pub(super) fn setup_or_requirements_manifest(
             provenance: "setup.py (sandboxed egg_info)".into(),
             source: String::new(),
             source_path: Some(setup_py_path),
+            external_includes: Vec::new(),
             locked_packages: None,
             uv_lock: None,
             has_index_options: false,
@@ -381,7 +383,7 @@ pub(super) fn project_manifest(
         )?;
     }
     record_uv_sources(value)?;
-    let uv_lock = if is_project_file(root, &dir.join("uv.lock")) {
+    let uv_lock = if is_project_file(root, &dir.join("uv.lock"))? {
         let path = dir.join("uv.lock");
         Some(parse_uv_lock(&read_text(root, &path)?)?)
     } else {
@@ -400,6 +402,7 @@ pub(super) fn project_manifest(
         provenance: provenance.into(),
         source: String::new(),
         source_path: None,
+        external_includes: Vec::new(),
         locked_packages: None,
         uv_lock,
         has_index_options: false,

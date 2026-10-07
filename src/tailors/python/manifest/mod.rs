@@ -51,6 +51,10 @@ pub struct Manifest {
     /// A real requirements file can be handed to uv so includes and
     /// constraints retain their pip semantics. Generated manifests use None.
     pub source_path: Option<PathBuf>,
+    /// The files of the include closure that lie outside the project (an
+    /// include beside it), by canonical path. uv is never handed a file
+    /// that names one: it would reopen the include by path (#501).
+    external_includes: Vec<PathBuf>,
     pub locked_packages: Option<Vec<LockedPackage>>,
     uv_lock: Option<Vec<UvPackage>>,
     has_index_options: bool,
@@ -77,22 +81,25 @@ impl Manifest {
     /// private index named by a child file can never be followed by uv.
     pub fn resolver_text(&self) -> String {
         if self.input.starts_with("requirements") && self.has_index_options {
-            return if self.requirements.is_empty() && self.constraints.is_empty() {
-                String::new()
-            } else {
-                join_requirements(&self.requirements, &self.constraints)
-            };
+            return self.flattened_text();
         }
         if self.input.starts_with("requirements")
             && (self.has_skippable_specs || !self.constraints.is_empty())
         {
-            return if self.requirements.is_empty() && self.constraints.is_empty() {
-                String::new()
-            } else {
-                join_requirements(&self.requirements, &self.constraints)
-            };
+            return self.flattened_text();
         }
         self.requirements_text()
+    }
+
+    /// The requirements and constraints of every file in the include
+    /// closure as one text, with options and includes removed: what uv
+    /// compiles when it must not reopen the source by path.
+    pub fn flattened_text(&self) -> String {
+        if self.requirements.is_empty() && self.constraints.is_empty() {
+            String::new()
+        } else {
+            join_requirements(&self.requirements, &self.constraints)
+        }
     }
 
     /// The normalized install requirements without constraint-only entries.
@@ -108,6 +115,11 @@ impl Manifest {
 
     pub fn has_constraints(&self) -> bool {
         !self.constraints.is_empty()
+    }
+
+    /// Whether any file of the include closure lies outside the project.
+    pub fn has_external_includes(&self) -> bool {
+        !self.external_includes.is_empty()
     }
 
     pub fn constraints_text(&self) -> String {
@@ -270,17 +282,54 @@ fn unreadable(path: &Path, error: impl std::fmt::Display) -> io::Error {
     )
 }
 
+/// `path` relative to the held project, for the descriptor reads: `None`
+/// when it lies outside the project, or names the project itself. A
+/// spelling that climbs with `..` is resolved first (once per command,
+/// like any external path), so `proj/../shared.txt` is external and
+/// `proj/a/../b.txt` is the project's `b.txt`, whatever a lexical prefix
+/// says; one that does not resolve is external, and reads as absent.
+pub(crate) fn held_relative(project: &ProjectRoot, path: &Path) -> Option<PathBuf> {
+    let relative = project.relative(path)?;
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    if !relative
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Some(relative.to_path_buf());
+    }
+    let canonical = project.external_canonical(path).ok()?;
+    project
+        .relative(&canonical)
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+}
+
 /// The bytes of a project file, read through the held descriptor when
 /// `path` lies under the project root, so a project directory renamed or
 /// replaced mid-command cannot substitute another project's manifest. A
 /// path outside the project (an absolute `tog.toml` requirements path, an
-/// include that climbs out, a symlink pointing out) is read by pathname.
+/// include that climbs out, a symlink pointing out) is read by pathname,
+/// once per command ([`ProjectRoot::read_external`]).
 pub(crate) fn read_project_file(project: &ProjectRoot, path: &Path) -> io::Result<Vec<u8>> {
-    match project.relative(path) {
-        Some(relative) if !relative.as_os_str().is_empty() => project
-            .read_input(relative)?
+    match held_relative(project, path) {
+        Some(relative) => project
+            .read_input(&relative)?
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)),
-        _ => fs::read(path),
+        None => project
+            .read_external(path)?
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT)),
+    }
+}
+
+/// `path.canonicalize()`, resolved like `read_project_file`: a path
+/// outside the project is resolved once per command, so the include walk
+/// reads the file the manifest read.
+pub(crate) fn canonical_project_path(project: &ProjectRoot, path: &Path) -> io::Result<PathBuf> {
+    match held_relative(project, path) {
+        Some(_) => path.canonicalize(),
+        None => project.external_canonical(path),
     }
 }
 
@@ -304,19 +353,26 @@ pub(crate) fn kernel_marker_record(project: &ProjectRoot) -> io::Result<Option<s
     ))
 }
 
-/// `path.is_file()`, resolved like `read_project_file`.
-pub(crate) fn is_project_file(project: &ProjectRoot, path: &Path) -> bool {
-    match project.relative(path) {
-        Some(relative) if !relative.as_os_str().is_empty() => project.is_input_file(relative),
-        _ => path.is_file(),
+/// `path.is_file()`, resolved like `read_project_file`. An external file
+/// that exists but cannot be read is an error, not a missing file: the
+/// caller would otherwise report `EACCES` as "points to a missing file".
+pub(crate) fn is_project_file(project: &ProjectRoot, path: &Path) -> io::Result<bool> {
+    match held_relative(project, path) {
+        Some(relative) => Ok(project.is_input_file(&relative)),
+        None => Ok(project.read_external(path)?.is_some()),
     }
 }
 
 /// `path.is_dir()`, resolved like `read_project_file`.
 fn is_project_dir(project: &ProjectRoot, path: &Path) -> bool {
-    match project.relative(path) {
-        Some(relative) if !relative.as_os_str().is_empty() => project.is_input_dir(relative),
-        Some(_) => true,
+    if project
+        .relative(path)
+        .is_some_and(|relative| relative.as_os_str().is_empty())
+    {
+        return true;
+    }
+    match held_relative(project, path) {
+        Some(relative) => project.is_input_dir(&relative),
         None => path.is_dir(),
     }
 }
@@ -2013,6 +2069,127 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             Platform::X86_64UnknownLinuxGnu,
         )
         .unwrap());
+    }
+
+    /// A spelling that climbs out of the project is an external file,
+    /// read once per command like any other, and one that climbs and comes
+    /// back is the project's own file: the lexical prefix decides neither.
+    #[test]
+    fn a_climbing_spelling_is_classified_by_where_it_resolves() {
+        let dir = temp_project("climbing-spelling");
+        let project_dir = dir.0.join("proj");
+        fs::create_dir_all(project_dir.join("a")).unwrap();
+        fs::write(dir.0.join("shared.txt"), "six==1.0\n").unwrap();
+        fs::write(project_dir.join("b.txt"), "attrs==1.0\n").unwrap();
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let outside = project_dir.join("../shared.txt");
+        assert_eq!(held_relative(&project, &outside), None);
+        assert_eq!(
+            held_relative(&project, &project_dir.join("a/../b.txt")).as_deref(),
+            Some(Path::new("b.txt"))
+        );
+        assert_eq!(held_relative(&project, &project_dir), None);
+        assert_eq!(held_relative(&project, &dir.0.join("elsewhere.txt")), None);
+        // Resolved and read once: the replacement after the first read is
+        // not seen by the same root, as for any external file.
+        assert_eq!(
+            read_project_file(&project, &outside).unwrap(),
+            b"six==1.0\n"
+        );
+        fs::write(dir.0.join("shared.txt"), "decoy==1.0\n").unwrap();
+        assert_eq!(
+            read_project_file(&project, &outside).unwrap(),
+            b"six==1.0\n"
+        );
+        assert!(is_project_file(&project, &outside).unwrap());
+        assert!(!is_project_file(&project, &project_dir.join("../missing.txt")).unwrap());
+    }
+
+    /// An external file that exists but cannot be read is reported as
+    /// itself, never as a missing file.
+    #[test]
+    fn an_unreadable_external_file_is_an_error_not_a_missing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads anything
+        }
+        let dir = temp_project("unreadable-external");
+        let project_dir = dir.0.join("proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        let external = dir.0.join("shared.txt");
+        fs::write(&external, "six==1.0\n").unwrap();
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o000)).unwrap();
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let error = is_project_file(&project, &external).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        fs::write(
+            project_dir.join("tog.toml"),
+            format!("[python]\nrequirements = \"{}\"\n", external.display()),
+        )
+        .unwrap();
+        fs::create_dir_all(project_dir.join("requirements")).unwrap();
+        let error = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &project,
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("missing file"), "{error}");
+        assert!(error.contains("ermission denied"), "{error}");
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// Requirement option lines that are not includes or index options
+    /// (`--pre`, `--only-binary`, `--no-binary`) are kept as lines of the
+    /// flattened text, so uv still sees them when it is handed the
+    /// flattened file instead of the source.
+    #[test]
+    fn flattening_keeps_requirement_option_lines() {
+        let dir = temp_project("option-lines");
+        fs::write(
+            dir.0.join("requirements.txt"),
+            "--pre\n--only-binary :all:\n-r child.txt\nsix>=1\n",
+        )
+        .unwrap();
+        fs::write(dir.0.join("child.txt"), "--no-binary=attrs\nattrs\n").unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &ProjectRoot::open(&dir.0).unwrap(),
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.flattened_text(),
+            "--pre\n--only-binary :all:\n--no-binary=attrs\nattrs\nsix>=1\n"
+        );
+        assert!(!manifest.has_external_includes());
+    }
+
+    /// An include beside the project puts the whole closure on the
+    /// flattened route: the top file is in the project, but uv would
+    /// reopen the include by path.
+    #[test]
+    fn an_include_beside_the_project_is_an_external_include() {
+        let dir = temp_project("include-beside");
+        let project_dir = dir.0.join("proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("requirements.txt"),
+            "-r ../shared/base.txt\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.0.join("shared")).unwrap();
+        fs::write(dir.0.join("shared/base.txt"), "six==1.17.0\n").unwrap();
+        let manifest = discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &ProjectRoot::open(&project_dir).unwrap(),
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+        .unwrap();
+        assert!(manifest.has_external_includes());
+        assert_eq!(manifest.requirements, ["six==1.17.0"]);
     }
 
     #[test]

@@ -73,6 +73,9 @@ pub struct ProjectRoot {
     _held: Option<HeldEntry>,
     dir: fs::File,
     path: PathBuf,
+    /// The files outside the project this root has read, shared with every
+    /// root derived from it, so one command reads each once (#501).
+    external: std::sync::Arc<crate::kernel::external_input::ExternalInputs>,
 }
 
 /// The held directory, for a caller that must issue a descriptor-relative
@@ -101,6 +104,7 @@ impl ProjectRoot {
             dir,
             path,
             _held: Some(held),
+            external: Default::default(),
         })
     }
 
@@ -120,6 +124,7 @@ impl ProjectRoot {
             _held: None,
             dir,
             path,
+            external: Default::default(),
         }))
     }
 
@@ -589,6 +594,7 @@ impl ProjectRoot {
             dir,
             path: self.path.clone(),
             _held: held,
+            external: self.external.clone(),
         })
     }
 
@@ -790,6 +796,7 @@ impl ProjectRoot {
                     dir,
                     path: display,
                     _held: Some(held),
+                    external: self.external.clone(),
                 }))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -819,6 +826,7 @@ impl ProjectRoot {
                     dir,
                     path,
                     _held: Some(held),
+                    external: self.external.clone(),
                 }))
             }
             Err(error)
@@ -832,6 +840,20 @@ impl ProjectRoot {
                 format!("open {}: {error}", self.path.join(relative).display()),
             )),
         }
+    }
+
+    /// The regular file at `path`, a path outside the project (an absolute
+    /// `tog.toml` requirements path, an include beside the project), as
+    /// this root first read it; `None` when it is absent or not a regular
+    /// file. Read once, so every stage of a command sees the same bytes.
+    pub fn read_external(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.external.read(path)?.map(|bytes| bytes.to_vec()))
+    }
+
+    /// `path.canonicalize()` for a path outside the project, as this root
+    /// first resolved it.
+    pub fn external_canonical(&self, path: &Path) -> io::Result<PathBuf> {
+        self.external.canonical(path)
     }
 
     /// `path` relative to this root, when it lies under the root's
@@ -873,6 +895,7 @@ impl ProjectRoot {
             _held: None,
             dir,
             path: path.to_path_buf(),
+            external: self.external.clone(),
         }))
     }
 

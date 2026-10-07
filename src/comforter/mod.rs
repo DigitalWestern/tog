@@ -867,7 +867,8 @@ pub struct InputRecord {
 /// skipped so callers can list every candidate input. A file inside the
 /// project is read through the held project descriptor, so the hash is of
 /// the directory being synced; one outside it (an include beside the
-/// project) is read by its path.
+/// project) is read by its path, once per command (`read_external`), so
+/// the digest is of the bytes the plan was made from.
 pub fn input_records(
     project: &ProjectRoot,
     candidates: &[PathBuf],
@@ -878,12 +879,10 @@ pub fn input_records(
         let (relative, bytes) = match project.relative(candidate) {
             Some(relative) => (relative.to_path_buf(), None),
             None if candidate.is_relative() => (candidate.clone(), None),
-            None => {
-                if !candidate.is_file() {
-                    continue;
-                }
-                (candidate.clone(), Some(fs::read(candidate)?))
-            }
+            None => match project.read_external(candidate)? {
+                Some(bytes) => (candidate.clone(), Some(bytes)),
+                None => continue,
+            },
         };
         let key = relative.to_string_lossy().into_owned();
         if records.iter().any(|record| record.path == key) {

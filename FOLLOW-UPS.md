@@ -131,10 +131,9 @@ None open.
   clears this.
 
 - **Held project mounts (#497).** Sandbox mounts still resolve project paths. Bind the held directory through a descriptor rather than accepting a replacement at that name. See `src/kernel/sandbox/`.
-- **Tool-opened absolute inputs (#499).** Bundler and uv now name project inputs relative to the held directory. Cargo's `--manifest-path` (`src/kernel/provider/crates.rs`) and external absolute requirements files still reopen a path. Name the manifest relative to the held cwd, and give external files a held input or a snapshot.
+- **Tool-opened absolute inputs (#499).** Bundler and uv name project inputs relative to the held directory, and an external requirements file is read once per command and never handed to uv (#501). Cargo's `--manifest-path` (`src/kernel/provider/crates.rs`) still reopens a path: name the manifest relative to the held cwd.
 
 
-- **External requirements consistency (#501).** Select external absolute Python requirements once across command stages, using held input descriptors or immutable snapshots. Preserve existing supported external requirements. See `src/comforter/status.rs` and `src/tailors/python/inputs.rs`.
 
 
 

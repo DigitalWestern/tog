@@ -52,38 +52,12 @@ fn changed_inputs(project: &ProjectRoot, inputs: &[Value]) -> io::Result<Vec<Str
 /// `None` when it is absent or not a regular file.
 fn input_sha256(project: &ProjectRoot, relative: &Path) -> io::Result<Option<String>> {
     // External Python requirements are recorded as absolute paths. These
-    // intentionally remain external inputs, matching the record writer.
+    // intentionally remain external inputs, matching the record writer,
+    // and are read once per command as it reads them.
     if relative.is_absolute() {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(relative)
-        {
-            Ok(file) => file,
-            Err(error)
-                if error.kind() == io::ErrorKind::NotFound
-                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
-            {
-                return Ok(None)
-            }
-            Err(error) => {
-                // Some nonregular entries (Unix sockets) cannot be opened.
-                // A successful read still requires the opened FD's metadata.
-                // Match the previous is_file preflight for paths that
-                // cannot be classified as regular (including symlink loops).
-                if !fs::metadata(relative).is_ok_and(|meta| meta.is_file()) {
-                    return Ok(None);
-                }
-                return Err(error);
-            }
-        };
-        if !file.metadata()?.is_file() {
-            return Ok(None);
-        }
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut bytes)?;
-        return Ok(Some(hex::encode(Sha256::digest(bytes))));
+        return Ok(project
+            .read_external(relative)?
+            .map(|bytes| hex::encode(Sha256::digest(bytes))));
     }
     if !project.is_input_file(relative) {
         return Ok(None);
@@ -230,21 +204,14 @@ mod tests {
         fs::write(&external, "six==1.17.0\n").unwrap();
         let body = json!({"inputs": [{"path": external,
             "sha256": sha256_file(&external).unwrap()}]});
-        let project = ProjectRoot::open(&dir).unwrap();
-        assert_eq!(
-            recorded_inputs_state(&project, &body).unwrap(),
-            State::Synced
-        );
+        // Each check is its own command, so each opens its own root: one
+        // root reads an external file once (#501).
+        let state = || recorded_inputs_state(&ProjectRoot::open(&dir).unwrap(), &body).unwrap();
+        assert_eq!(state(), State::Synced);
         fs::write(&external, "six==1.16.0\n").unwrap();
-        assert!(matches!(
-            recorded_inputs_state(&project, &body).unwrap(),
-            State::Changed(_)
-        ));
+        assert!(matches!(state(), State::Changed(_)));
         fs::remove_file(&external).unwrap();
-        assert!(matches!(
-            recorded_inputs_state(&project, &body).unwrap(),
-            State::Changed(_)
-        ));
+        assert!(matches!(state(), State::Changed(_)));
     }
 
     #[test]
