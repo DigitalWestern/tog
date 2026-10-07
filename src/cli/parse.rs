@@ -2392,7 +2392,12 @@ mod tests {
         for (row, tailor) in ECOSYSTEM_WORDS.iter().zip(registry) {
             assert_eq!(row.toolchain, tailor.lock_ecosystem(), "{}", row.id);
             assert_eq!(row.builds, tailor.builds(), "{}", row.id);
-            assert_eq!(row.formats, tailor.fmt_ecosystem(), "{}", row.id);
+            assert_eq!(
+                row.formats,
+                tailor.formatter().map(|formatter| formatter.word()),
+                "{}",
+                row.id
+            );
         }
         assert_eq!(
             LS_WORDS,

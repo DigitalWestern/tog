@@ -504,7 +504,7 @@ mod tests {
     /// stub `cargo` and `cargo-fmt` scripts, so nothing is downloaded.
     #[test]
     fn fmt_publishes_nothing_and_removes_a_legacy_record_unless_checking() {
-        use crate::tailors::Tailor;
+        use crate::tailors::Formatter;
         use std::os::unix::fs::PermissionsExt;
         let _store_env = crate::kernel::store::STORE_ENV_LOCK
             .lock()
@@ -575,9 +575,9 @@ mod tests {
 
         // The legacy record is removed before the formatter runs, so this
         // holds whatever the sandboxed stub run returns on this host.
-        let _ = cargo::tailor::Cargo.fmt(&ctx, &project, true, &[], &selected);
+        let _ = cargo::tailor::Rustfmt.run(&ctx, &project, true, &[], &selected);
         assert!(legacy.is_file(), "fmt --check changed the checkout");
-        let _ = cargo::tailor::Cargo.fmt(&ctx, &project, false, &[], &selected);
+        let _ = cargo::tailor::Rustfmt.run(&ctx, &project, false, &[], &selected);
         assert!(
             !legacy.exists(),
             "the legacy rustfmt record was left behind"
