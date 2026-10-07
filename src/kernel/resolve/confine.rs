@@ -564,24 +564,15 @@ pub(crate) fn key_ids(paths: &[PathBuf]) -> Vec<FileId> {
     ids
 }
 
-/// Refuse when any regular file under `root` (not following symlinks,
-/// every depth, hidden directories included, `exclude`d paths skipped) is
-/// one of `keys`: a hard link to the signing key inside a tree a tool reads
-/// would put the key in front of that tool, and in front of the user in
-/// the tool's parse error.
-pub fn refuse_key_links_under(
-    root: &Path,
-    keys: &[FileId],
-    exclude: &[super::snapshot::PathGlob],
-) -> io::Result<()> {
-    refuse_key_links_walk(root, root, keys, exclude)
-}
-
-/// [`refuse_key_links_under`] for a directory tog holds open, walked from
-/// its descriptor (`/proc/self/fd/<n>` on Linux) rather than its path: a
-/// tree renamed or replaced after tog opened it is not what is scanned,
-/// while the sandbox mounts the held one (#612). Messages name the path
-/// the root was opened at.
+/// Refuse when any regular file under the directory `root` holds (not
+/// following symlinks, every depth, hidden directories included,
+/// `exclude`d paths skipped) is one of `keys`: a hard link to the signing
+/// key inside a tree a tool reads would put the key in front of that tool,
+/// and in front of the user in the tool's parse error. Walked from the
+/// descriptor (`/proc/self/fd/<n>` on Linux) rather than the path: a tree
+/// renamed or replaced after tog opened it is not what is scanned, while
+/// the sandbox mounts the held one (#612). Messages name the path the root
+/// was opened at.
 pub fn refuse_key_links_in(
     root: &crate::kernel::fsroot::ProjectRoot,
     keys: &[FileId],
@@ -597,7 +588,8 @@ pub fn refuse_key_links_in(
     refuse_key_links_walk(&walk, root.path(), keys, exclude)
 }
 
-/// The walk of both: below `walk`, with each entry named below `display`.
+/// The walk of `refuse_key_links_in`: below `walk`, with each entry named
+/// below `display`.
 fn refuse_key_links_walk(
     walk: &Path,
     display: &Path,
@@ -1429,19 +1421,19 @@ mod tests {
         }
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("Cargo.toml"), b"[package]\n").unwrap();
-        refuse_key_links_under(&root, &ids, &[]).unwrap();
+        refuse_key_links_walk(&root, &root, &ids, &[]).unwrap();
         fs::hard_link(&key, deep.join("config.toml")).unwrap();
-        let error = refuse_key_links_under(&root, &ids, &[]).unwrap_err();
+        let error = refuse_key_links_walk(&root, &root, &ids, &[]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(!error.to_string().contains("SEEDBYTES"));
         // An excluded tree is not walked.
         let exclude = [PathGlob::new(".hidden").unwrap()];
-        refuse_key_links_under(&root, &ids, &exclude).unwrap();
+        refuse_key_links_walk(&root, &root, &ids, &exclude).unwrap();
         // A symlink is not followed (the stage copies it as a link, and
         // the confined tool cannot reach its target).
         fs::remove_file(deep.join("config.toml")).unwrap();
         std::os::unix::fs::symlink(&key, root.join("link.toml")).unwrap();
-        refuse_key_links_under(&root, &ids, &[]).unwrap();
+        refuse_key_links_walk(&root, &root, &ids, &[]).unwrap();
     }
 
     #[test]
