@@ -289,7 +289,10 @@ Policy exceptions are recorded in `.tog/closures/*.json`
 and summarized as a count with where to read them; `--strict`,
 `TOG_STRICT=1`, or a `.tog/policy.toml` deny list refuses them instead —
 note that `--strict` fails the sync, so it is a setting to sync *under*, not
-a way to clear exceptions already recorded. Closures are written unsigned
+a way to clear exceptions already recorded. An extra or dev group the
+project declares and nobody requested is not an exception, so `--strict`
+and `strict = true` pass it: before `optional_groups_skipped` existed they
+failed such a sync. Closures are written unsigned
 unless `TOG_SIGNING_KEY` is set; sync says so once per store, and on every
 sync only where the policy chain declares a `[signing]` table.
 
