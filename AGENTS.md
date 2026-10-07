@@ -101,7 +101,7 @@
     --all-targets -- -D warnings`, `cargo test --locked`,
     `bash tests/install.sh`, `python3 tools/test_catalog.py`.
   - `e2e` (heavy.yml): `cargo test --locked --no-fail-fast -- --ignored
-    --test-threads=1`, or only the failing suite with `--test <name>`,
+    --test-threads=2`, or only the failing suite with `--test <name>`,
     then `bash tests/acceptance.sh`. Point `TMPDIR` at a directory under
     `$HOME` first: these tests leave large stores behind and fill the
     `/tmp` quota.

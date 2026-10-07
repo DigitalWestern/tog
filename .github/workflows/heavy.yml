@@ -277,7 +277,10 @@ jobs:
           args=("${extra[@]}")
           for name in $files; do args+=(--test "$name"); done
           set -x
-          cargo test --locked --no-fail-fast "${args[@]}" -- --ignored --test-threads=1 ${skip[@]+"${skip[@]}"}
+          # Two tests at a time within each suite: the suites keep their
+          # scratch stores, HOMEs and registries per test, and env changes
+          # behind locks, and a full local run at 2 passed (#465).
+          cargo test --locked --no-fail-fast "${args[@]}" -- --ignored --test-threads=2 ${skip[@]+"${skip[@]}"}
       # The runner disk is about 14 GB; the stores and target/ use most of
       # it. This shows how close a run came.
       - name: Disk after the run
@@ -382,7 +385,7 @@ jobs:
           failed=""
           for name in $PICKED; do
             echo "::group::cargo test --test $name -- --ignored"
-            cargo test --locked --test "$name" -- --ignored --test-threads=1 \
+            cargo test --locked --test "$name" -- --ignored --test-threads=2 \
               --skip elixir_sync_sandboxed_build_and_run || failed="$failed $name"
             echo "::endgroup::"
           done
