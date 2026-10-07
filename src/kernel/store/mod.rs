@@ -14,6 +14,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+mod bin_links;
 mod closure_import;
 mod env;
 mod format;
