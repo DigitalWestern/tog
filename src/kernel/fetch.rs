@@ -306,13 +306,21 @@ fn network_cause(error: &ureq::Error) -> String {
         ureq::Error::Status(code, _) => status_cause(*code),
         ureq::Error::Transport(transport) => {
             let source = transport_source(transport);
-            transport_cause_with(transport.kind(), &source).unwrap_or_else(|| transport.to_string())
+            // ureq's own Display leads with the URL, which `shown_url`
+            // keeps out of messages: name the kind and the rest instead.
+            transport_cause_with(transport.kind(), &source).unwrap_or_else(|| {
+                if source.is_empty() {
+                    transport.kind().to_string()
+                } else {
+                    format!("{}: {source}", transport.kind())
+                }
+            })
         }
     }
 }
 
 fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
-    let message = format!("{verb} {url}: {}", network_cause(&error));
+    let message = format!("{verb} {}: {}", shown_url(url), network_cause(&error));
     match error {
         ureq::Error::Status(code, _) => io::Error::other(StatusFailure { code, message }),
         ureq::Error::Transport(_) => io::Error::other(message),
@@ -701,6 +709,27 @@ fn download_toolchain_artifact_under(
     })
 }
 
+/// `url` as an error message names it: scheme, host and path. A signed
+/// CDN URL a redirect leads to carries its signature in the query string,
+/// and a mirror URL may carry credentials before its host; neither belongs
+/// in a message a user pastes into an issue (#348).
+///
+/// The credentials go first, on the raw string: a password may hold a `?`
+/// or `#`, so cutting the query first would keep the part before it.
+pub(crate) fn shown_url(url: &str) -> std::borrow::Cow<'_, str> {
+    fn without_query(url: &str) -> &str {
+        url.split(['?', '#']).next().unwrap_or(url)
+    }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return without_query(url).into();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{scheme}://{}", without_query(&rest[at + 1..])).into(),
+        None => without_query(url).into(),
+    }
+}
+
 /// The most redirects one toolchain download follows.
 const MAX_REDIRECTS: usize = 10;
 
@@ -736,7 +765,8 @@ pub(crate) fn open_authorized(
             if (300..400).contains(&status) {
                 let location = resp.header("Location").ok_or_else(|| {
                     io::Error::other(format!(
-                        "download {hop}: redirect {status} names no Location"
+                        "download {}: redirect {status} names no Location",
+                        shown_url(hop)
                     ))
                 })?;
                 return Ok(Hop::Redirect(location.to_string()));
@@ -771,7 +801,8 @@ fn follow_redirects<B>(
         };
         if followed == MAX_REDIRECTS {
             return Err(io::Error::other(format!(
-                "download {url}: more than {MAX_REDIRECTS} redirects; refusing"
+                "download {}: more than {MAX_REDIRECTS} redirects; refusing",
+                shown_url(url)
             )));
         }
         followed += 1;
@@ -780,7 +811,10 @@ fn follow_redirects<B>(
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "download {url}: {current} redirects to {next}, which is not https://; refusing"
+                    "download {}: {} redirects to {}, which is not https://; refusing",
+                    shown_url(url),
+                    shown_url(&current),
+                    shown_url(&next)
                 ),
             ));
         }
@@ -1434,6 +1468,107 @@ mod tests {
             resolve_location("https://h.example", "d"),
             "https://h.example/d"
         );
+    }
+
+    #[test]
+    fn shown_urls_keep_scheme_host_and_path_alone() {
+        for (url, shown) in [
+            (
+                "https://cdn.example/a/b.tar.gz?X-Amz-Signature=secret&X-Amz-Credential=key",
+                "https://cdn.example/a/b.tar.gz",
+            ),
+            ("https://cdn.example/a#frag", "https://cdn.example/a"),
+            (
+                "https://user:pass@mirror.example/x?y",
+                "https://mirror.example/x",
+            ),
+            ("https://user:p?ss@host.example/x", "https://host.example/x"),
+            (
+                "https://user:p#ss@host.example/x?sig=s",
+                "https://host.example/x",
+            ),
+            ("https://u:a@b@host.example/x", "https://host.example/x"),
+            ("https://user:p?ss@host.example", "https://host.example"),
+            ("https://mirror.example/a@b", "https://mirror.example/a@b"),
+            ("https://mirror.example", "https://mirror.example"),
+            ("not a url?q", "not a url"),
+        ] {
+            assert_eq!(shown_url(url), shown, "{url}");
+        }
+    }
+
+    /// A transport failure tog has no sentence for (a malformed reply)
+    /// falls back to ureq's kind and detail, still without the URL ureq's
+    /// own text leads with (#348).
+    #[test]
+    fn an_unexplained_transport_failure_names_no_url() {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = io::Read::read(&mut stream, &mut request);
+            let _ = stream.write_all(b"not an http reply\r\n\r\n");
+        });
+        let url =
+            format!("http://user:secret@127.0.0.1:{port}/signed/path?X-Amz-Signature=s1gn4ture");
+        let error = ureq::AgentBuilder::new()
+            .build()
+            .get(&url)
+            .call()
+            .unwrap_err();
+        server.join().unwrap();
+        let ureq::Error::Transport(transport) = &error else {
+            panic!("not a transport failure: {error}");
+        };
+        assert!(
+            transport.to_string().contains("/signed/path"),
+            "{transport}"
+        );
+        assert!(transport_cause_with(transport.kind(), "").is_none());
+        let cause = network_cause(&error);
+        assert!(cause.starts_with(&transport.kind().to_string()), "{cause}");
+        for leak in [
+            "127.0.0.1",
+            "/signed/path",
+            "secret",
+            "X-Amz-Signature",
+            "s1gn4ture",
+        ] {
+            assert!(!cause.contains(leak), "{leak}: {cause}");
+        }
+    }
+
+    /// A refused redirect names where it went by host and path: a signed
+    /// CDN URL's signature stays out of the message (#348).
+    #[test]
+    fn a_refused_redirect_does_not_print_the_signature() {
+        let signed = "http://cdn.example/release/1?X-Amz-Signature=secret";
+        let anything = |_: &str| Ok(());
+        let (outcome, _) = walk(UV_RELEASE, &[(UV_RELEASE, signed)], anything);
+        let message = outcome.unwrap_err().to_string();
+        assert!(
+            message.contains("http://cdn.example/release/1"),
+            "{message}"
+        );
+        assert!(!message.contains("secret"), "{message}");
+        // The policy refusal of an off-endpoint hop says the same.
+        let policy = SourcePolicy::shipped();
+        let off = "https://evil.example/uv.tar.gz?token=secret";
+        let (outcome, _) = walk(UV_RELEASE, &[(UV_RELEASE, off)], as_uv(&policy));
+        let message = outcome.unwrap_err().to_string();
+        assert!(
+            message.contains("https://evil.example/uv.tar.gz"),
+            "{message}"
+        );
+        assert!(!message.contains("secret"), "{message}");
+        // And so does a redirect chain that runs too long.
+        let looping = "https://objects.githubusercontent.com/hop?sig=secret";
+        let (outcome, _) = walk(looping, &[(looping, looping)], anything);
+        let message = outcome.unwrap_err().to_string();
+        assert!(message.contains("more than 10 redirects"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
     }
 
     #[test]
