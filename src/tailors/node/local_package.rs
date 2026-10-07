@@ -13,7 +13,9 @@
 //! registry tarball. `tog status` packs the directory again and compares:
 //! an edit to the source is a change, as an edit to package.json is.
 //!
-//! The directory is read through the held project descriptor. A symlink
+//! The directory is read through the held project descriptor, and each
+//! file is opened from the descriptor of the directory it was listed in,
+//! never by its pathname (#612). A symlink
 //! inside it is followed when its target lies inside the project, and
 //! refused when it leads outside (an absolute target, or one that climbs
 //! past the project root): the copy holds the project's own files, never
@@ -172,12 +174,6 @@ impl Write for HashWriter {
     }
 }
 
-/// One member of the tarball, in packing order.
-enum Member {
-    Dir(String),
-    File { name: String, path: PathBuf },
-}
-
 /// Write the gzipped tarball of `dir` to `out`.
 pub(crate) fn pack(project: &ProjectRoot, dir: &str, out: &mut impl Write) -> io::Result<()> {
     pack_within(project, dir, out, LIMITS)
@@ -198,47 +194,15 @@ fn pack_within(
     }
     let mut walk = Walk {
         project,
+        dir,
         limits,
         on_path: Vec::new(),
         entries: 0,
-        members: Vec::new(),
+        bytes: 0,
+        tarball: super::unpack::PackageTarball::new(out)?,
     };
     walk.collect(&base, "", 0)?;
-    let mut tarball = super::unpack::PackageTarball::new(out)?;
-    let mut bytes = 0u64;
-    for member in walk.members {
-        match member {
-            Member::Dir(name) => tarball.dir(&name)?,
-            Member::File { name, path } => {
-                let mut file = project
-                    .open_input_file(&path)?
-                    .ok_or_else(|| err(format!("{} vanished while packing", path.display())))?;
-                let meta = file.metadata()?;
-                if !meta.is_file() {
-                    return Err(err(format!(
-                        "{} is not a regular file; a file: package holds files and directories only",
-                        path.display()
-                    )));
-                }
-                bytes = bytes.saturating_add(meta.len());
-                if bytes > limits.bytes {
-                    return Err(err(format!(
-                        "the file: package {dir} holds more than {} bytes of files (at {}); a file: package is a copy of a package, not of a data set",
-                        limits.bytes,
-                        path.display()
-                    )));
-                }
-                use std::os::unix::fs::PermissionsExt;
-                let mode = if meta.permissions().mode() & 0o111 != 0 {
-                    0o755
-                } else {
-                    0o644
-                };
-                tarball.file(&name, mode, meta.len(), &mut file)?;
-            }
-        }
-    }
-    tarball.finish()
+    walk.tarball.finish()
 }
 
 /// Where the project-relative `path` leads once every symlink in it is
@@ -271,18 +235,28 @@ fn resolve_inside(project: &ProjectRoot, path: &Path) -> io::Result<Option<PathB
     }
 }
 
-/// The depth-first walk of a `file:` directory.
-struct Walk<'a> {
+/// The depth-first walk of a `file:` directory, writing each member as it
+/// is reached. A file is opened from the descriptor of the directory just
+/// listed (`openat`, no symlink followed, a regular file or nothing), never
+/// by its pathname: an entry swapped between the listing and the open
+/// fails the pack rather than substituting another file (#612). Writing
+/// as the walk goes keeps one directory descriptor open per level, not
+/// one per member.
+struct Walk<'a, W: Write> {
     project: &'a ProjectRoot,
+    /// The package directory as the manifest names it, for messages.
+    dir: &'a str,
     limits: Limits,
     /// The identity (device, inode) of every directory on the current
     /// path, root first: a directory already here is a loop.
     on_path: Vec<(u64, u64)>,
     entries: usize,
-    members: Vec<Member>,
+    /// Bytes of file content written so far.
+    bytes: u64,
+    tarball: super::unpack::PackageTarball<&'a mut W>,
 }
 
-impl Walk<'_> {
+impl<W: Write> Walk<'_, W> {
     /// Every member below `dir` (a resolved project-relative path, no
     /// symlink in it), depth first in name order.
     fn collect(&mut self, dir: &Path, prefix: &str, depth: usize) -> io::Result<()> {
@@ -327,28 +301,71 @@ impl Walk<'_> {
             let path = dir.join(&name);
             let member = format!("package/{prefix}{text}");
             // Seen without following, from the directory just listed.
-            let (kind, path) = match held.entry(Path::new(&name))? {
-                Entry::Symlink => match resolve_inside(self.project, &path)? {
-                    // A symlink to nothing names nothing to copy.
-                    None => continue,
-                    Some(target) => (self.project.entry(&target)?, target),
-                },
-                kind => (kind, path),
-            };
-            match kind {
-                Entry::Regular => self.members.push(Member::File { name: member, path }),
+            match held.entry(Path::new(&name))? {
+                // Opened from the same descriptor the entry was seen in,
+                // with no symlink followed: what the listing saw as a file
+                // is what is packed, or the pack fails.
+                Entry::Regular => {
+                    let file = held.open_file(Path::new(&name))?;
+                    self.file(&member, &path, file)?;
+                }
                 Entry::Directory => {
-                    self.members.push(Member::Dir(format!("{member}/")));
+                    self.tarball.dir(&format!("{member}/"))?;
                     self.collect(&path, &format!("{prefix}{text}/"), depth + 1)?;
                 }
+                Entry::Symlink => match resolve_inside(self.project, &path)? {
+                    // A symlink to nothing names nothing to copy.
+                    None => {}
+                    Some(target) => match self.project.entry(&target)? {
+                        // The resolved target had no symlink in it when it
+                        // was resolved; the strict walk from the project
+                        // root follows none, so a component swapped since
+                        // refuses rather than redirects.
+                        Entry::Regular => {
+                            let file = self.project.open_file(&target)?;
+                            self.file(&member, &target, file)?;
+                        }
+                        Entry::Directory => {
+                            self.tarball.dir(&format!("{member}/"))?;
+                            self.collect(&target, &format!("{prefix}{text}/"), depth + 1)?;
+                        }
+                        // A resolved target cannot be a symlink, and one
+                        // that vanished names nothing to copy.
+                        Entry::Other | Entry::Symlink | Entry::Absent => {}
+                    },
+                },
                 // A FIFO, socket or device is not part of a package, as
-                // `npm pack` leaves it out; a resolved target cannot be a
-                // symlink, and one that vanished names nothing to copy.
-                Entry::Other | Entry::Symlink | Entry::Absent => {}
+                // `npm pack` leaves it out; a name that vanished since the
+                // listing names nothing to copy.
+                Entry::Other | Entry::Absent => {}
             }
         }
         self.on_path.pop();
         Ok(())
+    }
+
+    /// Write the regular file `file` (opened as `path` names it) as the
+    /// member `name`, within the byte limit.
+    fn file(&mut self, name: &str, path: &Path, file: Option<std::fs::File>) -> io::Result<()> {
+        let mut file =
+            file.ok_or_else(|| err(format!("{} vanished while packing", path.display())))?;
+        let meta = file.metadata()?;
+        self.bytes = self.bytes.saturating_add(meta.len());
+        if self.bytes > self.limits.bytes {
+            return Err(err(format!(
+                "the file: package {} holds more than {} bytes of files (at {}); a file: package is a copy of a package, not of a data set",
+                self.dir,
+                self.limits.bytes,
+                path.display()
+            )));
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if meta.permissions().mode() & 0o111 != 0 {
+            0o755
+        } else {
+            0o644
+        };
+        self.tarball.file(name, mode, meta.len(), &mut file)
     }
 }
 
@@ -451,6 +468,42 @@ mod tests {
         .unwrap();
         assert_ne!(first, integrity(&project, "vendor/local").unwrap());
         assert_eq!(version(&project, "vendor/local").unwrap(), "2.1.0");
+    }
+
+    /// The pack reads the tree tog holds, not whatever its path names now:
+    /// with the project moved away and another tree put at its path, the
+    /// packed bytes are the held tree's (#612). Every file is opened from
+    /// the descriptor of the directory it was listed in; the one by-path
+    /// step left is `resolve_inside`, which only needs the package
+    /// directory to exist at the path.
+    #[test]
+    fn packing_reads_the_held_tree_not_its_path() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let path = temp.0.join("project");
+        fs::create_dir_all(&path).unwrap();
+        package_dir(&path);
+        let project = ProjectRoot::open(&path).unwrap();
+        fs::rename(&path, temp.0.join("moved")).unwrap();
+        fs::create_dir_all(path.join("vendor/local/lib")).unwrap();
+        fs::write(path.join("vendor/local/lib/index.js"), "impostor\n").unwrap();
+        fs::write(path.join("vendor/local/bin.js"), "impostor\n").unwrap();
+        let tarball = temp.0.join("packed.tgz");
+        let mut file = fs::File::create(&tarball).unwrap();
+        pack(&project, "vendor/local", &mut file).unwrap();
+        drop(file);
+        for (member, want) in [
+            ("package/lib/index.js", &b"module.exports = 1;\n"[..]),
+            ("package/bin.js", b"#!/usr/bin/env node\n"),
+        ] {
+            let bytes = crate::kernel::archive::read_member(
+                &tarball,
+                crate::kernel::archive::Compression::Gzip,
+                member,
+                1 << 20,
+            )
+            .unwrap();
+            assert_eq!(bytes, want, "{member}");
+        }
     }
 
     /// The member names of the tarball `pack` writes for `dir`.
@@ -560,6 +613,20 @@ mod tests {
         // A dangling link names nothing to copy.
         std::os::unix::fs::symlink("nowhere", root.join("vendor/local/lib/gone")).unwrap();
         assert_eq!(packed_names(&project, "vendor/local"), names);
+        // The target's bytes, opened by the strict walk from the project
+        // root, are what the link's name holds.
+        let tarball = temp.0.join("packed.tgz");
+        let mut file = fs::File::create(&tarball).unwrap();
+        pack(&project, "vendor/local", &mut file).unwrap();
+        drop(file);
+        let bytes = crate::kernel::archive::read_member(
+            &tarball,
+            crate::kernel::archive::Compression::Gzip,
+            "package/lib/util.js",
+            1 << 20,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"shared\n");
     }
 
     #[test]
