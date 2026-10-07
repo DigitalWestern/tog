@@ -179,7 +179,7 @@ Rules the Linux port settled, which apply to any future platform:
 
 ## The tailors
 
-**Python** (`tailors/python/`: `pypi.rs`, `manifest/`, `wheel.rs`, `mod.rs`,
+**Python** (`tailors/python/`: `pypi.rs`, `manifest/`, `unpack/wheel.rs`, `mod.rs`,
 `pyselect.rs`, `env.rs`). Resolution of ranged requirements is delegated to the
 store-pinned uv (`uv pip compile --generate-hashes`); hash-pinned
 requirements and `pyproject.toml` dependencies are locked directly, choosing
@@ -1089,7 +1089,7 @@ when the two differ.
     python/mod.rs          CPython pin lookup over kernel/provider/cpython.rs
     python/inputs.rs       project inputs to a Python plan (uv lock, plan cache)
     python/pypi.rs         Python planner (adapter)
-    python/wheel.rs        PEP 427 wheel installer
+    python/unpack/wheel.rs PEP 427 wheel installer
     python/pyselect.rs     CPython constraint parsing and selection
     python/manifest/       manifest discovery (discovery.rs), poetry.rs, uv.rs,
                            requirements.rs, setup.rs, markers.rs
