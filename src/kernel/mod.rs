@@ -9,6 +9,7 @@ pub mod context;
 pub mod cyclonedx;
 pub mod digest;
 pub mod dirhash;
+pub mod external_input;
 pub mod fetch;
 pub mod fsroot;
 pub mod gc;
