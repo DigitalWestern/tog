@@ -522,8 +522,6 @@ pub const LINUX_NATIVE_PACKAGES: &[NativePackage] = &[
 pub struct NativeLibSet {
     pub id: String,
     pub path: PathBuf,
-    pub platform: Platform,
-    pub manifest_sha256: String,
 }
 
 pub fn packages(platform: Platform) -> io::Result<&'static [NativePackage]> {
@@ -589,16 +587,10 @@ pub fn ensure_native_libs(
     let identity = identity(store, platform)?;
     let id = identity.object_id();
     let object = store.object_path(&id);
-    let manifest_sha256 = identity.inputs["manifest_sha256"].clone();
     if store.has_with_activity(activity, &id)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         validate_layout(&object)?;
-        return Ok(NativeLibSet {
-            id,
-            path: object,
-            platform,
-            manifest_sha256,
-        });
+        return Ok(NativeLibSet { id, path: object });
     }
 
     let work = store.stage_with_activity(activity)?;
@@ -618,12 +610,7 @@ pub fn ensure_native_libs(
     let (object, _) =
         store.commit_with_activity_and_deps(activity, &identity, &work, &[], &deps)?;
     validate_layout(&object)?;
-    Ok(NativeLibSet {
-        id,
-        path: object,
-        platform,
-        manifest_sha256,
-    })
+    Ok(NativeLibSet { id, path: object })
 }
 
 fn realize_staged(

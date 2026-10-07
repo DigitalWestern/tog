@@ -66,9 +66,21 @@ impl ArtifactSpec {
     /// a digest of another algorithm than `algo`, the one the publisher
     /// signs with. `ecosystem` names the selection in the message.
     pub fn check(&self, ecosystem: &str, recipe: &str, algo: &str) -> io::Result<()> {
+        self.check_from(ecosystem, recipe, algo, "tog-toolchain.toml")
+    }
+
+    /// `check`, for a row read from `source` (where a refusal says the
+    /// row came from) rather than the project's `tog-toolchain.toml`.
+    pub fn check_from(
+        &self,
+        ecosystem: &str,
+        recipe: &str,
+        algo: &str,
+        source: &str,
+    ) -> io::Result<()> {
         if self.recipe != recipe {
             return Err(invalid(format!(
-                "{ecosystem}: recipe {} in tog-toolchain.toml is not known to this tog; upgrade tog",
+                "{ecosystem}: recipe {} in {source} is not known to this tog; upgrade tog",
                 self.recipe
             )));
         }
@@ -101,7 +113,19 @@ impl Selected {
         Ok(())
     }
 
-    /// [`Selected::artifact`], checked with [`ArtifactSpec::check`].
+    /// Where this selection's rows were read from, as a refused row names
+    /// it: the project's lock, or the catalog a selection made now came
+    /// from.
+    pub fn row_source(&self) -> &'static str {
+        match self.source {
+            Source::Lock => "tog-toolchain.toml",
+            Source::Created | Source::Updated => "the toolchain catalog",
+            Source::Shipped => "this tog's shipped toolchain catalog",
+        }
+    }
+
+    /// [`Selected::artifact`], checked with [`ArtifactSpec::check_from`]
+    /// against where the selection came from.
     pub fn checked_artifact(
         &self,
         platform: Platform,
@@ -110,7 +134,7 @@ impl Selected {
         algo: &str,
     ) -> io::Result<ArtifactSpec> {
         let row = self.artifact(platform, component)?;
-        row.check(&self.ecosystem, recipe, algo)?;
+        row.check_from(&self.ecosystem, recipe, algo, self.row_source())?;
         Ok(row)
     }
 
@@ -217,6 +241,75 @@ mod tests {
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
+
+    #[test]
+    fn a_refused_row_names_where_it_came_from() {
+        let row = ArtifactSpec {
+            component: "channel-manifest".into(),
+            version: "1.0.0".into(),
+            provider: "rust-lang".into(),
+            build: "official".into(),
+            recipe: "rust-channel-manifest/9".into(),
+            url: "https://static.rust-lang.org/dist/channel-rust-1.0.0.toml".into(),
+            digest: Digest::sha256(&"a".repeat(64)).unwrap(),
+        };
+        let error = row
+            .check_from(
+                "cargo",
+                "rust-channel-manifest/1",
+                "sha256",
+                "this tog's shipped Rust catalog",
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cargo: recipe rust-channel-manifest/9 in this tog's shipped Rust catalog is not \
+             known to this tog; upgrade tog"
+        );
+        let error = row
+            .check("cargo", "rust-channel-manifest/1", "sha256")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("in tog-toolchain.toml"),
+            "{error}"
+        );
+    }
+
+    /// A checked row's refusal names where the selection came from: the
+    /// lock for a locked selection, the catalog for one made now (#558).
+    #[test]
+    fn a_checked_artifact_names_the_selections_source() {
+        let catalog = Catalog::new(
+            "python",
+            vec![bundle(
+                "cpython-3.13.15",
+                "cpython",
+                "3.13.15",
+                Platform::ALL,
+            )],
+        )
+        .unwrap();
+        let mut selected = shipped(&catalog).unwrap();
+        for (source, named) in [
+            (Source::Lock, "tog-toolchain.toml"),
+            (Source::Created, "the toolchain catalog"),
+            (Source::Updated, "the toolchain catalog"),
+            (Source::Shipped, "this tog's shipped toolchain catalog"),
+        ] {
+            selected.source = source;
+            assert_eq!(selected.row_source(), named);
+            let error = selected
+                .checked_artifact(LINUX, "cpython", "example/2", "sha256")
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "python: recipe example/1 in {named} is not known to this tog; upgrade tog"
+                ),
+                "{source:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_selection_answers_versions_artifacts_and_narration() {

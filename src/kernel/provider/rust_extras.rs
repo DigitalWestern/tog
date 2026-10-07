@@ -893,6 +893,46 @@ mod tests {
         }
     }
 
+    /// A refused channel manifest or runtime row names where the selection
+    /// came from: the lock for a locked selection, the shipped catalog for
+    /// the shipped one (#558).
+    #[test]
+    fn a_refused_rust_row_names_the_selections_source() {
+        for (component, recipe) in [
+            (rust::CHANNEL_MANIFEST, rust::CHANNEL_MANIFEST_RECIPE),
+            ("rustc", rust::RUST_RECIPE),
+        ] {
+            let mut selected = shipped();
+            for row in &mut selected.bundle.artifacts {
+                if row.component == component {
+                    row.recipe = format!("{recipe}9");
+                }
+            }
+            for (source, named) in [
+                (
+                    crate::kernel::toolchain::Source::Shipped,
+                    "this tog's shipped toolchain catalog",
+                ),
+                (crate::kernel::toolchain::Source::Lock, "tog-toolchain.toml"),
+            ] {
+                selected.source = source;
+                let error = if component == "rustc" {
+                    rust::runtime_rows(LINUX, &selected).map(drop)
+                } else {
+                    rust::channel_manifest(LINUX, &selected).map(drop)
+                }
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "cargo: recipe {recipe}9 in {named} is not known to this tog; upgrade tog"
+                    ),
+                    "{component} {source:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn nothing_beyond_the_base_is_the_base_object() {
         let selected = shipped();
