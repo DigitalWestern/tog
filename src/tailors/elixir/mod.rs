@@ -924,30 +924,7 @@ pub fn realize_runtime(
             installed?;
         }
 
-        fs::create_dir_all(staged.join("elixir"))?;
-        let mut command = Command::new("/usr/bin/unzip");
-        command
-            .args(["-oq"])
-            .arg(&elixir_zip)
-            .args(["-d"])
-            .arg(staged.join("elixir"));
-        let st = crate::kernel::supervise::local_status(&mut command, activity)?;
-        if !st.success() || !staged.join("elixir/bin/mix").is_file() {
-            return Err(err("Elixir extraction failed or has unexpected layout"));
-        }
-        // Hex archive: MIX_ARCHIVES holds unpacked .ez dirs (ez root is
-        // hex-<ver>/). Unzip preserves that root.
-        fs::create_dir_all(staged.join("archives"))?;
-        let mut command = Command::new("/usr/bin/unzip");
-        command
-            .args(["-oq"])
-            .arg(&hex_ez)
-            .args(["-d"])
-            .arg(staged.join(format!("archives/hex-{}", spec.hex_version)));
-        let st = crate::kernel::supervise::local_status(&mut command, activity)?;
-        if !st.success() {
-            return Err(err("Hex archive extraction failed"));
-        }
+        unpack::extract_elixir_and_hex(activity, &elixir_zip, &hex_ez, &staged, &spec.hex_version)?;
         fs::copy(&rebar3, staged.join("rebar3"))?;
         {
             use std::os::unix::fs::PermissionsExt;

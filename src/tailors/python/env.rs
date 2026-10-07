@@ -4,6 +4,7 @@
 //! It lives in the tailor, not in `comforter`, so the comforter stays
 //! ecosystem-neutral.
 
+use super::unpack::wheel;
 use crate::comforter::{
     move_reserved_backup, persist_root_for_refs_with_project_lock, replace_project_symlink,
     reserve_backup_real_dir_for_store, store_from_object_path, write_closure_with_project_lock,
@@ -19,7 +20,6 @@ use crate::kernel::toolchain::Selected;
 use crate::kernel::types::{ArtifactKind, Identity, Plan};
 use crate::tailors::python;
 use crate::tailors::python::pyselect;
-use crate::tailors::python::wheel;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
