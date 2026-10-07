@@ -95,7 +95,6 @@ None open.
 - **Smaller open issues from the 2026-09-23/24 run.** One line each; the
   issue has the options and the pick.
   - #476 fetch: state and audit that a cache hit is trusted by its digest's source, not its writer (from #287).
-  - #295 tests: four sandbox tests fail instead of skipping when bubblewrap is missing.
   - #300 heavy: the Elixir end-to-end test cannot run on ubuntu-22.04 (OTP needs glibc 2.43).
   - #307 archive: a tarball with macOS AppleDouble (`._name`) members is refused on macOS but extracted on Linux. The extraction carries `--no-mac-metadata`; the listing carries no restore flag (bsdtar documents them for other modes). On the Mac, try `/usr/bin/tar --no-mac-metadata -tf` on such a tarball: if it accepts the flag and prints the `._` members, add it to `TAR_LIST_FLAGS` and close.
 - **Unreproduced test flakes (#65).**
