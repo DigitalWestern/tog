@@ -1551,11 +1551,8 @@ fn build_root_relative(fingerprint: &str) -> PathBuf {
 }
 
 /// The build root of the selected toolchain.
-pub fn build_root(
-    platform: Platform,
-    project_dir: &Path,
-    selected: &Selected,
-) -> io::Result<PathBuf> {
+#[cfg(test)]
+fn build_root(platform: Platform, project_dir: &Path, selected: &Selected) -> io::Result<PathBuf> {
     Ok(build_root_at(
         project_dir,
         &beam_fingerprint_for(&beam_spec(platform, selected)?),
