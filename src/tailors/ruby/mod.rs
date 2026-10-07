@@ -330,14 +330,25 @@ const ENV_REMOVE: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE;
 const GEMFILE: &str = "Gemfile";
 const GEMFILE_LOCK: &str = "Gemfile.lock";
 
+/// The gem environment every store Ruby run shares: `gem_home` is the one
+/// gem path, so neither the host's `~/.gem` nor its `GEM_PATH` is searched.
+fn gem_env(gem_home: &Path) -> Vec<(String, String)> {
+    vec![
+        ("GEM_HOME".to_string(), gem_home.display().to_string()),
+        ("GEM_PATH".to_string(), gem_home.display().to_string()),
+        // Unsetting GEMRC would re-enable ~/.gemrc; point it at an empty
+        // config instead (system /etc/gemrc remains a documented impurity).
+        ("GEMRC".to_string(), "/dev/null".to_string()),
+    ]
+}
+
 /// The environment every store Ruby tool runs with. `gemfile` is what
 /// Bundler reads: tog's own delegates start inside the held project
 /// directory and name it relatively, so a directory swapped in at the
 /// project's path is never the one evaluated (#499).
 fn forced_env(gemfile: &str, gem_home: &Path) -> Vec<(String, String)> {
-    vec![
-        ("GEM_HOME".to_string(), gem_home.display().to_string()),
-        ("GEM_PATH".to_string(), gem_home.display().to_string()),
+    let mut env = gem_env(gem_home);
+    env.extend([
         ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
         ("BUNDLE_GEMFILE".to_string(), gemfile.to_string()),
         ("BUNDLE_FROZEN".to_string(), "true".to_string()),
@@ -347,10 +358,19 @@ fn forced_env(gemfile: &str, gem_home: &Path) -> Vec<(String, String)> {
             "BUNDLE_DISABLE_VERSION_CHECK".to_string(),
             "true".to_string(),
         ),
-        // Unsetting GEMRC would re-enable ~/.gemrc; point it at an empty
-        // config instead (system /etc/gemrc remains a documented impurity).
-        ("GEMRC".to_string(), "/dev/null".to_string()),
-    ]
+    ]);
+    env
+}
+
+/// Env for a lone script (`tog app.rb` with no Ruby project): the same
+/// scrub as [`run_env`], with an empty `gem_home` in place of a gems
+/// object, so the script sees the interpreter and its default gems only.
+pub fn lone_env(gem_home: &Path) -> crate::tailors::EnvScrub {
+    (
+        ENV_REMOVE_PREFIXES.to_vec(),
+        ENV_REMOVE.to_vec(),
+        gem_env(gem_home),
+    )
 }
 
 /// Env applied by `tog run` for a projected ruby environment. The user's

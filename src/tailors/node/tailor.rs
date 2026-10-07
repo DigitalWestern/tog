@@ -18,8 +18,8 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
 use crate::tailors::{
-    ClosureListing, FileRunner, PackageRow, RegistryTool, ScriptRun, SourceFile, SyncRequest,
-    Tailor,
+    ClosureListing, FileRunner, LoneFile, PackageRow, RegistryTool, ScriptRun, SourceFile,
+    SyncRequest, Tailor,
 };
 use serde_json::{json, Value};
 use std::io;
@@ -406,6 +406,26 @@ impl Tailor for Node {
             env,
             noun: "npm script",
         }))
+    }
+
+    /// A lone file runs on the Node alone, with no node_modules, and a
+    /// TypeScript one by the rule a project's would.
+    fn lone_file(
+        &self,
+        ctx: &Context,
+        toolchain: &Selected,
+        extension: &str,
+    ) -> io::Result<Option<LoneFile>> {
+        let flags: &[&str] = match extension {
+            "ts" | "mts" | "cts" => &typescript_runner(&toolchain.primary_version())
+                .map_err(|why| io::Error::new(io::ErrorKind::Unsupported, why))?[1..],
+            _ => &[],
+        };
+        let runtime = node::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        let mut lone = LoneFile::in_bin(&runtime, "node");
+        lone.program
+            .extend(flags.iter().map(|flag| flag.to_string()));
+        Ok(Some(lone))
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {
