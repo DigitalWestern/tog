@@ -1322,6 +1322,25 @@ fn fake_rust_tree(tree: &Path, release: &str) {
 const PLAIN_CARGO_TOML: &str = "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
 const PLAIN_CARGO_LOCK: &str = "version = 3\n\n[[package]]\nname = \"p\"\nversion = \"0.1.0\"\n";
 
+/// Whether the sandbox can run here, as the library's sandbox tests decide
+/// it: a host without a working bubblewrap skips (with the reason on
+/// stderr), unless `TOG_SANDBOX_TESTS` makes the skip a failure (#295).
+fn sandbox_ready(test_name: &str) -> bool {
+    let required =
+        matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty());
+    let probe = tog::kernel::platform::Platform::host().and_then(tog::kernel::sandbox::probe);
+    match probe {
+        Ok(_) => true,
+        Err(error) if required => {
+            panic!("required Linux sandbox test {test_name} unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skip {test_name}: {error}");
+            false
+        }
+    }
+}
+
 /// `[toolchain] path` names a toolchain directory on this machine. The lock
 /// records it by content: a row marked `source = "path"`, with the tree's
 /// URL, both version lines and the tree hash. A sync imports it and records
@@ -1330,6 +1349,9 @@ const PLAIN_CARGO_LOCK: &str = "version = 3\n\n[[package]]\nname = \"p\"\nversio
 /// the new tree.
 #[test]
 fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
+    if !sandbox_ready("a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes") {
+        return;
+    }
     let fixture = Fixture::new("rust-path");
     let trees = TempDir::new("lock-rust-path-tree");
     let tree = trees.0.join("custom-rust");

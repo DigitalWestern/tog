@@ -1320,6 +1320,13 @@ pub(crate) fn push_setenv(args: &mut Vec<OsString>, key: &str, value: impl AsRef
     args.push(value.as_ref().to_os_string());
 }
 
+/// `tests::linux_ready`, for a test outside this module that starts a
+/// sandboxed child (#295).
+#[cfg(test)]
+pub(crate) fn linux_ready(test_name: &str) -> bool {
+    tests::linux_ready(test_name)
+}
+
 #[cfg(test)]
 mod tests {
     /// An interrupt during the probe is returned as the interrupt, not
@@ -1362,6 +1369,9 @@ mod tests {
         matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
     }
 
+    /// Whether a test that runs the Linux sandbox can run here: skipped
+    /// (with the reason on stderr) off Linux or without a working
+    /// bubblewrap, unless `TOG_SANDBOX_TESTS` makes the skip a failure.
     pub(super) fn linux_ready(test_name: &str) -> bool {
         match Platform::host() {
             Ok(Platform::X86_64UnknownLinuxGnu) => {}
