@@ -181,6 +181,20 @@ impl Store {
         Ok(Some(Store { root }))
     }
 
+    /// [`existing`](Store::existing) with a shared lease held, for a reader
+    /// that would rather skip the store than wait: `None` when there is no
+    /// store, or when an exclusive job (a sweep, a reset) holds it. The
+    /// format is checked again under the lease, as `activity` does, so what
+    /// the caller reads cannot be swept or reset under it (#434).
+    pub fn existing_shared() -> io::Result<Option<(Store, StoreActivity)>> {
+        let Some(store) = Store::existing()? else {
+            return Ok(None);
+        };
+        Ok(store
+            .try_activity_shared()?
+            .map(|activity| (store, activity)))
+    }
+
     /// The configured store's canonical root and what its format marker
     /// says, without creating or changing anything: `None` when there is no
     /// directory there yet. This is how a store `open` refuses is still
@@ -1931,6 +1945,53 @@ mod tests {
         let refusal = refusal.to_string();
         assert!(refusal.contains("has no format marker"), "{refusal}");
         assert!(!old_store.join(FORMAT_FILE).exists());
+    }
+
+    /// `existing_shared` holds a shared lease on the store it returns, and
+    /// skips a store an exclusive job holds instead of waiting (#434).
+    #[test]
+    fn existing_shared_leases_the_store_and_skips_a_busy_one() {
+        let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("TOG_STORE");
+        let temp = temp_store();
+        std::env::set_var("TOG_STORE", &temp.0);
+        let leased = Store::existing_shared();
+        let exclusive_while_leased = Store::existing().unwrap().unwrap().try_activity_exclusive();
+        let leased = leased.unwrap().map(|(store, activity)| {
+            drop(activity);
+            store.root
+        });
+        // Another thread's exclusive job, as a sweep in another process.
+        let (held, release) = (
+            std::sync::mpsc::channel::<()>(),
+            std::sync::mpsc::channel::<()>(),
+        );
+        let root = temp.0.clone();
+        let job = std::thread::spawn(move || {
+            let exclusive = Store { root }.activity(ActivityMode::Exclusive).unwrap();
+            held.0.send(()).unwrap();
+            release.1.recv().unwrap();
+            drop(exclusive);
+        });
+        held.1.recv().unwrap();
+        let busy = Store::existing_shared().map(|found| found.is_some());
+        release.0.send(()).unwrap();
+        job.join().unwrap();
+        let missing = temp.0.join("missing");
+        std::env::set_var("TOG_STORE", &missing);
+        let absent = Store::existing_shared();
+        match old {
+            Some(value) => std::env::set_var("TOG_STORE", value),
+            None => std::env::remove_var("TOG_STORE"),
+        }
+        assert_eq!(leased, Some(temp.0.canonicalize().unwrap()));
+        assert!(
+            exclusive_while_leased.unwrap().is_none(),
+            "an exclusive job got the store under the shared lease"
+        );
+        assert!(!busy.unwrap(), "a store under an exclusive job was leased");
+        assert!(absent.unwrap().is_none());
+        assert!(!missing.exists());
     }
 
     /// The marker is written when the store is created, before any
