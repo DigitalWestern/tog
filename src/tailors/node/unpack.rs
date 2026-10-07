@@ -76,10 +76,18 @@ pub(super) fn extract_npm_package(
 /// carries its size in a PAX record.
 const USTAR_MAX_SIZE: u64 = 0o77777777777;
 
+/// The gzip level a `file:` package is packed at. Pinned, not flate2's
+/// default: the level picks the deflate stream and the header's XFL byte,
+/// and the tarball's digest is the package's integrity, so a level that
+/// moved with a dependency would change every `file:` package's identity
+/// (#613). flate2's pure-Rust backend (the default feature set) produces
+/// the same stream on every host.
+const GZIP_LEVEL: flate2::Compression = flate2::Compression::new(6);
+
 /// The gzipped tarball of a `file:` directory package, built the same way
 /// every time: a `package/` root, ustar headers with zeroed owners and
-/// times, a zero gzip mtime and an unknown OS byte, so the same members in
-/// the same order are the same bytes.
+/// times, a zero gzip mtime, an unknown OS byte (255) and a pinned level,
+/// so the same members in the same order are the same bytes, on every host.
 pub(super) struct PackageTarball<W: Write> {
     gzip: flate2::write::GzEncoder<W>,
 }
@@ -90,7 +98,7 @@ impl<W: Write> PackageTarball<W> {
         let mut gzip = flate2::GzBuilder::new()
             .mtime(0)
             .operating_system(255)
-            .write(out, flate2::Compression::default());
+            .write(out, GZIP_LEVEL);
         write_member(&mut gzip, "package/", b'5', 0o755, 0, &mut io::empty())?;
         Ok(Self { gzip })
     }
@@ -238,6 +246,43 @@ mod tests {
             member_header("package/small", b'0', 0o644, USTAR_MAX_SIZE).len(),
             512
         );
+    }
+
+    /// The gzip header carries nothing from the host or the clock: a zero
+    /// mtime, no flags (no name, comment or extra field), the unknown OS
+    /// byte, and the XFL byte the pinned level sets. Packed twice, the
+    /// tarball is the same bytes (#613).
+    #[test]
+    fn the_gzip_header_is_fixed_and_the_tarball_packs_identically() {
+        let pack = || {
+            let mut out = Vec::new();
+            let mut tarball = PackageTarball::new(&mut out).unwrap();
+            tarball.dir("package/lib/").unwrap();
+            tarball
+                .file("package/lib/index.js", 0o644, 5, &mut &b"hello"[..])
+                .unwrap();
+            tarball.finish().unwrap();
+            out
+        };
+        let bytes = pack();
+        assert_eq!(bytes, pack());
+        // RFC 1952: ID1, ID2, CM (deflate), FLG, MTIME (4 bytes), XFL, OS.
+        assert_eq!(&bytes[..4], &[0x1f, 0x8b, 8, 0], "id, method, flags");
+        assert_eq!(&bytes[4..8], &[0, 0, 0, 0], "mtime");
+        assert_eq!(bytes[8], 0, "XFL for level {}", GZIP_LEVEL.level());
+        assert_eq!(bytes[9], 255, "OS byte: unknown");
+        // The members read back through the archive reader, and the gzip
+        // trailer's length is the tar stream's: a directory block, a file
+        // block and its data block, the two end blocks.
+        let decompressed = {
+            let mut tar = Vec::new();
+            flate2::read::GzDecoder::new(&bytes[..])
+                .read_to_end(&mut tar)
+                .unwrap();
+            tar
+        };
+        assert_eq!(decompressed.len(), 512 * 6);
+        assert_eq!(&decompressed[512 * 3..512 * 3 + 5], b"hello");
     }
 
     /// A registry tarball whose `package/sub/b` is a hard link to

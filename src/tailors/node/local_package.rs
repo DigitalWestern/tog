@@ -413,6 +413,26 @@ mod tests {
         );
     }
 
+    /// The same directory packs to the same bytes, run after run: the
+    /// tarball's digest is the package's identity across hosts and lock
+    /// imports, so nothing of the clock or the host may reach it (#613).
+    #[test]
+    fn a_directory_packs_to_identical_bytes_every_time() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        package_dir(&temp.0);
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let packed = || {
+            let mut out = Vec::new();
+            pack(&project, "vendor/local", &mut out).unwrap();
+            out
+        };
+        let first = packed();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(first, packed());
+        assert_eq!(&first[4..8], &[0, 0, 0, 0], "gzip mtime");
+        assert_eq!(first[9], 255, "gzip OS byte");
+    }
+
     #[test]
     fn the_integrity_is_stable_and_follows_the_contents() {
         let temp = crate::kernel::testutil::TempDir::new();
