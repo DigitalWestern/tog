@@ -293,6 +293,76 @@ fn bwrap_contract() {
     assert!(!forbidden.join("forbidden").exists());
 }
 
+/// The no-store sandbox relay scrubs the key `signing_key_secrets()` reads
+/// from its real source, `TOG_SIGNING_KEY` (#594). The unit tests in
+/// sandbox.rs hand the relay a secret directly; this runs `run_build_spec`
+/// in a fresh copy of this binary, so the secret comes from the key file
+/// itself, and a sandboxed child prints that file to both streams.
+#[test]
+fn the_no_store_relay_scrubs_the_key_named_by_tog_signing_key() {
+    const CHILD: &str = "TOG_SCRUB_RELAY_CHILD";
+    const NAME: &str = "the_no_store_relay_scrubs_the_key_named_by_tog_signing_key";
+    if let Some(key) = std::env::var_os(CHILD) {
+        let key = std::path::PathBuf::from(key);
+        let scratch = key.parent().unwrap().parent().unwrap().join("scratch");
+        let spec = BuildSpec {
+            argv: vec![
+                "/usr/bin/sh".into(),
+                "-c".into(),
+                "printf 'out '; cat \"$1\"; printf 'err ' >&2; cat \"$1\" >&2".into(),
+                "sh".into(),
+                key.to_str().unwrap().into(),
+            ],
+            cwd: scratch.clone(),
+            env: vec![],
+            read: vec![key.parent().unwrap().to_path_buf()],
+            write: vec![],
+            scratch,
+            path: "/usr/bin:/bin".into(),
+            host_view: tog::kernel::sandbox::HostView::Full,
+        };
+        run_build_spec(&spec).expect("the key printer runs");
+        return;
+    }
+    if !matches!(Platform::host(), Ok(Platform::X86_64UnknownLinuxGnu)) {
+        skip_or_panic(NAME, "not an x86_64 Linux host");
+        return;
+    }
+    if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+        skip_or_panic(NAME, format!("bubblewrap preflight failed: {error}"));
+        return;
+    }
+    let temp = TempDir::new("sandbox-scrub-key");
+    let key = temp.path().join("keys/signing.key");
+    std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+    std::fs::create_dir(temp.path().join("scratch")).unwrap();
+    tog::kernel::signing::generate(&key).unwrap();
+    let contents = std::fs::read_to_string(&key).unwrap();
+    let seed = contents.trim().rsplit(':').next().unwrap().to_string();
+    assert!(seed.len() >= 32, "{contents}");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", NAME, "--nocapture"])
+        .env(CHILD, &key)
+        .env("TOG_SIGNING_KEY", &key)
+        .env("HOME", temp.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    for (stream, label) in [(&stdout, "out "), (&stderr, "err ")] {
+        assert!(
+            stream.contains(&format!("{label}ed25519:[signing key redacted]")),
+            "{label}: {stream}"
+        );
+        // No ten-byte run of the seed (the scrubber's threshold) survives.
+        for window in seed.as_bytes().windows(10) {
+            let piece = std::str::from_utf8(window).unwrap();
+            assert!(!stream.contains(piece), "{label} leaks {piece}: {stream}");
+        }
+    }
+}
+
 /// The resolution door's Linux confinement, end to end: bubblewrap in the
 /// `Proxy` network mode, the relay (the real `tog` binary), the seccomp
 /// filter, the socket scan, quiescence, and publication. The "tool" is a C
