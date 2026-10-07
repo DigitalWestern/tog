@@ -23,7 +23,6 @@ pub fn is_cargo_here(project: &ProjectRoot) -> bool {
 }
 
 pub struct CargoInputs {
-    pub root: PathBuf,
     /// The same workspace used to read the plan, retained through publication.
     pub workspace: ProjectRoot,
     pub rust_obj: PathBuf,
@@ -234,13 +233,12 @@ pub fn load_cargo_inputs(
     toolchain: &Selected,
 ) -> io::Result<CargoInputs> {
     let rust_version = toolchain.version("rustc")?;
-    let (rust_obj, root, workspace) =
+    let (rust_obj, _root, workspace) =
         locate_workspace(platform, lock_root, project, store, activity, toolchain)?;
-    read_inputs(root, workspace, rust_obj, rust_version)
+    read_inputs(workspace, rust_obj, rust_version)
 }
 
 fn read_inputs(
-    root: PathBuf,
     workspace: ProjectRoot,
     rust_obj: PathBuf,
     rust_version: &str,
@@ -250,7 +248,6 @@ fn read_inputs(
     let plan = cargo::plan_cargo(&lock, rust_version)?;
     let resolution_basis = resolution_basis(&workspace, &lock)?;
     Ok(CargoInputs {
-        root,
         workspace,
         rust_obj,
         plan,
@@ -540,8 +537,8 @@ mod tests {
         .unwrap();
         std::fs::write(workspace.join("Cargo.lock"), "# original\nversion = 4\n").unwrap();
         let member = ProjectRoot::open(&member).unwrap();
-        let (root, held) = locate_held_cargo_root(&member).unwrap();
-        let inputs = read_inputs(root, held, base.join("rust"), "1.96.1").unwrap();
+        let (_root, held) = locate_held_cargo_root(&member).unwrap();
+        let inputs = read_inputs(held, base.join("rust"), "1.96.1").unwrap();
         std::fs::rename(&workspace, base.join("moved")).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
