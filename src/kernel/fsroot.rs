@@ -2581,41 +2581,51 @@ mod tests {
         assert!(scratch.is_dir());
     }
 
-    /// A source on another filesystem than the project fails with
-    /// `CrossesDevices` and a message naming both ends, so the caller can
-    /// publish a copy instead; the source stays where it was. `/dev/shm`
-    /// is the second filesystem where it is one.
+    /// A source on another filesystem than the project is published as a
+    /// copy with its mode, under the rename's rules: a symlink at the
+    /// destination is replaced, its target untouched, and the source is
+    /// removed. `/dev/shm` is the second filesystem where it is one.
     #[test]
-    fn rename_in_across_filesystems_says_so() {
-        use std::os::unix::fs::MetadataExt as _;
+    fn rename_in_across_filesystems_publishes_a_copy() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        const NAME: &str = "rename_in_across_filesystems_publishes_a_copy";
         let temp = TempDir::named("rename-in-xdev");
         let dir = project(&temp);
         let shm = Path::new("/dev/shm");
         let Ok(shm_meta) = fs::metadata(shm) else {
-            eprintln!("skip rename_in_across_filesystems_says_so: no /dev/shm");
+            eprintln!("skip {NAME}: no /dev/shm");
             return;
         };
         if shm_meta.dev() == fs::metadata(&dir).unwrap().dev() {
-            eprintln!(
-                "skip rename_in_across_filesystems_says_so: /dev/shm shares the temp filesystem"
-            );
+            eprintln!("skip {NAME}: /dev/shm shares the temp filesystem");
             return;
         }
         let other = TempDir(shm.join(format!("tog-rename-in-xdev-{}", random_suffix().unwrap())));
         fs::create_dir(&other.0).unwrap();
         let built = other.0.join("app");
         fs::write(&built, b"binary").unwrap();
+        fs::set_permissions(&built, fs::Permissions::from_mode(0o750)).unwrap();
+        let outside = temp.0.join("outside");
+        fs::write(&outside, b"keep").unwrap();
+        symlink(&outside, dir.join("app")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        let error = root.rename_in(&built, Path::new("app")).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::CrossesDevices, "{error}");
-        let message = error.to_string();
-        assert!(message.contains("different filesystems"), "{message}");
-        assert!(message.contains(&built.display().to_string()), "{message}");
-        assert!(
-            message.contains(&root.path().join("app").display().to_string()),
-            "{message}"
-        );
+        root.rename_in(&built, Path::new("app")).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+        let entry = dir.join("app").symlink_metadata().unwrap();
+        assert!(entry.file_type().is_file());
+        assert_eq!(entry.permissions().mode() & 0o7777, 0o750);
+        assert_eq!(fs::read(dir.join("app")).unwrap(), b"binary");
+        assert!(built.symlink_metadata().is_err());
+        assert!(!entries(&dir)
+            .iter()
+            .any(|name| name.starts_with(".tog-tmp")));
+
+        // A directory there is refused across filesystems too, and the
+        // source stays.
+        fs::write(&built, b"binary").unwrap();
+        fs::create_dir(dir.join("tool")).unwrap();
+        let error = root.rename_in(&built, Path::new("tool")).unwrap_err();
+        assert!(error.to_string().contains("is a directory"), "{error}");
         assert!(built.is_file());
-        assert!(dir.join("app").symlink_metadata().is_err());
     }
 }
