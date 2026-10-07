@@ -38,8 +38,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 mod held;
-pub(crate) use held::start_in;
-use held::{held_root_for, HeldEntry};
+use held::HeldEntry;
+pub(crate) use held::{held_root_for, start_in};
 
 const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;

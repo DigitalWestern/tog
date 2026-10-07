@@ -189,7 +189,7 @@ impl Tailor for Elixir {
         elixir::build_sandboxed(
             ctx.platform,
             &ctx.activity,
-            root,
+            &project,
             &beam,
             &projection,
             args,

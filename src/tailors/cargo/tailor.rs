@@ -240,7 +240,7 @@ impl Tailor for Cargo {
         cargo::build_sandboxed(
             ctx.platform,
             &ctx.activity,
-            &inputs.root,
+            &inputs.workspace,
             &inputs.rust_obj,
             &vendor_obj,
             args,

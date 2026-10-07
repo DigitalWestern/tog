@@ -1232,10 +1232,15 @@ pub fn lone_env(go_obj: &Path, scratch: &Path) -> io::Result<Vec<(String, String
 
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
 /// staged in scratch and moved into the project by tog afterwards.
+///
+/// The project is the directory `project` holds, named by the canonical
+/// path it was opened at, which the sandbox resolves through the held
+/// descriptor (#497). It is not canonicalized again: that would follow
+/// whatever sits at the path now, a symlink swapped in included.
 pub fn build_sandboxed(
     platform: Platform,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     go_obj: &Path,
     modcache_obj: &Path,
     args: &[String],
@@ -1265,7 +1270,7 @@ pub fn build_sandboxed(
             )));
         }
     }
-    let project_dir = project_dir.canonicalize()?;
+    let project_dir = project.path().to_path_buf();
     let go_obj = go_obj.canonicalize()?;
     let modcache_obj = modcache_obj.canonicalize()?;
     let store = Store::open()?;
@@ -2226,6 +2231,8 @@ mod tests {
     #[test]
     fn build_rejects_managed_flags() {
         let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("go-build-flags");
+        let project = ProjectRoot::open(&temp.0).unwrap();
         for bad in [
             "-mod=mod",
             "-toolexec",
@@ -2239,7 +2246,7 @@ mod tests {
             let e = build_sandboxed(
                 Platform::Aarch64AppleDarwin,
                 &activity,
-                Path::new("/nonexistent"),
+                &project,
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 &[bad.to_string()],

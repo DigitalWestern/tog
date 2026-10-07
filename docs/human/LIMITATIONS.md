@@ -75,13 +75,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (after the store wait, before each ecosystem, before a root is registered, and after the
   closure is renamed into place). The ecosystem tools a sync starts unsandboxed (uv, npm,
   cargo, go, mix, bundle, dotnet, git) start in the held directory: the child enters it
-  through the descriptor (`fchdir`), not the path. Some things still go by path. A sandboxed
-  child (the `setup.py` probe) has the project bound in by path, a confined resolution
-  snapshots the project after opening it by path again, and a path handed to a tool as an
-  argument (`--manifest-path`, `-r <requirements>`) or an environment variable
-  (`BUNDLE_GEMFILE`) is one the tool opens itself. So a
-  same-user process that renames the directory away, puts another project at its path, and
-  puts the original back while one of those runs can make it read or write the replacement.
+  through the descriptor (`fchdir`), not the path. A sandboxed child (the `setup.py` probe,
+  a sandboxed build in the project) has the held directory bound in through its descriptor
+  and starts there, and a confined resolution snapshots the held directory. A path handed
+  to a tool as an argument (`--manifest-path`, `-r <requirements>`) or an environment
+  variable (`BUNDLE_GEMFILE`) is still one the tool opens itself. So a same-user process
+  that renames the directory away, puts another project at its path, and puts the original
+  back while such a tool runs can make it read or write the replacement.
   Loud when the tool's output is read back (a lock it wrote is missing from the held
   directory); silent otherwise. Files above the project (a Cargo workspace root, a parent
   `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) are read from the

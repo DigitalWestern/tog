@@ -36,6 +36,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+mod held;
+pub(crate) use held::pass_fds;
+use held::HeldRoots;
+
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
 /// docs/human/LIMITATIONS.md); this decides what else of the host rides
@@ -419,11 +423,15 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
-        self.reject_host_sockets(cwd, tmp, &HOST_ETC_ENTRIES)?;
+        let held = HeldRoots::resolve(self, cwd)?;
+        self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
-        let invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs)?;
+        let mut invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs, &held)?;
         let mut command = bwrap_command(bwrap)?;
         command.args(&invocation.args);
+        pass_fds(&mut command, held.passed());
+        // The descriptors are duplicated only when the child is spawned.
+        invocation._held = held;
         Ok((command, invocation))
     }
 
@@ -459,30 +467,56 @@ impl Sandbox<'_> {
     /// writable one (`connect` needs no write access to the mount), so every
     /// declared root is scanned, not only the writable ones, and so is each
     /// of the fixed host `binds` (`HOST_ETC_ENTRIES` in production).
-    fn reject_host_sockets(&self, cwd: &Path, scratch: &Path, binds: &[&str]) -> io::Result<()> {
+    /// A root an open project root holds is scanned through its held
+    /// descriptor, the directory the sandbox binds (`held`).
+    fn reject_host_sockets(
+        &self,
+        cwd: &Path,
+        scratch: &Path,
+        held: &HeldRoots,
+        binds: &[&str],
+    ) -> io::Result<()> {
         let mut roots = Vec::with_capacity(self.read.len() + self.write.len() + 2);
         roots.extend(self.read.iter().copied());
         roots.extend(self.write.iter().copied());
         roots.push(cwd);
         roots.push(scratch);
 
-        let mut scanned = Vec::new();
+        // Each root scanned so far, and whether through a held descriptor.
+        // A root under one already scanned is skipped, except a held root
+        // under a parent scanned by path: the parent's walk covered what
+        // sits at the root's path now, not the tree the sandbox binds, which
+        // may have been renamed out from under it.
+        let mut scanned: Vec<(PathBuf, bool)> = Vec::new();
         for root in roots {
-            let root = fs::canonicalize(root)?;
+            let (alias, root) = match held.find(root) {
+                Some(found) => (Some(found.alias()), found.dest.clone()),
+                None => (None, fs::canonicalize(root)?),
+            };
+            let is_held = alias.is_some();
             if scanned
                 .iter()
-                .any(|parent: &PathBuf| root.starts_with(parent))
+                .any(|(parent, parent_held)| root.starts_with(parent) && (*parent_held || !is_held))
             {
                 continue;
             }
-            scanned.retain(|parent| !parent.starts_with(&root));
-            if let Some(socket) = find_socket_without_following_symlinks(&root)? {
+            scanned.retain(|(parent, _)| !parent.starts_with(&root));
+            let found = match &alias {
+                Some(alias) => find_socket_without_following_symlinks(alias)?.map(|socket| {
+                    match socket.strip_prefix(alias) {
+                        Ok(below) => root.join(below),
+                        Err(_) => socket,
+                    }
+                }),
+                None => find_socket_without_following_symlinks(&root)?,
+            };
+            if let Some(socket) = found {
                 return Err(io::Error::other(format!(
                     "host Unix socket exposed by sandbox path: {}",
                     socket.display()
                 )));
             }
-            scanned.push(root);
+            scanned.push((root, is_held));
         }
         // The fixed `/etc` entries are bound too (#373). This sandbox trusts
         // `/usr` unscanned, since walking it on every build would cost more
@@ -497,22 +531,13 @@ impl Sandbox<'_> {
         tmp: &Path,
         cwd: &Path,
         envs: &[(String, String)],
+        held: &HeldRoots,
     ) -> io::Result<BwrapInvocation> {
-        let read: Vec<PathBuf> = self
-            .read
-            .iter()
-            .map(fs::canonicalize)
-            .collect::<io::Result<_>>()?;
-        let mut write: Vec<PathBuf> = self
-            .write
-            .iter()
-            .map(fs::canonicalize)
-            .collect::<io::Result<_>>()?;
+        let (read_binds, write_binds) = held.place(&self.read, &self.write, tmp)?;
         let scratch = fs::canonicalize(tmp)?;
-        let cwd = fs::canonicalize(cwd)?;
-        if !write.iter().any(|path| path == &scratch) {
-            write.push(scratch.clone());
-        }
+        let cwd = held.dest(cwd)?;
+        let read: Vec<PathBuf> = read_binds.iter().map(|(_, dest)| dest.clone()).collect();
+        let write: Vec<PathBuf> = write_binds.iter().map(|(_, dest)| dest.clone()).collect();
 
         let mut args = vec![
             OsString::from("--unshare-user"),
@@ -571,11 +596,12 @@ impl Sandbox<'_> {
             push_arg(&mut args, "--tmpfs");
             push_arg(&mut args, cwd.as_os_str());
         }
-        for path in &read {
-            push_bind_path(&mut args, "--ro-bind", path);
-        }
-        for path in &write {
-            push_bind_path(&mut args, "--bind", path);
+        for (flag, binds) in [("--ro-bind", &read_binds), ("--bind", &write_binds)] {
+            for (source, dest) in binds {
+                push_arg(&mut args, flag);
+                args.push(source.clone().into_os_string());
+                args.push(dest.clone().into_os_string());
+            }
         }
 
         push_setenv(&mut args, "PATH", env_path);
@@ -602,6 +628,16 @@ impl Sandbox<'_> {
         push_arg(&mut args, "--unsetenv");
         push_arg(&mut args, "PWD");
 
+        // The held descriptors bubblewrap bound from reach the command too
+        // (its pid 1 closes only its own copies), and a host directory's
+        // descriptor leads out of the sandbox through `..`. The system
+        // shell closes them before anything of the build runs.
+        if let Some(close) = held.close_script() {
+            push_arg(&mut args, "/bin/sh");
+            push_arg(&mut args, "-c");
+            push_arg(&mut args, close);
+            push_arg(&mut args, "sh");
+        }
         // bwrap 0.12 adds PWD while processing --chdir. Keep the environment
         // identical to Seatbelt's env_clear projection in the exec transition.
         push_arg(&mut args, "/usr/bin/env");
@@ -623,6 +659,7 @@ impl Sandbox<'_> {
         Ok(BwrapInvocation {
             args,
             _skeleton: skeleton,
+            _held: HeldRoots::default(),
         })
     }
 }
@@ -657,6 +694,8 @@ const BWRAP_MAX_ARGS: usize = 9000;
 struct BwrapInvocation {
     args: Vec<OsString>,
     _skeleton: Option<crate::kernel::hostview::ViewSkeleton>,
+    /// The held roots the command passes to bubblewrap, open until it runs.
+    _held: HeldRoots,
 }
 
 /// Longest stderr prefix retained for sandbox setup classification; bwrap's own
@@ -1724,6 +1763,134 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    /// A project an open root holds is bound from its held descriptor
+    /// (#497): renamed away with another directory put at its path, the
+    /// sandbox still sees, and starts in, the tree tog opened. Renamed with
+    /// nothing put back, it still runs there. Neither the command nor the
+    /// sandbox's pid 1 keeps the held descriptor, which would lead out of
+    /// the sandbox through `..`.
+    #[test]
+    fn linux_a_held_project_is_bound_from_its_descriptor() {
+        if !linux_ready("linux_a_held_project_is_bound_from_its_descriptor") {
+            return;
+        }
+        let root = temp_dir("held-project");
+        let scratch = root.0.join("scratch");
+        let project = root.0.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        fs::write(project.join("f"), "held").unwrap();
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let moved = root.0.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        let sandbox = Sandbox {
+            read: vec![&project],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let path = project.join("f");
+        // `test` is a child of the shell, so it holds exactly what the
+        // command was given: the held descriptor would be at 3.
+        // An unexpanded glob (no `/proc/1/fd` to read) is reported too,
+        // so the pid 1 check cannot pass by looking at nothing.
+        let script = "/usr/bin/cat f \"$1\"; \
+            if /usr/bin/test -d /proc/self/fd/3; then echo ' leak 3'; fi; \
+            for fd in /proc/1/fd/*; do \
+                if ! /usr/bin/test -e \"$fd\"; then echo \" unreadable $fd\"; fi; \
+                if /usr/bin/test -d \"$fd\"; then echo \" leak $fd\"; fi; \
+            done";
+        let cmd = ["/usr/bin/sh", "-c", script, "sh", path.to_str().unwrap()];
+        // Renamed, nothing at the path.
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        // A symlink to another directory swapped in at the path: the held
+        // spelling is still resolved through the descriptor, never through
+        // what the path names now.
+        let linked = root.0.join("linked");
+        fs::create_dir(&linked).unwrap();
+        fs::write(linked.join("f"), "linked").unwrap();
+        std::os::unix::fs::symlink(&linked, &project).unwrap();
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        fs::remove_file(&project).unwrap();
+        // Another directory swapped in at the path.
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("f"), "swapped").unwrap();
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "heldheld");
+        drop(held);
+        // Once no root holds it, the path is bound as it stands.
+        let seen = run_capture(&sandbox, &cmd, &scratch, &project, &[]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&seen), "swappedswapped");
+    }
+
+    /// A working directory an open root holds, inside the bound project
+    /// but not a declared root itself (`cargo fmt` from a workspace
+    /// member), has a place in the sandbox and no bind source: resolving
+    /// it must not panic, and asking it for a bind source is an error.
+    #[test]
+    fn a_held_working_directory_that_is_no_root_has_a_place_and_no_source() {
+        let root = temp_dir("held-cwd");
+        let scratch = root.0.join("scratch");
+        let project = root.0.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(project.join("member")).unwrap();
+        let project = project.canonicalize().unwrap();
+        let _held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let member = project.join("member");
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let held = HeldRoots::resolve(&sandbox, &member).unwrap();
+        assert!(
+            held.find(&member).is_some(),
+            "the held cwd was not resolved"
+        );
+        assert_eq!(held.dest(&member).unwrap(), member);
+        assert!(held.passed().is_empty());
+        let error = held.place_one(&member).unwrap_err().to_string();
+        assert!(error.contains("not a declared sandbox root"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    /// A held root is scanned through its descriptor even when a parent
+    /// declared before it was scanned by path: the parent's walk covered
+    /// what its path holds now, and the held tree, renamed out of it, is
+    /// not there any more. A socket in the held tree is still found.
+    #[test]
+    fn a_held_root_is_scanned_though_an_unheld_parent_was() {
+        let root = temp_dir("held-under-unheld");
+        let scratch = root.0.join("scratch");
+        let parent = root.0.join("parent");
+        let project = parent.join("project");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let parent = parent.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let _held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        // Out of the parent, with a socket inside.
+        let moved = root.0.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        let _listener = crate::kernel::testutil::bind_socket(&moved.join("sock"));
+        let sandbox = Sandbox {
+            read: vec![&parent, &project],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let held = HeldRoots::resolve(&sandbox, &scratch).unwrap();
+        let error = sandbox
+            .reject_host_sockets(&scratch, &scratch, &held, &HOST_ETC_ENTRIES)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&project.join("sock").display().to_string()),
+            "{error}"
+        );
+    }
+
     #[test]
     fn linux_inherited_directory_and_socket_fds_are_closed() {
         if !linux_ready("linux_inherited_directory_and_socket_fds_are_closed") {
@@ -2605,7 +2772,14 @@ mod tests {
                 host_view,
             };
             let invocation = sandbox
-                .bwrap_args(&["/usr/bin/true"], "/usr/bin:/bin", &scratch, &scratch, &[])
+                .bwrap_args(
+                    &["/usr/bin/true"],
+                    "/usr/bin:/bin",
+                    &scratch,
+                    &scratch,
+                    &[],
+                    &HeldRoots::default(),
+                )
                 .unwrap();
             let args: Vec<String> = invocation
                 .args
@@ -2681,6 +2855,7 @@ mod tests {
                 &scratch,
                 &scratch,
                 &[("PKG_CONFIG_LIBDIR".to_string(), "/mine".to_string())],
+                &HeldRoots::default(),
             )
             .unwrap();
         let own: Vec<String> = own
@@ -3121,6 +3296,7 @@ esac
                 &scratch,
                 &scratch,
                 &[("CHECK".to_string(), "ok".to_string())],
+                &HeldRoots::default(),
             )
             .unwrap()
             .args;
@@ -3437,7 +3613,7 @@ mod containment_tests {
             host_view: HostView::Full,
         };
         sandbox
-            .reject_host_sockets(&scratch, &scratch, &HOST_ETC_ENTRIES)
+            .reject_host_sockets(&scratch, &scratch, &HeldRoots::default(), &HOST_ETC_ENTRIES)
             .unwrap();
         drop(listener);
     }
@@ -3469,7 +3645,9 @@ mod containment_tests {
             localtime.to_str().unwrap(),
             missing.to_str().unwrap(),
         ];
-        let scan = |binds: &[&str]| sandbox.reject_host_sockets(&scratch, &scratch, binds);
+        let scan = |binds: &[&str]| {
+            sandbox.reject_host_sockets(&scratch, &scratch, &HeldRoots::default(), binds)
+        };
         scan(&binds).unwrap();
 
         let listener = crate::kernel::testutil::bind_socket(&conf_d.join("s.sock"));
@@ -3526,7 +3704,7 @@ mod containment_tests {
             write: vec![&scratch],
             host_view: HostView::Full,
         };
-        let result = sandbox.reject_host_sockets(&scratch, &scratch, &[]);
+        let result = sandbox.reject_host_sockets(&scratch, &scratch, &HeldRoots::default(), &[]);
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
         let error = result.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
@@ -3655,7 +3833,14 @@ mod containment_tests {
     }
 
     fn argv(sandbox: &Sandbox<'_>, cmd: &[&str], scratch: &Path) -> io::Result<Vec<String>> {
-        let invocation = sandbox.bwrap_args(cmd, "/usr/bin:/bin", scratch, scratch, &[])?;
+        let invocation = sandbox.bwrap_args(
+            cmd,
+            "/usr/bin:/bin",
+            scratch,
+            scratch,
+            &[],
+            &HeldRoots::default(),
+        )?;
         Ok(invocation
             .args
             .iter()
