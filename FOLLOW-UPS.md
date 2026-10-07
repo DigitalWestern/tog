@@ -71,7 +71,6 @@ None open.
   broken. The fake passes were fixed in #351; what remains is grouped by
   theme, one issue and one PR (or one per file block) each:
   - #349 product and CI problems found by the audit.
-  - #373 sandbox: host-socket scan leftovers (from the #372 review).
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 holds the work order and the overall verdict.
   Each line is one issue and one PR, in order:
