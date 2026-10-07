@@ -835,7 +835,13 @@ fn node_closure_body(
         "lock_source": plan.lock_source,
         "inputs": inputs,
         "packages": plan.packages.iter().map(|p| {
-            serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity})
+            let mut row = serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity});
+            // A `file:` directory package names its source, so `tog status`
+            // can pack it again and compare.
+            if let Some(dir) = super::local_package::source_dir(p) {
+                row["local"] = dir.into();
+            }
+            row
         }).collect::<Vec<_>>(),
     })
 }

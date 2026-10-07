@@ -580,6 +580,14 @@ pub(super) fn target_for_ref(
         .map(|index| &reference[index..])
         .or_else(|| reference.find("link:").map(|index| &reference[index..]));
     if let Some(local_reference) = local_reference {
+        // A `file:` directory that is a package of its own (#188) is a node.
+        if local_reference.starts_with("file:") {
+            if let Some(key) = normalize_pnpm_snapshot_key(&format!("{name}@{local_reference}"))
+                .filter(|key| snapshots.contains_key(key))
+            {
+                return Target::Node(key);
+            }
+        }
         let raw = local_reference
             .split_once(':')
             .map(|(_, value)| value)
@@ -770,6 +778,7 @@ pub(super) fn pnpm_nodes(
     packages: &BTreeMap<String, YamlValue>,
     snapshots_value: Option<&YamlValue>,
     project: &ProjectRoot,
+    importers: &BTreeSet<String>,
 ) -> io::Result<(BTreeMap<String, Node>, BTreeMap<String, Vec<Dependency>>)> {
     // Keep one metadata record per canonical package key. These records are
     // tarball facts only; they are never graph nodes until a snapshot selects
@@ -783,20 +792,17 @@ pub(super) fn pnpm_nodes(
             _ => None,
         });
         if yaml_str(resolution.and_then(|map| map.get("type"))) == Some("directory") {
-            // pnpm 6 represents workspace source roots as a synthetic
-            // packages entry such as 'file:'; importer edges become NpmLink.
+            // pnpm 6 writes a workspace source root as a synthetic 'file:'
+            // entry (an NpmLink) and a named one as a package (`v6_directory_snapshots`).
             continue;
         }
-        let Some(snapshot_key) = normalize_pnpm_snapshot_key(raw_key) else {
-            return Err(err(format!(
+        let bad = || {
+            err(format!(
                 "packages entry {raw_key:?} has no name@version identity"
-            )));
+            ))
         };
-        let Some((name, version)) = normalize_pnpm_identity(&snapshot_key) else {
-            return Err(err(format!(
-                "packages entry {raw_key:?} has no name@version identity"
-            )));
-        };
+        let snapshot_key = normalize_pnpm_snapshot_key(raw_key).ok_or_else(bad)?;
+        let (name, version) = normalize_pnpm_identity(&snapshot_key).ok_or_else(bad)?;
         // pnpm keeps npm's list when a package has several hashes.
         let integrity = resolution
             .and_then(|resolution| yaml_str(resolution.get("integrity")))
@@ -870,9 +876,12 @@ pub(super) fn pnpm_nodes(
                 );
             }
         }
+        for (snapshot_key, snapshot) in v6_directory_snapshots(packages)? {
+            snapshots.entry(snapshot_key).or_insert(snapshot);
+        }
     }
 
-    let snapshot_metadata: BTreeMap<String, Node> = snapshots
+    let mut snapshot_metadata: BTreeMap<String, Node> = snapshots
         .keys()
         .filter_map(|snapshot_key| {
             let base = identity_key_for_snapshot(snapshot_key);
@@ -898,6 +907,7 @@ pub(super) fn pnpm_nodes(
         return Ok((package_nodes, BTreeMap::new()));
     }
 
+    add_file_directory_nodes(snapshots.keys(), &mut snapshot_metadata, importers, project)?;
     let local_snapshots = snapshots
         .iter()
         .filter(|(snapshot_key, _)| is_local_snapshot(snapshot_key))
@@ -912,10 +922,8 @@ pub(super) fn pnpm_nodes(
     for (snapshot_key, snapshot) in snapshots {
         let Some(mut node) = snapshot_metadata.get(&snapshot_key).cloned() else {
             if is_local_snapshot(&snapshot_key) {
-                // Local file/link snapshots are workspace source projections,
-                // not fetchable package nodes. Empty local snapshots are
-                // represented by their importer Target::Link edges; their
-                // dependency edges are retained in local_snapshots below.
+                // A `link:` snapshot, or a `file:` naming an importer, is a
+                // link to source; its edges are kept in local_snapshots.
                 continue;
             }
             // A snapshot without package metadata cannot be fetched faithfully.
@@ -994,10 +1002,15 @@ fn plan_pnpm_with_recorder(
     };
     let snapshots = root.get("snapshots");
     let patches = pnpm_patches(root, project, record)?;
-    let (mut nodes, local_snapshots) = pnpm_nodes(packages, snapshots, project)?;
+    let importers = importer_map(root)?;
+    let importer_paths = importers
+        .keys()
+        .cloned()
+        .chain([".".to_string()])
+        .collect::<BTreeSet<_>>();
+    let (mut nodes, local_snapshots) = pnpm_nodes(packages, snapshots, project, &importer_paths)?;
     attach_pnpm_patches(&mut nodes, &patches)?;
     let catalogs = pnpm_catalogs(root)?;
-    let importers = importer_map(root)?;
     let root_importer = importers
         .get(".")
         .cloned()
