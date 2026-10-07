@@ -28,9 +28,8 @@ inputs:
     default: latest
   token:
     description: >-
-      Token that can read the releases of DigitalWestern/tog. While that
-      repository is private the default token only works inside it; pass a
-      token with read access to it from anywhere else.
+      Token that reads the releases of DigitalWestern/tog. The repository
+      is public, so the job's own token works from any repository.
     default: ${{ github.token }}
   working-directory:
     description: Directory of the project to set up.
@@ -147,8 +146,9 @@ runs:
 
     # install.sh does the verified install (sha256 next to the asset, the
     # atomic rename). It is handed the two release files from a local
-    # directory, because `gh` can read a private repository's release with
-    # a token and the installer's anonymous download cannot.
+    # directory, because `gh` downloads them with `token`, an authenticated
+    # request GitHub rate-limits far less than the installer's anonymous
+    # one.
     - name: Install tog
       id: install
       shell: bash
@@ -171,7 +171,7 @@ runs:
         esac
         if ! gh release download "${tag[@]}" --repo DigitalWestern/tog \
             --pattern 'tog-x86_64-unknown-linux-gnu.tar.gz*' --dir "$assets"; then
-          echo "::error::cannot download tog ($TOG_ACTION_VERSION) from DigitalWestern/tog; while that repository is private, pass 'token' a token that can read it"
+          echo "::error::cannot download tog ($TOG_ACTION_VERSION) from DigitalWestern/tog; check that the version exists, and that 'token' can read the releases"
           exit 1
         fi
         TOG_DOWNLOAD_BASE="file://$assets" sh "$GITHUB_ACTION_PATH/install.sh" \

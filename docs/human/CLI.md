@@ -905,7 +905,7 @@ a later step can `tog run` the tests under the same policy. Its inputs:
 | input | default | what it does |
 |---|---|---|
 | `version` | `latest` | release to install, as a tag (`v0.1.0`) |
-| `token` | the job's token | reads the release; the job's own token is enough for a public tog, so pass another only to read a private fork of it |
+| `token` | the job's token | reads the release; the job's own token is enough, since tog's repository is public |
 | `working-directory` | `.` | the project to set up |
 | `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file in the workspace |
 | `frozen` | `true` | `false` runs a plain `tog`, which may write the locks |
@@ -938,10 +938,7 @@ any repository: the action and its releases are public, and the job's own
 token reads them.
 
 The same job written out by hand, for a runner the action does not cover
-or a step that has to differ. Its install step uses the one-line installer,
-which needs the repository to be public; until then, build tog from source
-in that step (`cargo install --git https://github.com/DigitalWestern/tog
---locked`).
+or a step that has to differ. Its install step uses the one-line installer.
 
 ```yaml
 name: tog
