@@ -308,10 +308,17 @@ fn run_scratch(store_tmp: &Path) -> io::Result<PathBuf> {
     super::unique_dir(store_tmp, RUN_SCRATCH_PREFIX)
 }
 
+/// Sandboxed `cargo fmt`: the workspace `workspace` holds is the one
+/// writable root, and cargo-fmt starts in the directory `invocation`
+/// holds. Both are named by the canonical path they were opened at, which
+/// the sandbox resolves through the held descriptors (#612), so a project
+/// renamed or replaced since tog opened it is not what gets formatted.
+/// Neither is canonicalized again: that would follow whatever sits at the
+/// path now.
 pub fn run_sandboxed(
     platform: Platform,
-    invocation_dir: &Path,
-    workspace_root: &Path,
+    invocation: &ProjectRoot,
+    workspace: &ProjectRoot,
     rust_object: &Path,
     rustfmt_object: &Path,
     activity: &StoreActivity,
@@ -332,6 +339,7 @@ pub fn run_sandboxed(
         argv.push("--check".into());
     }
     argv.extend(args.iter().cloned());
+    let invocation_dir = invocation.path();
     let mut trace = Command::new(&argv[0]);
     trace.args(&argv[1..]).current_dir(invocation_dir);
     crate::kernel::ui::trace_command(&trace);
@@ -350,7 +358,7 @@ pub fn run_sandboxed(
             ),
         ],
         read: vec![rust_object.to_path_buf(), rustfmt_object.to_path_buf()],
-        write: vec![workspace_root.to_path_buf()],
+        write: vec![workspace.path().to_path_buf()],
         scratch: scratch.clone(),
         path: format!(
             "{}:{}:/usr/bin:/bin",
@@ -587,6 +595,61 @@ mod tests {
             "only the record goes, not the closures directory"
         );
         assert!(store.roots().unwrap().is_empty(), "fmt registered a root");
+    }
+
+    /// cargo-fmt runs in the workspace and the invocation directory tog
+    /// holds: with the project renamed and another directory put at its
+    /// path after both were opened, a stub cargo-fmt still writes into the
+    /// held member directory, and nothing appears at the old path (#612).
+    #[test]
+    fn fmt_runs_in_the_held_workspace_after_a_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::kernel::sandbox::linux_ready("fmt_runs_in_the_held_workspace_after_a_rename") {
+            return;
+        }
+        let temp = TempDir::named("rustfmt-held");
+        let store = temp.0.join("store");
+        fs::create_dir_all(store.join("tmp")).unwrap();
+        let rust_object = store.join("objects/rust");
+        let rustfmt_object = store.join("objects/rustfmt");
+        for (object, script, body) in [
+            (&rust_object, "cargo", "#!/bin/sh\nexit 1\n"),
+            (
+                &rustfmt_object,
+                "cargo-fmt",
+                "#!/bin/sh\necho \"formatted $*\" > formatted\n",
+            ),
+        ] {
+            fs::create_dir_all(object.join("bin")).unwrap();
+            let bin = object.join("bin").join(script);
+            fs::write(&bin, body).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let project = temp.0.join("project");
+        fs::create_dir_all(project.join("member")).unwrap();
+        let invocation = ProjectRoot::open(&project.join("member")).unwrap();
+        let workspace = ProjectRoot::open(&project).unwrap();
+        let moved = temp.0.join("moved");
+        fs::rename(&project, &moved).unwrap();
+        fs::create_dir_all(project.join("member")).unwrap();
+        let (_lease, activity) = crate::kernel::testutil::detached_lease();
+        let status = run_sandboxed(
+            Platform::host().unwrap(),
+            &invocation,
+            &workspace,
+            &rust_object,
+            &rustfmt_object,
+            &activity,
+            true,
+            &[],
+        )
+        .unwrap();
+        assert!(status.success(), "{status}");
+        assert_eq!(
+            fs::read_to_string(moved.join("member/formatted")).unwrap(),
+            "formatted --check\n"
+        );
+        assert!(project.join("member/formatted").symlink_metadata().is_err());
     }
 
     /// The legacy record is removed through the held project when another

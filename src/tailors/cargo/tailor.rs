@@ -422,7 +422,17 @@ impl Formatter for Rustfmt {
         let activity = &ctx.activity;
         // The formatter rides in the same release bundle as the compiler, so
         // one selection names both, and both are realized from its rows.
-        let workspace_root = inputs::locate_cargo_root(cwd)?.canonicalize()?;
+        //
+        // The invocation directory and the workspace root are held open for
+        // the whole run, and the sandbox binds the workspace through its
+        // descriptor and starts cargo-fmt in the invocation directory it
+        // holds (#612): a project renamed or replaced after this point is
+        // not what gets formatted. Every path below is the canonical one
+        // each was opened at, never canonicalized again.
+        let invocation = ProjectRoot::open(cwd)
+            .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", cwd.display())))?;
+        let (_, workspace) = inputs::locate_held_cargo_root(&invocation)?;
+        let workspace_root = workspace.path().to_path_buf();
         // cargo fmt runs in the workspace itself (writable, the user's home
         // out of sight): a file there that is the signing key under another
         // name (a hard link) would be read as a manifest or a config and
@@ -442,8 +452,7 @@ impl Formatter for Rustfmt {
         {
             use crate::kernel::provider::cargo_door;
             let bound = cargo_door::Bound::new(&workspace_root)?;
-            let invocation = cwd.canonicalize()?;
-            for dir in invocation.ancestors() {
+            for dir in invocation.path().ancestors() {
                 if !dir.starts_with(&workspace_root) {
                     break;
                 }
@@ -459,18 +468,13 @@ impl Formatter for Rustfmt {
         // `remove_legacy_record`). `--check` changes
         // no file: a CI check must not leave the checkout dirty.
         if !check {
-            let key =
-                crate::kernel::store::Store::canonical_root_key(&workspace_root.canonicalize()?);
-            rustfmt::remove_legacy_record(
-                &ProjectRoot::open(&workspace_root)?,
-                store.has_root_entry(&key)?,
-            )?;
+            let key = crate::kernel::store::Store::canonical_root_key(&workspace_root);
+            rustfmt::remove_legacy_record(&workspace, store.has_root_entry(&key)?)?;
         }
-        let invocation_dir = cwd.canonicalize()?;
         let status = rustfmt::run_sandboxed(
             platform,
-            &invocation_dir,
-            &workspace_root,
+            &invocation,
+            &workspace,
             &rust_object,
             &rustfmt_object,
             activity,
