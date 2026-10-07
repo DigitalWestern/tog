@@ -702,6 +702,23 @@ pub fn download_verified_digest(
     download_verified_digest_held(store, activity, url, digest).map(CacheLease::into_path)
 }
 
+/// The same, holding a lease on the cache entry.
+///
+/// A cache hit is admitted by digest alone, whichever ecosystem or code
+/// path wrote the entry (#476). That is sound because a digest names one
+/// byte string: a hit yields exactly the bytes a download would have had
+/// to match, so the cache grants nothing the digest's source did not
+/// already grant. The trust decision is therefore the caller's, in where
+/// its digest comes from: a toolchain row (tog's catalog or the project's
+/// toolchain lock), a table compiled into tog, the publisher's listing read
+/// over TLS, or the project's own pin (its committed lock or a declared
+/// artifact), or the registry's claim for an artifact read through the
+/// resolution proxy (`resolve::mirror`). The same rule covers the
+/// cache-only reads (`cache_verified_held`, `cache_verified_digest_held`,
+/// `read_cache_verified_digest`) and the proxy's `cache_from_reader`. Every
+/// caller is listed under its source in `tests/architecture.rs`
+/// (`DIGEST_SOURCES`), and a new one fails there until it is; the count is
+/// per function, so a call replaced within a listed function is not seen.
 pub(crate) fn download_verified_digest_held(
     store: &Store,
     activity: &StoreActivity,
