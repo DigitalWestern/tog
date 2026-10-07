@@ -1193,9 +1193,71 @@ fn agent_docs_are_two_files() {
 enum Token {
     Ident(String),
     Punct(char),
-    /// A string literal, with its contents as written (escapes unprocessed).
+    /// A string literal, with its escapes processed (`"t\x61r"` is `tar`),
+    /// so a scan matching on contents sees what the program sees. A raw
+    /// string has none to process.
     Str(String),
     Lit,
+}
+
+/// The contents of a (non-raw) string literal with its escapes processed:
+/// `\x61`, `\u{61}`, the one-character escapes, and a `\` before a line
+/// break, which with the indentation after it is dropped. An escape the
+/// language does not have is kept as written.
+fn unescape(chars: &[char]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        if c != '\\' || i >= chars.len() {
+            out.push(c);
+            continue;
+        }
+        let escaped = chars[i];
+        i += 1;
+        match escaped {
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '0' => out.push('\0'),
+            '\\' | '"' | '\'' => out.push(escaped),
+            'x' if i + 2 <= chars.len() => {
+                let hex: String = chars[i..i + 2].iter().collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(c) => {
+                        out.push(c);
+                        i += 2;
+                    }
+                    None => out.extend(['\\', 'x']),
+                }
+            }
+            'u' if chars.get(i) == Some(&'{') => {
+                let close = chars[i..].iter().position(|&c| c == '}');
+                let code = close.and_then(|at| {
+                    let hex: String = chars[i + 1..i + at].iter().filter(|&&c| c != '_').collect();
+                    u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .map(|c| (c, at))
+                });
+                match code {
+                    Some((c, at)) => {
+                        out.push(c);
+                        i += at + 1;
+                    }
+                    None => out.extend(['\\', 'u']),
+                }
+            }
+            '\n' => {
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+            }
+            other => out.extend(['\\', other]),
+        }
+    }
+    out
 }
 
 fn tokenize(text: &str) -> Vec<Token> {
@@ -1240,7 +1302,7 @@ fn tokenize(text: &str) -> Vec<Token> {
                 }
                 i += 1;
             }
-            out.push(Token::Str(chars[start..i.min(n)].iter().collect()));
+            out.push(Token::Str(unescape(&chars[start..i.min(n)])));
             i += 1;
         } else if c == '\'' || (c == 'b' && i + 1 < n && chars[i + 1] == '\'') {
             let start = if c == 'b' { i + 1 } else { i };
@@ -2122,10 +2184,18 @@ fn commands_do_not_name_tailors_by_string() {
     );
 }
 
-/// Every `/usr/bin/tar` argv lives in `kernel::archive`: extraction runs
+/// Every tar process comes from one helper, `kernel::archive::tar_command`
+/// (the host's `/usr/bin/tar` with a scrubbed environment): extraction runs
 /// only through the validated extractor (or the single-member read), and
 /// packing (git sources) through its deterministic packer, so the user's
-/// `TAR_OPTIONS` cannot reshape what lands in an object. `#[cfg(test)]`
+/// `TAR_OPTIONS` cannot reshape what lands in an object. The scan holds
+/// the helper to that: tar is named in `tar_command` and nowhere else in
+/// production code, in any spelling of a string literal (a `const`, an
+/// `OsStr`, a renamed `Command`, an escaped `"t\x61r"`), except a bare
+/// `"tar"` given to `with_extension` or `set_extension`, which names a
+/// file, not a program (#524). The scan's limit is the literal: a name
+/// assembled at compile time (`concat!("t", "ar")`) or at run time is
+/// not one, so it is not seen. `#[cfg(test)]`
 /// items are dropped by `production_tokens`, which exempts test-only
 /// extractors and fixture builders; `src/kernel/testutil.rs` is named
 /// below because it is test-only by the `cfg(test)` gate on its `mod`
@@ -2133,6 +2203,7 @@ fn commands_do_not_name_tailors_by_string() {
 #[test]
 fn tar_runs_only_in_kernel_archive() {
     const OWNER: &str = "src/kernel/archive.rs";
+    const HELPER: &str = "tar_command";
     const TEST_ONLY_BY_MOD_GATE: &[&str] = &["src/kernel/testutil.rs"];
     let mut sites = Vec::new();
     for (relative, text) in all_sources() {
@@ -2146,20 +2217,21 @@ fn tar_runs_only_in_kernel_archive() {
             sites.push(format!("{relative}:{owner}"));
         }
     }
-    // Positive control: the scan sees the owner's own invocation, so a
-    // refactor that moves tar out of a string literal fails loudly here
-    // instead of passing silently.
+    // Inside the owner, the helper is the one site: a second spawn there
+    // must go through it too. This is also the positive control: the scan
+    // sees the helper's own `/usr/bin/tar`, so a refactor that moves tar
+    // out of a string literal fails loudly here instead of passing.
     let root = repo();
     let owner_text = fs::read_to_string(root.join(OWNER)).unwrap();
-    assert!(
-        production_tokens(&owner_text)
-            .iter()
-            .any(|(token, _)| matches!(token, Token::Str(literal) if literal == "/usr/bin/tar")),
-        "the tar scan no longer sees {OWNER}'s own invocation; it is passing vacuously"
+    assert_eq!(
+        tar_sites(&owner_text),
+        [HELPER],
+        "{OWNER} names tar outside {HELPER}, or the scan no longer sees \
+         {HELPER}'s own /usr/bin/tar (and is passing vacuously)"
     );
     assert!(
         sites.is_empty(),
-        "tar invoked outside kernel::archive (route it through \
+        "tar named outside kernel::archive::{HELPER} (route it through \
          archive::extract_validated_with_activity, archive::read_member, or \
          archive::pack_ustar_with_activity):\n  {}",
         sites.join("\n  ")
@@ -2169,8 +2241,7 @@ fn tar_runs_only_in_kernel_archive() {
 /// A string literal that names a tar binary: any absolute path ending in
 /// `tar`, `bsdtar`, `gtar` or `gnutar`, or one of the last three bare. A bare
 /// `"tar"` is not matched here: it is also a file extension
-/// (`with_extension`). The scan catches it as a program instead, when it is
-/// the argument of `Command::new` (the `program` check in [`tar_sites`]).
+/// (`with_extension`), and [`tar_sites`] tells the two apart.
 fn names_a_tar(literal: &str) -> bool {
     const TARS: [&str; 4] = ["tar", "bsdtar", "gtar", "gnutar"];
     let base = literal.rsplit('/').next().unwrap_or(literal);
@@ -2178,29 +2249,30 @@ fn names_a_tar(literal: &str) -> bool {
 }
 
 /// The owners of every production site in `text` that names tar: a literal
-/// [`names_a_tar`] accepts, or a bare `"tar"` given to `Command::new` (any
-/// path to `Command`, such as `std::process::Command::new`, ends the same
-/// way). A bare `"tar"` anywhere else is a file extension and passes.
+/// [`names_a_tar`] accepts, or a bare `"tar"` anywhere but as the argument
+/// of `with_extension` or `set_extension`. Where the literal goes next (a
+/// `const`, `OsStr::new`, a `Command` under another name) does not matter:
+/// a bare `"tar"` that is not a file extension is a program name.
 fn tar_sites(text: &str) -> Vec<String> {
     let tokens = production_tokens(text);
-    let program = |index: usize| {
+    let extension = |index: usize| {
         let before: Vec<&Token> = tokens[..index]
             .iter()
             .rev()
-            .take(5)
+            .take(2)
             .map(|(token, _)| token)
             .collect();
         matches!(
             before.as_slice(),
-            [Token::Punct('('), Token::Ident(new), Token::Punct(':'), Token::Punct(':'), Token::Ident(command)]
-                if new == "new" && command == "Command"
+            [Token::Punct('('), Token::Ident(method)]
+                if method == "with_extension" || method == "set_extension"
         )
     };
     tokens
         .iter()
         .enumerate()
         .filter(|(index, (token, _))| match token {
-            Token::Str(literal) => names_a_tar(literal) || (literal == "tar" && program(*index)),
+            Token::Str(literal) => names_a_tar(literal) || (literal == "tar" && !extension(*index)),
             _ => false,
         })
         .map(|(_, (_, owner))| owner.clone())
@@ -2216,9 +2288,50 @@ fn a_bare_tar_is_caught_as_a_program_and_not_as_an_extension() {
              fn c() { Command::new( \"tar\" ); }\n\
              fn d() { path.with_extension(\"tar\"); }\n\
              fn e() { Command::new(\"gzip\").arg(\"tar\"); }\n\
-             fn f() { Command::new(\"/usr/bin/tar\"); }"
+             fn f() { Command::new(\"/usr/bin/tar\"); }\n\
+             fn g() { buf.set_extension( \"tar\" ); }"
         ),
-        ["a", "b", "c", "f"]
+        ["a", "b", "c", "e", "f"]
+    );
+}
+
+/// The spellings the first scan missed (review of #482): a `const`, an
+/// `OsStr`, and `Command` under another name. The site is where the
+/// literal is, so the `const` is owned by the module (`""`), not by the
+/// function that uses it.
+#[test]
+fn tar_is_caught_through_a_const_an_osstr_and_a_renamed_command() {
+    assert_eq!(
+        tar_sites(
+            "const TAR: &str = \"tar\";\n\
+             fn a() { Command::new(TAR); }\n\
+             fn b() { Command::new(OsStr::new(\"tar\")); }\n\
+             fn c() { use std::process::Command as Cmd; Cmd::new(\"tar\"); }\n\
+             fn d() { let p = \"/usr/local/bin/gtar\"; }"
+        ),
+        ["", "b", "c", "d"]
+    );
+}
+
+/// Escapes spell the same name (review of #524): the scan sees the
+/// literal as the program does. A raw string has no escapes, so its
+/// backslashes are characters.
+#[test]
+fn tar_is_caught_through_escaped_spellings() {
+    assert_eq!(
+        tar_sites(
+            "fn a() { Command::new(\"t\\x61r\"); }\n\
+             fn b() { Command::new(\"\\u{74}ar\"); }\n\
+             fn c() { Command::new(\"/usr/bin/\\x74\\u{0061}r\"); }\n\
+             fn d() { Command::new(\"bsd\\\n                 tar\"); }\n\
+             fn e() { Command::new(r\"t\\x61r\"); }\n\
+             fn f() { path.with_extension(\"t\\x61r\"); }"
+        ),
+        ["a", "b", "c", "d"]
+    );
+    assert_eq!(
+        unescape(&"a\\\"b\\\\c\\n\\q".chars().collect::<Vec<_>>()),
+        "a\"b\\c\n\\q"
     );
 }
 
