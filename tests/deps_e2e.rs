@@ -249,6 +249,35 @@ fn python_requirements_add_update_remove_roundtrip() {
     assert_eq!(requirements, "idna==3.10\n");
 }
 
+/// Requirements that name a constraints file are compiled by the real uv
+/// from the input tog generates under `.tog`, which names the constraints
+/// beside it by a relative path. uv reads a `-c` path relative to the file
+/// that names it, so it reads the held project's copy (#499). The unit
+/// test proves that with a stub uv; this proves the real one resolves it
+/// (#527).
+#[test]
+#[ignore]
+fn python_constraints_beside_the_generated_input_resolve_with_real_uv() {
+    let temp = scratch("python-constraints");
+    let project = &temp.0;
+    let store = project.join("store");
+    std::fs::write(
+        project.join("requirements.txt"),
+        "six\n-c constraints.txt\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("constraints.txt"), "six==1.16.0\n").unwrap();
+    assert_ok(run(project, &store, &["plan"], &temp.0), "plan");
+    let generated = std::fs::read_to_string(project.join(".tog/manifest-requirements.txt"))
+        .expect("tog generated the compile input");
+    assert!(
+        generated.contains("-c manifest-constraints.txt"),
+        "{generated}"
+    );
+    let lock = std::fs::read_to_string(project.join("requirements.lock.txt")).unwrap();
+    assert!(lock.contains("six==1.16.0"), "{lock}");
+}
+
 #[test]
 #[ignore]
 fn python_uv_add_update_remove_roundtrip() {
