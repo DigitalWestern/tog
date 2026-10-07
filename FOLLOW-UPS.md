@@ -143,7 +143,6 @@ None open.
 - **External requirements consistency (#501).** Select external absolute Python requirements once across command stages, using held input descriptors or immutable snapshots. Preserve existing supported external requirements. See `src/comforter/status.rs` and `src/tailors/python/inputs.rs`.
 
 
-- **Unreadable rollback cleanup (#503).** Replace the pathname cleanup helper with held-descriptor removal so mode-000 and search-only directories do not leave rollback or teardown data behind. See `src/kernel/store/fsops.rs::remove_tree`.
 
 - **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
