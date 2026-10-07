@@ -198,16 +198,26 @@ from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
 dependency maps (the root's and each workspace member's), pnpm's importer
 specifiers, and Yarn classic's `name@spec` selectors (with no entry left
 that nothing depends on; a `link:` dependency, which Yarn classic never
-locks, is linked to its directory inside the project). A `file:`/`link:` dependency is a
-symlink into the user's source, so nothing is ever placed beneath one: a
-target that is itself an importer gets its dependencies from its own
-projected `node_modules` (as pnpm installs it), and any other local package
-gets them in the nearest enclosing importer's `node_modules`, where Node
-looks from the package's real path. Every importer's and local package's
-dependencies are then checked against that lookup chain, and a layout where
-one would shadow another, or a link that would sit inside a registry
-package, is refused; a `file:` package whose dependencies conflict with its
-workspace member's is not supported yet. pnpm `patchedDependencies` follow
+locks, is linked to its directory inside the project). A pnpm `file:`
+dependency on a directory that is not an importer (in a v9 lock, and in a
+v6 lock, where the entry is keyed `file:<dir>` with its name beside it) is
+a copy, as pnpm installs it: the directory is packed into a tarball the
+same way every time (leaving out `node_modules` and `.git`, skipping FIFOs
+and sockets, following a symlink that stays inside the project and
+refusing one that leaves it, a loop, or a tree past a size limit), its
+digest is the package's integrity, and the environment extracts it like a
+registry tarball, with a `node_modules` of its own. In the SBOM it has no
+registry purl, since nothing on the registry is being named: a `tog:local`
+property carries its directory. `tog status` packs the directory again, so
+an edit to it is a change (`src/tailors/node/local_package.rs`). Every other
+`file:`/`link:` dependency is a symlink into the user's source, so nothing
+is ever placed beneath one: a target that is itself an importer gets its
+dependencies from its own projected `node_modules` (as pnpm installs it),
+and any other linked package gets them in the nearest enclosing importer's
+`node_modules`, where Node looks from the package's real path. Every
+importer's and linked package's dependencies are then checked against that
+lookup chain, and a layout where one would shadow another, or a link that
+would sit inside a registry package, is refused. pnpm `patchedDependencies` follow
 pnpm's precedence (exact version, then the one npm semver range the version
 satisfies, then a bare name or `name@*` that covers every version, two of
 those settled by the snapshot's recorded hash, and refused when that hash

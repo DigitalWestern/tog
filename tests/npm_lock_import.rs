@@ -172,7 +172,7 @@ fn pnpm_links_never_plant_packages_inside_the_linked_source_directory() {
     let temp = TempDir::new("pnpm-link-nesting");
     let dir = temp.path();
     for sub in ["license/dep-mit", "license/dep-nested", "ws/vendor/a"] {
-        fs::create_dir_all(dir.join(sub)).unwrap();
+        package_dir(&dir.join(sub));
     }
     let lock = format!(
         r#"lockfileVersion: '9.0'
@@ -258,6 +258,18 @@ snapshots:
     );
 }
 
+/// A local package directory: pnpm reads its package.json, and a `file:`
+/// package is packed from it.
+fn package_dir(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    fs::write(
+        dir.join("package.json"),
+        format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+    )
+    .unwrap();
+}
+
 fn plan_local(
     name: &str,
     dirs: &[&str],
@@ -266,7 +278,7 @@ fn plan_local(
     let temp = TempDir::new(name);
     let dir = temp.path();
     for sub in dirs {
-        fs::create_dir_all(dir.join(sub)).unwrap();
+        package_dir(&dir.join(sub));
     }
 
     tog::tailors::node::lock_import::plan_pnpm(
@@ -277,13 +289,14 @@ fn plan_local(
     )
 }
 
-/// A local package's dependencies go where Node finds them from the
-/// package's real path, not from wherever the link to it sits.
+/// A `file:` directory package is a copy with its own node_modules, as
+/// pnpm installs it (#188), so its dependency may differ from the version
+/// the root needs. A `link:` package resolves from its source directory
+/// instead, so its dependencies go where Node finds them from there.
 #[test]
 fn local_package_dependencies_follow_the_real_path_lookup_chain() {
-    // The link is hoisted to node_modules/a because a registry package
-    // (host) depends on it; a needs b@2 while the root has b@1. Placing b@2
-    // under host would leave Node, resolving from vendor/a, on the root b@1.
+    // `a` is hoisted to node_modules/a because a registry package (host)
+    // depends on it; a needs b@2 while the root has b@1.
     let hoisted = format!(
         r#"lockfileVersion: '9.0'
 importers:
@@ -313,21 +326,46 @@ snapshots:
       b: 2.0.0
 "#
     );
-    let error = plan_local("local-hoisted", &["vendor/a"], &hoisted)
+    let plan = plan_local("local-hoisted", &["vendor/a"], &hoisted).unwrap();
+    let placed = |path: &str| {
+        plan.packages
+            .iter()
+            .find(|package| package.path == path)
+            .map(|package| (package.version.as_str(), package.url.as_str()))
+    };
+    assert_eq!(placed("node_modules/a"), Some(("1.0.0", "file:vendor/a")));
+    assert_eq!(
+        placed("node_modules/a/node_modules/b").map(|(version, _)| version),
+        Some("2.0.0"),
+        "{:?}",
+        plan.packages
+    );
+    assert_eq!(
+        placed("node_modules/b").map(|(version, _)| version),
+        Some("1.0.0")
+    );
+    assert!(plan.links.is_empty(), "{:?}", plan.links);
+
+    // The same shape through `link:`: the link resolves from vendor/a,
+    // where only the root's node_modules is on the chain.
+    let linked = hoisted
+        .replace("      a: file:vendor/a\n", "      a: link:vendor/a\n")
+        .replace("  a@file:vendor/a:\n", "  a@link:vendor/a:\n");
+    let error = plan_local("local-linked", &["vendor/a"], &linked)
         .unwrap_err()
         .to_string();
     for part in [
-        "the file: package vendor/a needs b@2.0.0",
+        "the linked package vendor/a needs b@2.0.0",
         "the root importer needs b@1.0.0",
         "reaches node_modules/b first",
-        "file: packages whose dependencies conflict with their workspace member's are not supported yet",
+        "A linked package resolves its dependencies from its source directory",
     ] {
         assert!(error.contains(part), "{part}: {error}");
     }
 
     // Same shape, but the root already links `a` elsewhere, so the second
     // link would nest inside host's directory: a store object.
-    let nested = hoisted
+    let nested = linked
         .replace(
             "      host:\n",
             "      a:\n        specifier: link:vendor/other\n        version: link:vendor/other\n      host:\n",
@@ -351,8 +389,8 @@ snapshots:
         .collect();
     assert_eq!(needs_workspace, ["node_modules/host"]);
 
-    // Cross-workspace: app links a package that lives inside the lib
-    // importer. Node looks in packages/lib/node_modules, then the root.
+    // Cross-workspace: app depends on a `file:` package that lives inside
+    // the lib importer. The copy carries its own b@2.
     let cross = format!(
         r#"lockfileVersion: '9.0'
 importers:
@@ -395,25 +433,21 @@ snapshots:
             .map(|package| package.version.as_str())
     };
     assert_eq!(
-        placed("packages/lib/node_modules/b"),
+        placed("node_modules/cross/node_modules/b"),
         Some("2.0.0"),
         "{:?}",
         plan.packages
     );
-    assert_eq!(
-        placed("packages/app/node_modules/b"),
-        None,
-        "{:?}",
-        plan.packages
-    );
+    assert_eq!(placed("packages/lib/node_modules/b"), None);
     assert_eq!(placed("node_modules/b"), Some("1.0.0"));
 }
 
-/// The only place a local package inside app can get is-number@6 is app's
-/// own node_modules, which would shadow the is-number@7 app itself declares.
-/// That layout is not representable, so it is refused, not half-projected.
+/// app declares is-number@7 and the `file:` package inside app needs
+/// is-number@6. As a link, Node resolving from the package's source would
+/// reach app's own node_modules first. As the copy pnpm makes, the package
+/// carries is-number@6 in its own node_modules (#188).
 #[test]
-fn a_local_package_may_not_shadow_its_importers_own_dependency() {
+fn a_local_package_gets_its_own_copy_of_a_conflicting_dependency() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let lock = fs::read_to_string(root.join("tests/fixtures/proj-pnpm-local/pnpm-lock.yaml"))
         .unwrap()
@@ -421,21 +455,30 @@ fn a_local_package_may_not_shadow_its_importers_own_dependency() {
             "  packages/app:\n    dependencies:\n",
             "  packages/app:\n    dependencies:\n      is-number:\n        specifier: 7.0.0\n        version: 7.0.0\n",
         );
-    let error = plan_local(
+    let plan = plan_local(
         "local-shadow",
         &["packages/app/vendor/same", "packages/lib/vendor/cross"],
         &lock,
     )
-    .unwrap_err()
-    .to_string();
-    for part in [
-        "importer packages/app needs is-number@7.0.0",
-        "the file: package packages/app/vendor/same needs is-number@6.0.0",
-        "reaches packages/app/node_modules/is-number first",
-        "file: packages whose dependencies conflict with their workspace member's are not supported yet",
-    ] {
-        assert!(error.contains(part), "{part}: {error}");
-    }
+    .unwrap();
+    let version_at = |path: &str| {
+        plan.packages
+            .iter()
+            .find(|package| package.path == path)
+            .map(|package| package.version.as_str())
+    };
+    assert_eq!(version_at("node_modules/is-number"), Some("7.0.0"));
+    let same = plan
+        .packages
+        .iter()
+        .find(|package| package.url == "file:packages/app/vendor/same")
+        .expect("the file: package is a package");
+    assert_eq!(
+        version_at(&format!("{}/node_modules/is-number", same.path)),
+        Some("6.0.0"),
+        "{:?}",
+        plan.packages
+    );
 }
 
 /// An optional dependency skipped for the host platform is never placed,
