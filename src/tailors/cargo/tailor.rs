@@ -236,6 +236,10 @@ impl Tailor for Cargo {
         )
     }
 
+    fn runtime_programs(&self) -> &'static [&'static str] {
+        &["cargo", "rustc"]
+    }
+
     fn run_env(
         &self,
         ctx: &Context,

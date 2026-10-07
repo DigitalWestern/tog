@@ -335,6 +335,14 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
+    /// `tog run`: the runtime programs `run_env`'s prefixes provide once
+    /// this ecosystem is synced (`python`, `node`). One of them named bare
+    /// in a project with this ecosystem must come from those prefixes, never
+    /// from the host PATH after them.
+    fn runtime_programs(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// `tog run`: why `cmd` is refused before any environment is looked
     /// up, when it is one of this ecosystem's package-manager verbs that
     /// would write into a projection (`pip install`, `npm install`). The
