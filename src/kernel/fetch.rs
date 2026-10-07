@@ -122,7 +122,7 @@ pub(crate) fn cache_verified_digest_held(
             })
         }
         Ok((_, seen)) => {
-            remove_poisoned(&path, &seen);
+            remove_poisoned(store, &path, &seen);
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -171,17 +171,82 @@ fn hash_identified(path: &Path, algo: Algo) -> io::Result<(String, fs::Metadata)
     Ok((crate::kernel::digest::hash_reader(&mut f, algo)?, seen))
 }
 
+/// The name a cache entry that failed verification is moved aside under,
+/// in the store's `tmp/`. GC sweeps a crash leftover of it like any other
+/// temporary (`gc::read::TMP_LEFTOVERS`), so a tog killed between the move
+/// and the delete never leaves a name the cache directory refuses.
+pub(crate) const POISONED_PREFIX: &str = "poisoned-";
+
 /// Remove the cache entry at `path` that failed verification, but only if
 /// it is still the file that was hashed (`seen`). Cache leases share
 /// `gc.lock`, so another process may have published good bytes there since:
-/// those are left in place for the lease that holds them. Any entry that is
-/// still wrong is replaced by the next download's rename either way.
-fn remove_poisoned(path: &Path, seen: &fs::Metadata) {
+/// those are kept for the lease that holds them. A check and then an
+/// unlink would leave a window in which such a publish is deleted, so the
+/// entry is first renamed aside into `tmp/` in one step, and only what was
+/// moved is judged: the poisoned file is deleted, good bytes are put back
+/// (unless another verified copy, the same bytes, has landed since). In
+/// that short window the entry is absent: a download fetches it again,
+/// and a lease or a cache-only read fails as it would on an entry GC had
+/// swept. Any entry that is still wrong is replaced by the next download's
+/// rename either way.
+fn remove_poisoned(store: &Store, path: &Path, seen: &fs::Metadata) {
     use std::os::unix::fs::MetadataExt;
-    if let Ok(now) = fs::symlink_metadata(path) {
-        if now.dev() == seen.dev() && now.ino() == seen.ino() {
-            let _ = fs::remove_file(path);
-        }
+    let Some(aside) = move_poisoned_aside(store, path) else {
+        return;
+    };
+    let moved = fs::symlink_metadata(aside.tmp_path.join(&aside.name));
+    if moved.is_ok_and(|now| now.dev() == seen.dev() && now.ino() == seen.ino()) {
+        let _ = fs::remove_file(aside.tmp_path.join(&aside.name));
+        return;
+    }
+    put_back(&aside);
+}
+
+/// A cache entry renamed from `dir`/`entry` to `tmp`/`name`.
+struct Aside {
+    tmp: fs::File,
+    tmp_path: PathBuf,
+    name: std::ffi::OsString,
+    dir: fs::File,
+    entry: std::ffi::OsString,
+}
+
+/// Rename the entry at `path` into `tmp/` under [`POISONED_PREFIX`]. None
+/// when either directory cannot be opened or the rename fails (the entry
+/// is gone already, or was never there).
+fn move_poisoned_aside(store: &Store, path: &Path) -> Option<Aside> {
+    let (dir_path, entry) = (path.parent()?, path.file_name()?);
+    let tmp_path = store.root.join("tmp");
+    let dir = fs::File::open(dir_path).ok()?;
+    let tmp = fs::File::open(&tmp_path).ok()?;
+    let name = format!(
+        "{POISONED_PREFIX}{}",
+        crate::kernel::fsroot::random_suffix().ok()?
+    );
+    fs::rename(path, tmp_path.join(&name)).ok()?;
+    Some(Aside {
+        tmp,
+        tmp_path,
+        name: name.into(),
+        dir,
+        entry: entry.to_os_string(),
+    })
+}
+
+/// Put a moved entry that turned out to be good bytes back at its name,
+/// unless something has been published there since: that copy, verified by
+/// whoever wrote it, wins, and the moved one is deleted. Nothing is left in
+/// `tmp/` either way.
+fn put_back(aside: &Aside) {
+    use std::os::unix::io::AsRawFd;
+    let restored = crate::kernel::fsroot::rename_between_noreplace(
+        aside.tmp.as_raw_fd(),
+        aside.name.as_encoded_bytes(),
+        aside.dir.as_raw_fd(),
+        aside.entry.as_encoded_bytes(),
+    );
+    if restored.is_err() {
+        let _ = fs::remove_file(aside.tmp_path.join(&aside.name));
     }
 }
 
@@ -470,7 +535,12 @@ pub(crate) fn fetch_text_or_missing(
     url: &str,
     timeout: Option<std::time::Duration>,
 ) -> io::Result<Option<String>> {
-    match fetch_text_within(url, timeout) {
+    none_when_missing(fetch_text_within(url, timeout))
+}
+
+/// A fetched text, `None` when the failure was a 404.
+fn none_when_missing(fetched: io::Result<String>) -> io::Result<Option<String>> {
+    match fetched {
         Ok(text) => Ok(Some(text)),
         Err(error) if http_status(&error) == Some(404) => Ok(None),
         Err(error) => Err(error),
@@ -631,7 +701,7 @@ pub fn cache_insert(
                 store::touch_path(&dest)?;
                 return Ok((hex, dest));
             }
-            Ok((_, seen)) => remove_poisoned(&dest, &seen),
+            Ok((_, seen)) => remove_poisoned(store, &dest, &seen),
             Err(_) => {}
         }
     }
@@ -652,19 +722,27 @@ pub fn cache_insert(
             .open(&tmp)
             .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?
     };
-    let copied = copy_and_rehash(src, &mut out).and_then(|h| {
-        if h == hex {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "cache insert {}: the file changed while it was copied",
-                    src.display()
-                ),
-            ))
-        }
-    });
+    // The create mode is masked by the umask; set it outright, as a
+    // verified download's `publish_read_only` does, so both agree.
+    let copied_read_only = |out: &fs::File| {
+        use std::os::unix::fs::PermissionsExt;
+        out.set_permissions(fs::Permissions::from_mode(0o444))
+    };
+    let copied = copy_and_rehash(src, &mut out)
+        .and_then(|h| {
+            if h == hex {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "cache insert {}: the file changed while it was copied",
+                        src.display()
+                    ),
+                ))
+            }
+        })
+        .and_then(|()| copied_read_only(&out));
     drop(out);
     if let Err(e) = copied {
         let _ = fs::remove_file(&tmp);
@@ -675,7 +753,10 @@ pub fn cache_insert(
         Err(_) if dest.is_file() => {
             let _ = fs::remove_file(&tmp);
         }
-        Err(e) => return Err(io::Error::new(e.kind(), format!("cache insert {hex}: {e}"))),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(io::Error::new(e.kind(), format!("cache insert {hex}: {e}")));
+        }
     }
     store::touch_path(&dest)?;
     Ok((hex, dest))
@@ -1090,7 +1171,7 @@ fn cache_or_download_narrated(
                 };
                 return Ok((lease, candidate.clone()));
             }
-            Ok((_, seen)) => remove_poisoned(&dest, &seen), // corrupt: refetch
+            Ok((_, seen)) => remove_poisoned(store, &dest, &seen), // corrupt: refetch
             Err(_) => {}
         }
     }
@@ -1816,6 +1897,77 @@ mod tests {
         assert_eq!(cache_insert(&store, activity, &input).unwrap().1, dest);
     }
 
+    /// A rename that fails leaves no temporary behind, like every other
+    /// failure of an insert (#555).
+    #[test]
+    fn a_cache_insert_whose_rename_fails_leaves_no_temporary() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = TempDir::named("fetch-insert-rename");
+        let root = scratch.0.clone();
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store::for_test(root.clone());
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let input = root.join("artifact");
+        fs::write(&input, b"blocked").unwrap();
+        let cache = root.join("cache/sha256");
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o555)).unwrap();
+        let outcome = cache_insert(&store, activity, &input);
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(outcome.is_err());
+        assert_eq!(fs::read_dir(root.join("tmp")).unwrap().count(), 0);
+    }
+
+    /// A 404 is a missing text, and every other failure an error (#555).
+    #[test]
+    fn a_404_is_a_missing_text_and_other_failures_are_errors() {
+        let status = |code| {
+            Err(io::Error::other(StatusFailure {
+                code,
+                message: format!("status {code}"),
+            }))
+        };
+        assert_eq!(none_when_missing(status(404)).unwrap(), None);
+        assert!(none_when_missing(status(500)).is_err());
+        assert_eq!(
+            none_when_missing(Ok("text".into())).unwrap().as_deref(),
+            Some("text")
+        );
+        let scratch = TempDir::named("fetch-missing");
+        let file = scratch.0.join("text");
+        fs::write(&file, "body").unwrap();
+        let url = format!("file://{}", file.display());
+        assert_eq!(
+            fetch_text_or_missing(&url, None).unwrap().as_deref(),
+            Some("body")
+        );
+        // A file:// URL has no status: a missing file is an error.
+        let gone = format!("file://{}", scratch.0.join("gone").display());
+        assert!(fetch_text_or_missing(&gone, None).is_err());
+    }
+
+    /// An unpinned download past its cap refuses and leaves no `dest`;
+    /// one at the cap is kept whole (#555).
+    #[test]
+    fn an_unpinned_download_past_its_cap_is_refused_and_removed() {
+        let scratch = TempDir::named("fetch-unpinned");
+        let source = scratch.0.join("source");
+        fs::write(&source, [7u8; 64]).unwrap();
+        let url = format!("file://{}", source.display());
+        let dest = scratch.0.join("dest");
+        let error = download_unpinned(&url, &dest, 63).unwrap_err();
+        assert!(
+            error.to_string().contains("longer than 63 bytes"),
+            "{error}"
+        );
+        assert!(!dest.exists());
+        download_unpinned(&url, &dest, 64).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), [7u8; 64]);
+    }
+
     #[test]
     fn a_toolchain_row_the_policy_refuses_is_refused_even_when_cached() {
         let scratch = TempDir::named("fetch-policy-test");
@@ -2003,12 +2155,12 @@ mod integrity_tests {
         fs::write(&good, b"hello").unwrap();
         fs::rename(&good, &cache).unwrap();
 
-        remove_poisoned(&cache, &seen);
+        remove_poisoned(&store, &cache, &seen);
         assert_eq!(fs::read(&cache).unwrap(), b"hello");
 
         // Control: the file that was hashed is removed.
         let (_, seen) = hash_identified(&cache, Algo::Sha256).unwrap();
-        remove_poisoned(&cache, &seen);
+        remove_poisoned(&store, &cache, &seen);
         assert!(!cache.exists());
     }
 
@@ -2371,5 +2523,122 @@ mod integrity_tests {
         // Control: the right bytes land at dest.
         download_file(&url, &dest, &sha256_hex(b"hellp")).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"hellp");
+    }
+
+    /// The names under `tmp/` a poisoned entry was moved aside to.
+    fn moved_aside(store: &Store) -> Vec<String> {
+        fs::read_dir(store.root.join("tmp"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with(POISONED_PREFIX))
+            .collect()
+    }
+
+    /// A poisoned entry is removed, but good bytes published at its name
+    /// after it was hashed are kept, and nothing is left aside (#555).
+    #[test]
+    fn removing_a_poisoned_entry_keeps_a_publish_that_replaced_it() {
+        let (_scratch, store) = scratch_store("fetch-poisoned");
+        let entry = store.cache_path("sha256", &sha256_hex(b"good"));
+        fs::write(&entry, b"poisoned").unwrap();
+        let poisoned = fs::symlink_metadata(&entry).unwrap();
+        // Good bytes renamed over the entry after it was hashed.
+        let good = store.root.join("good");
+        fs::write(&good, b"good").unwrap();
+        fs::rename(&good, &entry).unwrap();
+        remove_poisoned(&store, &entry, &poisoned);
+        assert_eq!(fs::read(&entry).unwrap(), b"good");
+        assert!(moved_aside(&store).is_empty());
+        // The poisoned file itself goes.
+        let still = fs::symlink_metadata(&entry).unwrap();
+        remove_poisoned(&store, &entry, &still);
+        assert!(!entry.exists());
+        assert!(moved_aside(&store).is_empty());
+    }
+
+    /// A tog killed between moving a poisoned entry aside and deleting it
+    /// leaves it under `tmp/`, where GC sweeps it as a stale temporary,
+    /// never in `cache/<algo>/`, where GC refuses any name that is not a
+    /// digest and every later `tog gc` would fail.
+    #[test]
+    fn a_poisoned_entry_moved_aside_by_a_killed_tog_is_left_in_tmp() {
+        let (_scratch, store) = scratch_store("fetch-poisoned-crash");
+        let entry = store.cache_path("sha256", &sha256_hex(b"good"));
+        fs::write(&entry, b"poisoned").unwrap();
+        // The process dies here: the aside is never judged.
+        drop(move_poisoned_aside(&store, &entry).unwrap());
+        let cache: Vec<_> = fs::read_dir(entry.parent().unwrap()).unwrap().collect();
+        assert!(cache.is_empty(), "{cache:?}");
+        let aside = moved_aside(&store);
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert_eq!(
+            fs::read(store.root.join("tmp").join(&aside[0])).unwrap(),
+            b"poisoned"
+        );
+    }
+
+    /// Good bytes moved aside go back to their name, unless another copy
+    /// has been published there since: that copy is kept, and the moved
+    /// one is deleted rather than left in `tmp/` (#555).
+    #[test]
+    fn putting_back_a_moved_entry_never_replaces_a_newer_publish() {
+        let (_scratch, store) = scratch_store("fetch-put-back");
+        let entry = store.cache_path("sha256", &sha256_hex(b"good"));
+
+        fs::write(&entry, b"good").unwrap();
+        let aside = move_poisoned_aside(&store, &entry).unwrap();
+        assert!(!entry.exists());
+        put_back(&aside);
+        assert_eq!(fs::read(&entry).unwrap(), b"good");
+        assert!(moved_aside(&store).is_empty());
+
+        let aside = move_poisoned_aside(&store, &entry).unwrap();
+        fs::write(&entry, b"planted").unwrap();
+        put_back(&aside);
+        assert_eq!(fs::read(&entry).unwrap(), b"planted");
+        assert!(moved_aside(&store).is_empty());
+    }
+
+    /// Set in the child `an_inserted_entry_is_read_only_under_umask_0077`
+    /// runs: only there does this test set the umask, which is process-wide
+    /// and would leak into every other test in this binary.
+    const UMASK_CHILD: &str = "TOG_TEST_FETCH_UMASK_CHILD";
+
+    /// An inserted entry is 0444 even under `umask 0077`, which leaves the
+    /// mode it is created with at 0400: the explicit chmod is what makes it
+    /// readable to every user of the store, as a download is. The umask is
+    /// set in a child run of this test binary, which reports through its
+    /// exit status.
+    #[test]
+    fn an_inserted_entry_is_read_only_under_umask_0077() {
+        use std::os::unix::fs::PermissionsExt;
+        const NAME: &str =
+            "kernel::fetch::integrity_tests::an_inserted_entry_is_read_only_under_umask_0077";
+        if std::env::var_os(UMASK_CHILD).is_some() {
+            let (_scratch, store) = scratch_store("fetch-insert-umask");
+            let activity = &store.activity(ActivityMode::Shared).unwrap();
+            let input = store.root.join("artifact");
+            fs::write(&input, b"module zip").unwrap();
+            // SAFETY: umask has no preconditions; this process is the
+            // child run, which runs this one test and nothing else.
+            unsafe { libc::umask(0o077) };
+            let (_, dest) = cache_insert(&store, activity, &input).unwrap();
+            let mode = fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o7777, 0o444, "{}", dest.display());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(UMASK_CHILD, "1")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        // The child ran the test rather than filtering it out.
+        assert!(report.contains("1 passed"), "{report}");
     }
 }
