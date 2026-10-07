@@ -413,6 +413,12 @@ impl Store {
                 ),
             ));
         }
+        // Every link in a directory a closure can put on PATH (the root's
+        // own entries, `bin`, any `bin` or `.bin` below) stays inside the
+        // object or a declared object, checked while the object is still
+        // only staged. Objects published before the check existed are not
+        // swept: the check runs at publication only.
+        super::bin_links::check_bin_links(self, &id, staged, &dest, &deps.objects)?;
         // Read-only BEFORE publication (contents; APFS can't rename a
         // read-only dir, so the root is locked right after the rename —
         // the only window is top-level entry creation, never mutation).
@@ -980,6 +986,42 @@ mod meta_reader_tests {
         let id = identity.object_id();
         assert!(!store.object_path(&id).exists());
         assert!(!store.root.join("meta").join(format!("{id}.json")).exists());
+    }
+
+    /// A `bin/` link to the host refuses the publication before anything
+    /// lands: no object directory, no record.
+    #[test]
+    fn a_bin_link_out_of_the_object_publishes_nothing() {
+        let temp = TempDir::named("bin-link-out");
+        Store::open_at(&temp.0).unwrap();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        crate::kernel::objmeta::register_test_kinds();
+        let identity = Identity {
+            kind: "test".into(),
+            name: "bin-link-out".into(),
+            version: "1".into(),
+            inputs: Default::default(),
+        };
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let staged = store.stage_with_activity(&activity).unwrap();
+        let host = store.root.join("host-tool");
+        fs::write(&host, "x").unwrap();
+        fs::create_dir(staged.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&host, staged.join("bin/x")).unwrap();
+        let error = store
+            .commit_with_activity_and_deps(&activity, &identity, &staged, &[], &ObjectDeps::new())
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        let text = error.to_string();
+        assert!(text.contains("bin/x leads to"), "{text}");
+        assert!(text.contains("host-tool"), "{text}");
+        assert!(text.contains("nothing was published"), "{text}");
+        let id = identity.object_id();
+        assert!(!store.object_path(&id).exists());
+        assert!(!store.root.join("meta").join(format!("{id}.json")).exists());
+        assert!(!store.has_with_activity(&activity, &id).unwrap());
     }
 
     #[test]
