@@ -290,6 +290,7 @@ fn commit_toolchain_lock(project: &Path, ecosystem: &str) {
     use tog::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
     let tailor = tog::tailors::by_id(ecosystem).unwrap();
     let lock_ecosystem = tailor.lock_ecosystem();
+    tog::tailors::install_kernel_tables();
     let root = tog::kernel::fsroot::ProjectRoot::open(project).unwrap();
     let rows = tog::kernel::toolchain::input::discover(&root, lock_ecosystem).unwrap();
     let catalog = tailor.toolchain_catalog().unwrap();

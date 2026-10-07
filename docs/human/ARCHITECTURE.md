@@ -929,6 +929,10 @@ These keep the layout organized. The first is enforced by
 3. **Adding an ecosystem is additive:** a new folder plus one registry line
    (docs/human/ADDING-A-TAILOR.md). If a tailor has to edit a command, the
    kernel, or another tailor, the abstraction is wrong and gets fixed first.
+   The test checks the kernel half: non-test kernel code has no `match`
+   or `matches!` pattern holding a tailor's id or lock ecosystem, and no
+   `==` or `!=` against one (comparisons under `kernel/provider/` wait for
+   a pull request that has to touch that heavy-watched tree).
 4. **Folders are future crates.** Nothing may prevent a top-level folder
    becoming its own crate later: no reaching into another folder's private
    items; cross-folder use goes through `pub` items at the folder's `mod.rs`.

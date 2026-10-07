@@ -914,10 +914,14 @@ mod tests {
         assert_eq!(honored.bundle_id(), chosen);
         assert!(again.pending.is_none());
 
-        // Every tailor's lock ecosystem is one discovery knows.
+        // Every tailor's lock ecosystem is one discovery knows, and an
+        // empty project states nothing for it.
+        let empty = TempDir::new();
+        let root = ProjectRoot::open(&empty.0).unwrap();
         for tailor in tailors::registry() {
+            let rows = input::discover(&root, tailor.lock_ecosystem()).unwrap();
             assert!(
-                input::ECOSYSTEMS.contains(&tailor.lock_ecosystem()),
+                rows.iter().all(|row| row.value.is_none()),
                 "{}",
                 tailor.id()
             );
@@ -1107,6 +1111,9 @@ mod tests {
     }
 
     impl Tailor for HostlessPython {
+        fn toolchain_sources(&self) -> crate::kernel::toolchain::input::Sources {
+            HostlessPython::real().toolchain_sources()
+        }
         fn input_files(&self) -> &'static str {
             "test input"
         }
@@ -1373,6 +1380,9 @@ mod tests {
     }
 
     impl Tailor for SwappedMidSync {
+        fn toolchain_sources(&self) -> crate::kernel::toolchain::input::Sources {
+            HostlessPython::real().toolchain_sources()
+        }
         fn input_files(&self) -> &'static str {
             "test input"
         }

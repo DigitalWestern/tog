@@ -13,6 +13,8 @@ use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox;
+use crate::kernel::toolchain::input::{InputRow, Sources};
+use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::elixir;
@@ -83,6 +85,13 @@ impl Tailor for Elixir {
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
         Ok(project.is_input_file(Path::new("mix.exs")))
+    }
+
+    fn toolchain_sources(&self) -> Sources {
+        Sources {
+            discover: toolchain_rows,
+            request: toolchain_request,
+        }
     }
 
     fn input_files(&self) -> &'static str {
@@ -337,4 +346,40 @@ impl Tailor for Elixir {
     fn toolchain_kinds(&self) -> &'static [&'static str] {
         &["beam"]
     }
+}
+
+/// The files this ecosystem's toolchain version is read from, in its own
+/// tools' precedence order ([`Tailor::toolchain_sources`]).
+fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    use crate::kernel::toolchain::input::{read_tool_versions, row_for};
+    Ok(vec![
+        row_for(root, ".tool-versions", "erlang", |bytes| {
+            read_tool_versions(bytes, "erlang")
+        })?,
+        row_for(root, ".tool-versions", "elixir", |bytes| {
+            read_tool_versions(bytes, "elixir")
+        })?,
+    ])
+}
+
+/// The selection request [`toolchain_rows`] state.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::resolve::{exact_or_prefix, parse_version, value};
+    let mut request = Request::newest();
+    if let Some(text) = value(rows, ".tool-versions", "erlang") {
+        request = request.with(
+            "otp",
+            exact_or_prefix(parse_version(".tool-versions erlang", text)?),
+        );
+    }
+    if let Some(text) = value(rows, ".tool-versions", "elixir") {
+        // `1.17.0-otp-27` states the Elixir build's OTP pairing, not a
+        // fourth version component.
+        let text = text.split("-otp-").next().unwrap_or(text);
+        request = request.with(
+            "elixir",
+            exact_or_prefix(parse_version(".tool-versions elixir", text)?),
+        );
+    }
+    Ok(request)
 }

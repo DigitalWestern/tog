@@ -12,6 +12,8 @@ use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox;
+use crate::kernel::toolchain::input::{InputRow, Sources};
+use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::dotnet;
@@ -85,6 +87,13 @@ impl Tailor for Dotnet {
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
         // A held root is a directory by construction.
         dotnet::has_marker(project)
+    }
+
+    fn toolchain_sources(&self) -> Sources {
+        Sources {
+            discover: toolchain_rows,
+            request: toolchain_request,
+        }
     }
 
     fn input_files(&self) -> &'static str {
@@ -307,6 +316,43 @@ impl Tailor for Dotnet {
     fn toolchain_kinds(&self) -> &'static [&'static str] {
         &["dotnet-sdk"]
     }
+}
+
+/// The files this ecosystem's toolchain version is read from, in its own
+/// tools' precedence order ([`Tailor::toolchain_sources`]).
+fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    use crate::kernel::toolchain::input::{
+        checked_row_for, read_global_json, read_global_json_roll_forward,
+    };
+    Ok(vec![
+        checked_row_for(root, "global.json", "sdk.version", read_global_json)?,
+        checked_row_for(
+            root,
+            "global.json",
+            "sdk.rollForward",
+            read_global_json_roll_forward,
+        )?,
+    ])
+}
+
+/// The selection request [`toolchain_rows`] state.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::invalid;
+    use crate::kernel::toolchain::resolve::{parse_version, value};
+    use crate::kernel::toolchain::VersionRequest;
+    let mut request = Request::newest();
+    if let Some(text) = value(rows, "global.json", "sdk.version") {
+        if value(rows, "global.json", "sdk.rollForward") != Some("disable") {
+            return Err(invalid(
+                "global.json sdk.rollForward must be \"disable\" for an exact toolchain lock",
+            ));
+        }
+        request = request.with(
+            "dotnet-sdk",
+            VersionRequest::Exact(parse_version("global.json sdk.version", text)?),
+        );
+    }
+    Ok(request)
 }
 
 #[cfg(test)]

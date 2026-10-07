@@ -7,6 +7,9 @@ use tog::commands;
 use tog::kernel::ui;
 
 fn main() {
+    // Before parsing: resolving a first word (`tog app.ts`) can already
+    // read a project's toolchain sources.
+    tog::tailors::install_kernel_tables();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (options, pending) = match cli::parse(&args) {
         Ok(cli::Parsed::Run(invocation)) => (

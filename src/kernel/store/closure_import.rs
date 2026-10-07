@@ -5,6 +5,7 @@
 use super::*;
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::ui;
+use std::sync::OnceLock;
 
 pub(super) fn invalid_root_import(path: &Path, detail: String) -> io::Error {
     io::Error::new(
@@ -24,18 +25,52 @@ pub(super) fn validate_closure_envelope<'a>(
         .get("ecosystem")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_root_import(path, "missing closure ecosystem".into()))?;
-    if !matches!(
-        ecosystem,
-        "python" | "node" | "cargo" | "go" | "ruby" | "elixir" | "dotnet"
-    ) {
-        return Err(invalid_root_import(
-            path,
-            format!("unknown closure ecosystem {ecosystem}"),
-        ));
-    }
+    check_known_ecosystem(ecosystem).map_err(|detail| invalid_root_import(path, detail))?;
     value
         .get("body")
         .ok_or_else(|| invalid_root_import(path, "missing closure body".into()))
+}
+
+static CLOSURE_ECOSYSTEMS: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// Install the ecosystems whose closures a root import accepts: every
+/// tailor's id, so the kernel names none and a new tailor's closures are
+/// imported without a kernel edit. The first call wins: a repeated
+/// installation of the same ids is a no-op, a different set a programming
+/// error.
+pub fn install_closure_ecosystems(ids: Vec<&'static str>) {
+    let installed = CLOSURE_ECOSYSTEMS.get_or_init(|| ids.clone());
+    if *installed != ids {
+        panic!("closure ecosystems already installed as {installed:?}, not {ids:?}");
+    }
+}
+
+/// Whether a tailor writes closures named `ecosystem`, as the detail of
+/// the import error when none does. Unit tests install the shipped
+/// tailors' ids on first use, as every binary entry point does.
+fn check_known_ecosystem(ecosystem: &str) -> Result<(), String> {
+    #[cfg(test)]
+    tests::install_shipped_ecosystems();
+    check_known_ecosystem_in(CLOSURE_ECOSYSTEMS.get(), ecosystem)
+}
+
+/// A table nobody installed is a programming error with its own detail, so
+/// it is never read as a name no tailor claims.
+fn check_known_ecosystem_in(
+    installed: Option<&Vec<&'static str>>,
+    ecosystem: &str,
+) -> Result<(), String> {
+    let Some(ids) = installed else {
+        return Err(
+            "closure ecosystems not installed; the entry point must call tailors::install_kernel_tables first"
+                .into(),
+        );
+    };
+    if ids.contains(&ecosystem) {
+        Ok(())
+    } else {
+        Err(format!("unknown closure ecosystem {ecosystem}"))
+    }
 }
 
 /// How strictly a legacy closure import treats a reference it cannot
@@ -293,4 +328,62 @@ pub(super) fn validate_object_reference(store: &Store, id: &str, path: &Path) ->
 
 pub(super) fn path_under_objects(store: &Store, path: &Path) -> bool {
     path.starts_with(store.root.join("objects"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(super) fn install_shipped_ecosystems() {
+        crate::tailors::install_kernel_tables();
+    }
+
+    /// Every shipped tailor's closure is imported, and a name no tailor
+    /// writes is refused.
+    #[test]
+    fn a_closure_of_every_registered_ecosystem_is_imported() {
+        let path = Path::new(".tog/closures/x.json");
+        let envelope =
+            |name: &str| serde_json::json!({"schema": "closure/1", "ecosystem": name, "body": {}});
+        for tailor in crate::tailors::registry() {
+            assert!(
+                validate_closure_envelope(&envelope(tailor.id()), path).is_ok(),
+                "{}",
+                tailor.id()
+            );
+        }
+        for name in ["zig", "", "rust"] {
+            let error = validate_closure_envelope(&envelope(name), path).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown closure ecosystem"),
+                "{error}"
+            );
+        }
+    }
+
+    /// A table nobody installed and a name no tailor claims are two
+    /// different mistakes, and each is told apart by its detail.
+    #[test]
+    fn an_uninstalled_table_is_told_apart_from_an_unknown_name() {
+        let uninstalled = check_known_ecosystem_in(None, "python").unwrap_err();
+        assert!(
+            uninstalled.contains("tailors::install_kernel_tables"),
+            "{uninstalled}"
+        );
+        let shipped = vec!["python", "node"];
+        assert_eq!(
+            check_known_ecosystem_in(Some(&shipped), "zig").unwrap_err(),
+            "unknown closure ecosystem zig"
+        );
+        assert!(check_known_ecosystem_in(Some(&shipped), "node").is_ok());
+    }
+
+    /// The same rule as `input::install_sources`: once installed, a
+    /// different set is a programming error, never a silent first-wins.
+    #[test]
+    #[should_panic(expected = "closure ecosystems already installed")]
+    fn a_different_set_of_ids_is_refused() {
+        install_shipped_ecosystems();
+        install_closure_ecosystems(vec!["zig"]);
+    }
 }

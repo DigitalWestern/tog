@@ -25,6 +25,7 @@ pub(crate) use records::{record_project, RECORDS, RECORD_CAP};
 mod roots;
 mod roots_lookup;
 
+pub use closure_import::install_closure_ecosystems;
 use closure_import::*;
 use env::home;
 #[cfg(test)]

@@ -332,6 +332,107 @@ fn layers_point_one_way() {
     );
 }
 
+/// The kernel branches on no ecosystem by name: a `match` or `matches!`
+/// pattern holding a tailor's id or lock ecosystem, or a comparison with
+/// one, means an eighth ecosystem would have to edit the kernel. What an
+/// ecosystem knows goes through a `Tailor` method or a table the tailors
+/// install (#255).
+///
+/// Comparisons are not checked under `kernel/provider/`: that tree is
+/// heavy-watched in CI and `cpython.rs` still compares `selected.ecosystem`
+/// with `"python"`, which waits for a pull request that has to touch it.
+#[test]
+fn the_kernel_branches_on_no_ecosystem_name() {
+    let mut names: Vec<&str> = tog::tailors::registry()
+        .iter()
+        .flat_map(|tailor| [tailor.id(), tailor.lock_ecosystem()])
+        .collect();
+    names.sort();
+    names.dedup();
+    let root = src();
+    let mut files = Vec::new();
+    rust_files(&root.join("kernel"), &mut files);
+    let mut violations = Vec::new();
+    for file in &files {
+        let relative = file.strip_prefix(&root).unwrap();
+        let comparisons = !relative.starts_with("kernel/provider");
+        let text = fs::read_to_string(file).unwrap();
+        for (number, line) in non_test(&text).lines().enumerate() {
+            if let Some(name) = ecosystem_arm(line, &names, comparisons) {
+                violations.push(format!("{}:{}: \"{name}\"", relative.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "the kernel matches on an ecosystem name; give the tailors a method or a table instead:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The ecosystem `line` branches on: a quoted name in a pattern, which is
+/// anything before a `=>` on its line (a plain arm, a guard arm, a tuple
+/// or `Some(..)` pattern), one `|` alternative of a pattern continued over
+/// several lines, or an argument of `matches!`; and, when `comparisons` is
+/// set, a quoted name beside `==` or `!=`.
+fn ecosystem_arm<'a>(line: &str, names: &[&'a str], comparisons: bool) -> Option<&'a str> {
+    let code = line.split("//").next().unwrap_or(line);
+    names.iter().copied().find(|name| {
+        let quoted = format!("\"{name}\"");
+        code.match_indices(&quoted).any(|(at, _)| {
+            let after = code[at + quoted.len()..].trim_start();
+            let before = code[..at].trim_end();
+            let alternative = (after.starts_with('|') && !after.starts_with("||"))
+                || (before.ends_with('|') && !before.ends_with("||"));
+            let pattern = after.contains("=>") || before.contains("matches!(");
+            let compared = comparisons
+                && ["==", "!="]
+                    .iter()
+                    .any(|op| after.starts_with(op) || before.ends_with(op));
+            alternative || pattern || compared
+        })
+    })
+}
+
+#[test]
+fn the_ecosystem_arm_scan_sees_every_spelling() {
+    let names = ["go", "python"];
+    for line in [
+        "        \"python\" => {",
+        "        \"go\" | \"python\" => true,",
+        "    matches!(name, \"node\" | \"go\")",
+        "    matches!(name, \"go\")",
+        "        \"python\"=> 1,",
+        "        \"go\" if rows.is_empty() => newest(),",
+        "        (\"python\", _) => cpython(),",
+        "        (_, Some(\"go\")) => std_only(),",
+        "        Some(\"go\") => {",
+        "        | \"python\"",
+        "    if selected.ecosystem != \"python\" {",
+        "    name == \"go\" || other",
+    ] {
+        assert!(ecosystem_arm(line, &names, true).is_some(), "{line}");
+    }
+    for line in [
+        "    let tool = \"go\";",
+        "    run(&[\"go\", \"build\"]);",
+        "    Component::new(\"go\", \"1.27.0\"),",
+        "            (\"python\", \"old\"),",
+        "        _ => Some(\"go\"),",
+        "        Other => format!(\"{}\", \"python\"),",
+        "    // \"python\" => no longer here",
+        "        \"golang\" => {",
+    ] {
+        assert_eq!(ecosystem_arm(line, &names, true), None, "{line}");
+    }
+    // A provider file is scanned for patterns, not for comparisons.
+    assert_eq!(
+        ecosystem_arm("    if selected.ecosystem != \"python\" {", &names, false),
+        None
+    );
+    assert!(ecosystem_arm("        \"python\" => {", &names, false).is_some());
+}
+
 /// Every spelling of a path into another layer is seen: nested groups,
 /// `self` in a group, `super` chains, `$crate`, whitespace inside a group;
 /// and paths that stay in the layer are not reported.
