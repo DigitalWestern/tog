@@ -363,6 +363,154 @@ fn the_no_store_relay_scrubs_the_key_named_by_tog_signing_key() {
     }
 }
 
+/// The `RuntimeOnly` view of a real Debian/Ubuntu `/usr/lib/llvm-<N>`
+/// (#559, #609). The unit tests in hostview.rs curate a fake host; this
+/// runs against the host's own trees: clang's resource directory and the
+/// tree's `bin` are bound whole at their real paths (not reached as kept
+/// files through `/.tog-host-files`), clang compiles against its own
+/// `stddef.h` inside the view, and LLVM the library (`include/llvm`,
+/// `lib/*.a`) is absent. Ignored, for the heavy workflow's Ubuntu runner,
+/// which has these trees; a host with none (Fedora names them `llvm<N>`
+/// under `/usr/lib64`) skips.
+#[test]
+#[ignore]
+fn the_runtime_only_view_keeps_a_real_llvm_trees_compiler_whole() {
+    const NAME: &str = "the_runtime_only_view_keeps_a_real_llvm_trees_compiler_whole";
+    let mut trees: Vec<std::path::PathBuf> = std::fs::read_dir("/usr/lib")
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    let name = path.file_name().unwrap().to_string_lossy();
+                    name.strip_prefix("llvm-")
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                        && !path.is_symlink()
+                        && path.is_dir()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    trees.sort();
+    if trees.is_empty() {
+        eprintln!("skip {NAME}: this host has no /usr/lib/llvm-<N> tree");
+        return;
+    }
+    if !matches!(Platform::host(), Ok(Platform::X86_64UnknownLinuxGnu)) {
+        skip_or_panic(NAME, "not an x86_64 Linux host");
+        return;
+    }
+    if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+        skip_or_panic(NAME, format!("bubblewrap preflight failed: {error}"));
+        return;
+    }
+    let temp = TempDir::new("sandbox-llvm-view");
+    let scratch = temp.path().join("scratch");
+    let out = temp.path().join("out");
+    std::fs::create_dir(&scratch).unwrap();
+    std::fs::create_dir(&out).unwrap();
+    // One line per fact the view shows of each tree, to compare with the
+    // host's own below.
+    let script = r#"report="$1"; shift
+for tree in "$@"; do
+  {
+    echo "@@tree $tree"
+    [ -d "$tree/lib/clang" ] && echo clang-dir
+    [ -L "$tree/lib/clang" ] && echo clang-symlink
+    [ -L "$tree/bin" ] && echo bin-symlink
+    if [ -d "$tree/bin" ]; then
+      for entry in "$tree"/bin/*; do echo "bin $(basename "$entry")"; done
+    fi
+    [ -e "$tree/include/llvm" ] && echo include-llvm
+    for archive in "$tree"/lib/*.a; do [ -e "$archive" ] && echo "archive $archive"; done
+    if [ -x "$tree/bin/clang" ]; then
+      resource=$("$tree/bin/clang" -print-resource-dir)
+      echo "resource $resource"
+      header="$resource/include/stddef.h"
+      [ -f "$header" ] && echo "stddef $(readlink -f "$header")"
+      printf '#include <stddef.h>\n#include <stdarg.h>\nsize_t n;\n' |
+        "$tree/bin/clang" -fsyntax-only -x c - && echo compiled
+    fi
+  } >> "$report" 2>&1
+done
+exit 0"#;
+    let report = out.join("report");
+    let mut argv: Vec<String> = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        script.into(),
+        "sh".into(),
+        report.to_str().unwrap().into(),
+    ];
+    argv.extend(trees.iter().map(|tree| tree.to_str().unwrap().to_string()));
+    let spec = BuildSpec {
+        argv,
+        cwd: scratch.clone(),
+        env: vec![],
+        read: vec![],
+        write: vec![out.clone()],
+        scratch,
+        path: "/usr/bin:/bin".into(),
+        host_view: tog::kernel::sandbox::HostView::RuntimeOnly,
+    };
+    run_build_spec(&spec).expect("the view report runs");
+    let report = std::fs::read_to_string(&report).unwrap();
+    println!("{report}");
+    let mut sections = report.split("@@tree ").skip(1);
+    for tree in &trees {
+        let section = sections
+            .next()
+            .unwrap_or_else(|| panic!("no report for {}", tree.display()));
+        let lines: Vec<&str> = section.lines().collect();
+        let (first, facts) = lines.split_first().unwrap();
+        assert_eq!(*first, tree.to_str().unwrap(), "{report}");
+        let has = |fact: &str| facts.contains(&fact);
+        let label = tree.display();
+        if tree.join("lib/clang").is_dir() {
+            assert!(
+                has("clang-dir") && !has("clang-symlink"),
+                "{label}: {report}"
+            );
+        }
+        let bin = tree.join("bin");
+        if bin.is_dir() {
+            assert!(!has("bin-symlink"), "{label}: {report}");
+            for entry in std::fs::read_dir(&bin).unwrap().flatten() {
+                let line = format!("bin {}", entry.file_name().to_string_lossy());
+                assert!(has(&line), "{label}: the view lost {line}: {report}");
+            }
+        }
+        assert!(
+            !has("include-llvm"),
+            "{label}: LLVM's headers are visible: {report}"
+        );
+        assert!(
+            !facts.iter().any(|fact| fact.starts_with("archive ")),
+            "{label}: LLVM's archives are visible: {report}"
+        );
+        let clang = bin.join("clang");
+        if clang.is_file() {
+            let host = std::process::Command::new(&clang)
+                .arg("-print-resource-dir")
+                .output()
+                .unwrap();
+            let resource = String::from_utf8(host.stdout).unwrap().trim().to_string();
+            assert!(has(&format!("resource {resource}")), "{label}: {report}");
+            let stddef =
+                std::fs::canonicalize(Path::new(&resource).join("include/stddef.h")).unwrap();
+            assert!(
+                has(&format!("stddef {}", stddef.display())),
+                "{label}: clang's stddef.h is not at its real path {}: {report}",
+                stddef.display()
+            );
+            assert!(
+                has("compiled"),
+                "{label}: clang cannot compile in the view: {report}"
+            );
+        }
+    }
+}
+
 /// The resolution door's Linux confinement, end to end: bubblewrap in the
 /// `Proxy` network mode, the relay (the real `tog` binary), the seccomp
 /// filter, the socket scan, quiescence, and publication. The "tool" is a C
