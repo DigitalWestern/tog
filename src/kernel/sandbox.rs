@@ -1469,7 +1469,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::io::AsRawFd;
     #[cfg(target_os = "linux")]
-    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -1779,7 +1779,7 @@ mod tests {
         fs::create_dir(&scratch).unwrap();
         fs::create_dir(&writable).unwrap();
         let socket_path = writable.join("listener.sock");
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let listener = crate::kernel::testutil::bind_socket(&socket_path);
         let result = run(
             &Sandbox {
                 read: vec![],
@@ -3387,14 +3387,13 @@ mod containment_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_host_socket_under_a_read_root_is_refused_before_bwrap() {
-        // Short names: a socket path is capped at 108 bytes.
         let root = temp_dir("rs");
         let scratch = root.0.join("s");
         let readable = root.0.join("r");
         fs::create_dir(&scratch).unwrap();
         fs::create_dir_all(readable.join("n")).unwrap();
         let socket = readable.join("n/l.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = crate::kernel::testutil::bind_socket(&socket);
         let sandbox = Sandbox {
             read: vec![&readable],
             write: vec![&scratch],
@@ -3430,7 +3429,7 @@ mod containment_tests {
         fs::create_dir(&readable).unwrap();
         fs::create_dir(&elsewhere).unwrap();
         fs::write(readable.join("file"), "x").unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(elsewhere.join("l.sock")).unwrap();
+        let listener = crate::kernel::testutil::bind_socket(&elsewhere.join("l.sock"));
         std::os::unix::fs::symlink(elsewhere.join("l.sock"), readable.join("link")).unwrap();
         let sandbox = Sandbox {
             read: vec![&readable],
@@ -3778,8 +3777,7 @@ mod containment_tests {
         #[cfg(target_os = "linux")]
         {
             let elsewhere = temp_dir("vanished-elsewhere");
-            let listener =
-                std::os::unix::net::UnixListener::bind(elsewhere.0.join("l.sock")).unwrap();
+            let listener = crate::kernel::testutil::bind_socket(&elsewhere.0.join("l.sock"));
             std::os::unix::fs::symlink(elsewhere.0.join("l.sock"), root.0.join("link")).unwrap();
             assert!(find_socket_without_following_symlinks(&root.0)
                 .unwrap()
