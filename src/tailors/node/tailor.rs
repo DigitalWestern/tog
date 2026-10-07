@@ -12,6 +12,8 @@ use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
+use crate::kernel::toolchain::input::{InputRow, Sources};
+use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
@@ -166,6 +168,13 @@ impl Tailor for Node {
         Ok(NODE_INPUTS
             .iter()
             .any(|name| project.is_input_file(Path::new(name))))
+    }
+
+    fn toolchain_sources(&self) -> Sources {
+        Sources {
+            discover: toolchain_rows,
+            request: toolchain_request,
+        }
     }
 
     fn input_files(&self) -> &'static str {
@@ -689,6 +698,41 @@ fn typescript_runner(version: &str) -> Result<&'static [&'static str], String> {
              update --toolchain node' to move that pin"
         )),
     }
+}
+
+/// The files this ecosystem's toolchain version is read from, in its own
+/// tools' precedence order ([`Tailor::toolchain_sources`]).
+fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    use crate::kernel::toolchain::input::{
+        checked_row_for, read_node_version, read_package_json_engines_node, row_for,
+    };
+    Ok(vec![
+        row_for(root, ".node-version", "version", read_node_version)?,
+        checked_row_for(
+            root,
+            "package.json",
+            "engines.node",
+            read_package_json_engines_node,
+        )?,
+    ])
+}
+
+/// The selection request [`toolchain_rows`] state.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::resolve::{engines_node, exact_or_prefix, parse_version, value};
+    let mut request = Request::newest();
+    if let Some(text) = value(rows, ".node-version", "version") {
+        request = request.with(
+            "node",
+            exact_or_prefix(parse_version(".node-version", text)?),
+        );
+    }
+    if let Some(text) = value(rows, "package.json", "engines.node") {
+        for term in engines_node(text)? {
+            request = request.with("node", term);
+        }
+    }
+    Ok(request)
 }
 
 #[cfg(test)]

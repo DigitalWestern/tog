@@ -89,6 +89,7 @@ fn catalog_of(ecosystem: &str) -> Catalog {
 }
 
 fn rows_of(dir: &Path, ecosystem: &str) -> Vec<InputRow> {
+    tog::tailors::install_kernel_tables();
     let root = ProjectRoot::open(dir).unwrap();
     input::discover(&root, ecosystem).unwrap()
 }
@@ -1009,6 +1010,7 @@ fn two_store_replay() {
     let root = ProjectRoot::open(fixture.dir()).unwrap();
     let mut ids = Vec::new();
     for catalog in [full, without] {
+        tog::tailors::install_kernel_tables();
         let resolved = project_toolchain::resolve(
             &root,
             Platform::host().unwrap(),
@@ -1178,6 +1180,7 @@ fn linux_lock_bytes_are_platform_independent() {
     let root = ProjectRoot::open(fixture.dir()).unwrap();
     let mut bytes: Vec<(Platform, Vec<u8>)> = Vec::new();
     for platform in Platform::ALL {
+        tog::tailors::install_kernel_tables();
         let resolved = project_toolchain::resolve(
             &root,
             *platform,

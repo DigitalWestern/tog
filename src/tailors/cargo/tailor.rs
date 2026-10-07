@@ -12,6 +12,8 @@ use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
 use crate::kernel::platform::Platform;
 use crate::kernel::resolve::ResolutionDoor;
+use crate::kernel::toolchain::input::{InputRow, Sources};
+use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
@@ -123,6 +125,13 @@ impl Tailor for Cargo {
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
         Ok(inputs::is_cargo_here(project))
+    }
+
+    fn toolchain_sources(&self) -> Sources {
+        Sources {
+            discover: toolchain_rows,
+            request: toolchain_request,
+        }
     }
 
     fn input_files(&self) -> &'static str {
@@ -459,4 +468,65 @@ impl Tailor for Cargo {
     fn toolchain_kinds(&self) -> &'static [&'static str] {
         &["rust", "rustfmt"]
     }
+}
+
+/// The files this ecosystem's toolchain version is read from, in its own
+/// tools' precedence order ([`Tailor::toolchain_sources`]).
+fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+    crate::kernel::toolchain::input::rust_rows(root)
+}
+
+/// The selection request [`toolchain_rows`] state.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::input::{RUST_TOOLCHAIN_PATH, RUST_TOOLCHAIN_REQUESTS};
+    use crate::kernel::toolchain::invalid;
+    use crate::kernel::toolchain::resolve::{exact_or_prefix, value, UPDATE_HINT};
+    use crate::kernel::toolchain::Version;
+    let mut request = Request::newest();
+    let legacy = value(rows, "rust-toolchain", "toolchain.channel");
+    let modern = value(rows, "rust-toolchain.toml", "toolchain.channel");
+    if let (Some(a), Some(b)) = (legacy, modern) {
+        if a != b {
+            return Err(invalid(format!(
+                "rust-toolchain says {a} and rust-toolchain.toml says {b}; make them agree, then {UPDATE_HINT}"
+            )));
+        }
+    }
+    // The lists are not part of the version request, but both files are
+    // read and recorded, so two that ask for different components or
+    // targets, or name different local trees, are the same conflict as two
+    // channels. A local tree states no version: the tailor's external
+    // selection answers for it.
+    let present = |path: &str| {
+        rows.iter()
+            .any(|row| row.path.as_os_str() == path && row.sha256.is_some())
+    };
+    if present("rust-toolchain") && present("rust-toolchain.toml") {
+        for (key, field) in RUST_TOOLCHAIN_REQUESTS
+            .into_iter()
+            .chain([RUST_TOOLCHAIN_PATH])
+        {
+            let a = value(rows, "rust-toolchain", field);
+            let b = value(rows, "rust-toolchain.toml", field);
+            if a != b {
+                return Err(invalid(format!(
+                    "rust-toolchain asks for {key} {} and rust-toolchain.toml asks for {}; \
+                     make them agree, then {UPDATE_HINT}",
+                    a.unwrap_or("none"),
+                    b.unwrap_or("none")
+                )));
+            }
+        }
+    }
+    if let Some(channel) = legacy.or(modern) {
+        if channel != "stable" {
+            let version = Version::parse(channel).map_err(|_| {
+                invalid(format!(
+                    "rust channel {channel} is not supported; use an exact version or stable"
+                ))
+            })?;
+            request = request.with("rustc", exact_or_prefix(version));
+        }
+    }
+    Ok(request)
 }

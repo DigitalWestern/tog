@@ -6,6 +6,11 @@
 //! the filesystem. That keeps frozen validation free of project code: it can
 //! read inputs and compare them without planning dependencies.
 //!
+//! Which files each ecosystem consults is the tailor's own: its
+//! `Tailor::toolchain_sources` builds the rows from the `pub` readers and
+//! [`row_for`] here, and [`discover`] looks the ecosystem up in the table
+//! the tailors install.
+//!
 //! Discovery walks from a held project root so a symlinked input or ancestor
 //! fails closed instead of being read through. The consulted rows per
 //! ecosystem are the sources its own native tools honor, in that tool's
@@ -17,6 +22,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use sha2::{Digest as _, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// One consulted source, in precedence order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,14 +198,14 @@ pub fn read_pyproject_requires_python(bytes: &[u8]) -> io::Result<Option<String>
 
 /// `setup.cfg`: `[options] python_requires = >=3.9`, read by the parser the
 /// Python tailor reads the file with.
-fn read_setup_cfg_python(bytes: &[u8]) -> Option<String> {
+pub fn read_setup_cfg_python(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     crate::kernel::setuptools::parse_setup_cfg(text).python_requires
 }
 
 /// `setup.py`: a literal `python_requires="..."`, found by a static scan.
 /// The file is never run, so a computed value is not seen.
-fn read_setup_py_python(bytes: &[u8]) -> Option<String> {
+pub fn read_setup_py_python(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     crate::kernel::setuptools::extract_setup_py_python_requires(text)
 }
@@ -527,7 +533,7 @@ pub fn split_list(value: &str) -> Vec<String> {
 /// were recorded stays byte-identical for a project that asks for none, and
 /// one appearing or disappearing is a row only one side has, which
 /// staleness calls stale.
-fn rust_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
+pub fn rust_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
     let mut rows = Vec::new();
     for (path, legacy) in [("rust-toolchain", true), ("rust-toolchain.toml", false)] {
         let field = "toolchain.channel";
@@ -602,7 +608,7 @@ fn go_mod_directive(bytes: &[u8], directive: &str) -> Option<String> {
     None
 }
 
-fn row_for(
+pub fn row_for(
     root: &ProjectRoot,
     path: &str,
     field: &str,
@@ -612,7 +618,7 @@ fn row_for(
 }
 
 /// `row_for` for a reader that can refuse a malformed value outright.
-fn checked_row_for(
+pub fn checked_row_for(
     root: &ProjectRoot,
     path: &str,
     field: &str,
@@ -627,84 +633,74 @@ fn checked_row_for(
     }
 }
 
-/// Every consulted source for one ecosystem, in precedence order. Each row
-/// records presence and value separately: a missing file, a present file
-/// without the field, and a field found each have one spelling.
-pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>> {
-    let rows = match ecosystem {
-        "python" => vec![
-            row_for(root, ".python-version", "version", read_python_version)?,
-            checked_row_for(
-                root,
-                "pyproject.toml",
-                "project.requires-python",
-                read_pyproject_requires_python,
-            )?,
-            checked_row_for(
-                root,
-                "pyproject.toml",
-                "tool.poetry.dependencies.python",
-                read_pyproject_poetry_python,
-            )?,
-            row_for(
-                root,
-                "setup.cfg",
-                "options.python_requires",
-                read_setup_cfg_python,
-            )?,
-            row_for(root, "setup.py", "python_requires", read_setup_py_python)?,
-        ],
-        "node" => vec![
-            row_for(root, ".node-version", "version", read_node_version)?,
-            checked_row_for(
-                root,
-                "package.json",
-                "engines.node",
-                read_package_json_engines_node,
-            )?,
-        ],
-        "ruby" => vec![
-            row_for(root, ".ruby-version", "version", read_ruby_version)?,
-            row_for(root, ".tool-versions", "ruby", |bytes| {
-                read_tool_versions(bytes, "ruby")
-            })?,
-        ],
-        "go" => vec![
-            row_for(root, "go.mod", "go", read_go_mod)?,
-            row_for(root, "go.mod", "toolchain", read_go_mod_toolchain)?,
-        ],
-        "rust" => rust_rows(root)?,
-        "elixir" => vec![
-            row_for(root, ".tool-versions", "erlang", |bytes| {
-                read_tool_versions(bytes, "erlang")
-            })?,
-            row_for(root, ".tool-versions", "elixir", |bytes| {
-                read_tool_versions(bytes, "elixir")
-            })?,
-        ],
-        "dotnet" => vec![
-            checked_row_for(root, "global.json", "sdk.version", read_global_json)?,
-            checked_row_for(
-                root,
-                "global.json",
-                "sdk.rollForward",
-                read_global_json_roll_forward,
-            )?,
-        ],
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unknown ecosystem '{ecosystem}'"),
-            ))
-        }
-    };
-    Ok(rows)
+/// One ecosystem's toolchain sources: the rows it consults, in its own
+/// tools' precedence order, and the selection request those rows state.
+/// Each tailor supplies its own (`Tailor::toolchain_sources`) and
+/// `tailors::install_kernel_tables` installs them under the lock
+/// ecosystem names, so the kernel names no ecosystem: an eighth one changes
+/// nothing here.
+#[derive(Clone, Copy)]
+pub struct Sources {
+    /// Every consulted source, in precedence order. Each row records
+    /// presence and value separately: a missing file, a present file
+    /// without the field, and a field found each have one spelling.
+    pub discover: fn(&ProjectRoot) -> io::Result<Vec<InputRow>>,
+    /// The request the rows state ([`super::resolve::request_for`]).
+    pub request: fn(&[InputRow]) -> io::Result<super::select::Request>,
 }
 
-/// Every ecosystem this module knows, in lock order. Only the test that
-/// every tailor's lock ecosystem is one of them reads it.
-#[cfg(test)]
-pub const ECOSYSTEMS: [&str; 7] = ["python", "node", "ruby", "go", "rust", "elixir", "dotnet"];
+type Installed = Vec<(&'static str, Sources)>;
+
+static INSTALLED_SOURCES: OnceLock<Installed> = OnceLock::new();
+
+/// Install every ecosystem's sources, keyed by lock ecosystem name. The
+/// first call wins: a repeated installation of the same ecosystems is a
+/// no-op, a different set a programming error.
+pub fn install_sources(rows: Installed) {
+    let names = |rows: &Installed| rows.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+    let installed = INSTALLED_SOURCES.get_or_init(|| rows.clone());
+    if names(installed) != names(&rows) {
+        panic!(
+            "toolchain sources already installed for {:?}, not {:?}",
+            names(installed),
+            names(&rows)
+        );
+    }
+}
+
+/// The installed sources of `ecosystem`. Unit tests install the shipped
+/// tailors' on first use, as every binary entry point does.
+pub(crate) fn sources(ecosystem: &str) -> io::Result<Sources> {
+    #[cfg(test)]
+    tests::install_shipped_sources();
+    sources_in(INSTALLED_SOURCES.get(), ecosystem)
+}
+
+/// `ecosystem`'s entry in `installed`. A table nobody installed is a
+/// programming error with its own message, so it is never mistaken for a
+/// name no tailor claims.
+fn sources_in(installed: Option<&Installed>, ecosystem: &str) -> io::Result<Sources> {
+    let Some(rows) = installed else {
+        return Err(io::Error::other(
+            "toolchain sources not installed; the entry point must call tailors::install_kernel_tables first",
+        ));
+    };
+    rows.iter()
+        .find(|(name, _)| *name == ecosystem)
+        .map(|(_, sources)| *sources)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown ecosystem '{ecosystem}'"),
+            )
+        })
+}
+
+/// Every consulted source for one ecosystem, in precedence order
+/// ([`Sources::discover`]).
+pub fn discover(root: &ProjectRoot, ecosystem: &str) -> io::Result<Vec<InputRow>> {
+    (sources(ecosystem)?.discover)(root)
+}
 
 /// The named ecosystems, each with its consulted rows.
 pub fn discover_many<'a>(
@@ -722,6 +718,12 @@ pub fn discover_many<'a>(
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    /// The shipped tailors' sources, for unit tests that never pass
+    /// through a binary entry point.
+    pub(super) fn install_shipped_sources() {
+        crate::tailors::install_kernel_tables();
+    }
 
     fn project() -> (TempDir, ProjectRoot) {
         let temp = TempDir::new();
@@ -1346,5 +1348,27 @@ mod tests {
         std::os::unix::fs::symlink(&victim, temp.0.join("proj/.python-version")).unwrap();
         let error = discover(&root, "python").unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
+    }
+
+    /// A table nobody installed and a name no tailor claims are two
+    /// different mistakes, and each is told apart by its message.
+    #[test]
+    fn an_uninstalled_table_is_told_apart_from_an_unknown_name() {
+        let uninstalled = sources_in(None, "python").err().unwrap();
+        assert_eq!(uninstalled.kind(), io::ErrorKind::Other);
+        assert!(
+            uninstalled
+                .to_string()
+                .contains("tailors::install_kernel_tables"),
+            "{uninstalled}"
+        );
+        install_shipped_sources();
+        let unknown = sources_in(INSTALLED_SOURCES.get(), "perl").err().unwrap();
+        assert_eq!(unknown.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            unknown.to_string().contains("unknown ecosystem 'perl'"),
+            "{unknown}"
+        );
+        assert!(sources_in(INSTALLED_SOURCES.get(), "python").is_ok());
     }
 }

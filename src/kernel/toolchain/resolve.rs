@@ -7,6 +7,12 @@
 //! intersect rather than override. Nothing here reads a file, starts a
 //! program, or consults the host: it is a pure function of the rows.
 //!
+//! Which rows an ecosystem reads and what request they state is the
+//! ecosystem's own (`Tailor::toolchain_sources`, installed into
+//! [`super::input::Sources`]). The version grammars several tailors share
+//! (`value`, `exact_or_prefix`, `parse_version`, the PEP 440 and npm range
+//! lowerings) are `pub` here for them.
+//!
 //! An unsupported spelling is refused by name instead of being approximated.
 //! A toolchain that is off by a patch is a silently wrong build; a refusal
 //! that names the file and the next command is a two-minute fix.
@@ -17,7 +23,7 @@ use super::{invalid, Bundle, Catalog};
 use std::io;
 
 /// The next step every refusal in this module names.
-const UPDATE_HINT: &str = "run `tog update --toolchain`";
+pub const UPDATE_HINT: &str = "run `tog update --toolchain`";
 
 /// What `.python-version` accepts, spelled the way the refusal spells it.
 const PYTHON_HINT: &str =
@@ -25,7 +31,7 @@ const PYTHON_HINT: &str =
 
 /// The value a row holds, looked up by the (path, field) pair discovery
 /// recorded it under. A row with no value reads the same as no row.
-fn value<'a>(rows: &'a [InputRow], path: &str, field: &str) -> Option<&'a str> {
+pub fn value<'a>(rows: &'a [InputRow], path: &str, field: &str) -> Option<&'a str> {
     rows.iter()
         .find(|row| row.path.as_os_str() == path && row.field == field)
         .and_then(|row| row.value.as_deref())
@@ -33,7 +39,7 @@ fn value<'a>(rows: &'a [InputRow], path: &str, field: &str) -> Option<&'a str> {
 
 /// A fully spelled version is exact; a shorter one names the newest release
 /// under it. `3.12.14` is one release, `3.12` is a line.
-fn exact_or_prefix(version: Version) -> VersionRequest {
+pub fn exact_or_prefix(version: Version) -> VersionRequest {
     if version.parts().len() >= 3 {
         VersionRequest::Exact(version)
     } else {
@@ -41,7 +47,7 @@ fn exact_or_prefix(version: Version) -> VersionRequest {
     }
 }
 
-fn parse_version(field: &str, text: &str) -> io::Result<Version> {
+pub fn parse_version(field: &str, text: &str) -> io::Result<Version> {
     Version::parse(text).map_err(|error| invalid(format!("{field}: {error}; {UPDATE_HINT}")))
 }
 
@@ -50,7 +56,7 @@ fn parse_version(field: &str, text: &str) -> io::Result<Version> {
 /// same fields with, so the lock and the sync never disagree on what a
 /// constraint admits. A set that admits everything (`*`, `^3.9 || *`)
 /// states nothing and lowers to no request.
-fn python_specifiers(field: &str, text: &str) -> io::Result<Option<VersionRequest>> {
+pub fn python_specifiers(field: &str, text: &str) -> io::Result<Option<VersionRequest>> {
     let text = text.trim();
     let set = crate::kernel::pep440::SpecifierSet::parse(text, field)
         .map_err(|error| invalid(format!("{error}; {UPDATE_HINT}")))?;
@@ -67,7 +73,7 @@ fn python_specifiers(field: &str, text: &str) -> io::Result<Option<VersionReques
 /// selection also reads the file with, so a line the lock takes is a line
 /// the sync takes. A fully spelled version is exact, `X.Y` its newest
 /// patch; anything else is refused here rather than locked.
-fn python_version_request(text: &str) -> io::Result<VersionRequest> {
+pub fn python_version_request(text: &str) -> io::Result<VersionRequest> {
     use super::input::{python_version_line, PythonVersionRefusal};
     let invalid_request = || {
         invalid(format!(
@@ -224,7 +230,7 @@ fn kernel_term(whole: &str, term: &crate::kernel::semver::Term) -> io::Result<Ve
 /// [`VersionRequest::AnyOf`], or to nothing when any alternative is itself
 /// unconstrained (empty, `*`, `x`, `>=0`), since that alternative admits
 /// every release.
-fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
+pub fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
     let text = text.trim();
     let range = crate::kernel::semver::Range::parse(text).map_err(|_| node_unsupported(text))?;
     // A toolchain request never takes build metadata.
@@ -250,174 +256,18 @@ fn engines_node(text: &str) -> io::Result<Vec<VersionRequest>> {
 
 /// The rows that state a Python version as PEP 440 or Poetry specifiers,
 /// each intersected into the request.
-const PYTHON_SPECIFIER_ROWS: [(&str, &str); 4] = [
+pub const PYTHON_SPECIFIER_ROWS: [(&str, &str); 4] = [
     ("pyproject.toml", "project.requires-python"),
     ("pyproject.toml", "tool.poetry.dependencies.python"),
     ("setup.cfg", "options.python_requires"),
     ("setup.py", "python_requires"),
 ];
 
-/// The selection request an ecosystem's consulted rows state. `ecosystem`
-/// is the toolchain-input name (`python`, `node`, `rust`, `go`, `ruby`,
-/// `elixir`, `dotnet`); `rows` come from `input::discover` in its order.
+/// The selection request an ecosystem's consulted rows state
+/// ([`super::input::Sources::request`]). `ecosystem` is the lock ecosystem
+/// name; `rows` come from `input::discover` in its order.
 pub fn request_for(ecosystem: &str, rows: &[InputRow]) -> io::Result<Request> {
-    let mut request = Request::newest();
-    match ecosystem {
-        "python" => {
-            if let Some(text) = value(rows, ".python-version", "version") {
-                request = request.with("cpython", python_version_request(text)?);
-            }
-            for (path, field) in PYTHON_SPECIFIER_ROWS {
-                if let Some(text) = value(rows, path, field) {
-                    if let Some(specifiers) = python_specifiers(field, text)? {
-                        request = request.with("cpython", specifiers);
-                    }
-                }
-            }
-        }
-        "node" => {
-            if let Some(text) = value(rows, ".node-version", "version") {
-                request = request.with(
-                    "node",
-                    exact_or_prefix(parse_version(".node-version", text)?),
-                );
-            }
-            if let Some(text) = value(rows, "package.json", "engines.node") {
-                for term in engines_node(text)? {
-                    request = request.with("node", term);
-                }
-            }
-        }
-        "rust" => {
-            let legacy = value(rows, "rust-toolchain", "toolchain.channel");
-            let modern = value(rows, "rust-toolchain.toml", "toolchain.channel");
-            if let (Some(a), Some(b)) = (legacy, modern) {
-                if a != b {
-                    return Err(invalid(format!(
-                        "rust-toolchain says {a} and rust-toolchain.toml says {b}; make them agree, then {UPDATE_HINT}"
-                    )));
-                }
-            }
-            // The lists are not part of the version request, but both files
-            // are read and recorded, so two that ask for different components
-            // or targets, or name different local trees, are the same
-            // conflict as two channels. A local tree states no version: the
-            // tailor's external selection answers for it.
-            let present = |path: &str| {
-                rows.iter()
-                    .any(|row| row.path.as_os_str() == path && row.sha256.is_some())
-            };
-            if present("rust-toolchain") && present("rust-toolchain.toml") {
-                for (key, field) in super::input::RUST_TOOLCHAIN_REQUESTS
-                    .into_iter()
-                    .chain([super::input::RUST_TOOLCHAIN_PATH])
-                {
-                    let a = value(rows, "rust-toolchain", field);
-                    let b = value(rows, "rust-toolchain.toml", field);
-                    if a != b {
-                        return Err(invalid(format!(
-                            "rust-toolchain asks for {key} {} and rust-toolchain.toml asks for {}; \
-                             make them agree, then {UPDATE_HINT}",
-                            a.unwrap_or("none"),
-                            b.unwrap_or("none")
-                        )));
-                    }
-                }
-            }
-            if let Some(channel) = legacy.or(modern) {
-                if channel != "stable" {
-                    let version = Version::parse(channel).map_err(|_| {
-                        invalid(format!(
-                            "rust channel {channel} is not supported; use an exact version or stable"
-                        ))
-                    })?;
-                    request = request.with("rustc", exact_or_prefix(version));
-                }
-            }
-        }
-        "go" => {
-            let minimum = match value(rows, "go.mod", "go") {
-                Some(text) => Some(parse_version("go.mod go directive", text)?),
-                None => None,
-            };
-            match value(rows, "go.mod", "toolchain") {
-                Some(text) => {
-                    let exact = parse_version("go.mod toolchain directive", text)?;
-                    if let Some(minimum) = &minimum {
-                        if &exact < minimum {
-                            return Err(invalid(format!(
-                                "go.mod: toolchain go{exact} does not satisfy the go {minimum} minimum; {UPDATE_HINT}"
-                            )));
-                        }
-                    }
-                    request = request.with("go", VersionRequest::Exact(exact));
-                }
-                None => {
-                    if let Some(minimum) = minimum {
-                        request = request.with(
-                            "go",
-                            VersionRequest::Specifiers(vec![Specifier::new(Op::Ge, minimum)
-                                .map_err(|error| invalid(format!("go.mod: {error}")))?]),
-                        );
-                    }
-                }
-            }
-        }
-        "ruby" => {
-            let pinned = value(rows, ".ruby-version", "version");
-            let tools = value(rows, ".tool-versions", "ruby");
-            if let (Some(a), Some(b)) = (pinned, tools) {
-                if a != b {
-                    return Err(invalid(format!(
-                        ".ruby-version says {a} and .tool-versions says {b}; make them agree, then {UPDATE_HINT}"
-                    )));
-                }
-            }
-            if let Some(text) = pinned.or(tools) {
-                request = request.with(
-                    "ruby",
-                    exact_or_prefix(parse_version(".ruby-version", text)?),
-                );
-            }
-        }
-        "elixir" => {
-            if let Some(text) = value(rows, ".tool-versions", "erlang") {
-                request = request.with(
-                    "otp",
-                    exact_or_prefix(parse_version(".tool-versions erlang", text)?),
-                );
-            }
-            if let Some(text) = value(rows, ".tool-versions", "elixir") {
-                // `1.17.0-otp-27` states the Elixir build's OTP pairing, not
-                // a fourth version component.
-                let text = text.split("-otp-").next().unwrap_or(text);
-                request = request.with(
-                    "elixir",
-                    exact_or_prefix(parse_version(".tool-versions elixir", text)?),
-                );
-            }
-        }
-        "dotnet" => {
-            if let Some(text) = value(rows, "global.json", "sdk.version") {
-                if value(rows, "global.json", "sdk.rollForward") != Some("disable") {
-                    return Err(invalid(
-                        "global.json sdk.rollForward must be \"disable\" for an exact toolchain lock",
-                    ));
-                }
-                request = request.with(
-                    "dotnet-sdk",
-                    VersionRequest::Exact(parse_version("global.json sdk.version", text)?),
-                );
-            }
-        }
-        other => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unknown ecosystem '{other}'"),
-            ));
-        }
-    }
-    Ok(request)
+    (super::input::sources(ecosystem)?.request)(rows)
 }
 
 /// The bundle an ecosystem's rows select from `catalog`. The refusal names
