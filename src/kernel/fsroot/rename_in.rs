@@ -5,10 +5,9 @@ use super::{random_temp_name, refusal, rename_between, split_relative, ProjectRo
 use crate::kernel::store::{
     fd_stat, fsync_directory, open_file_at, same_inode, stat_at, unlink_if_same,
 };
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read as _};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -28,7 +27,8 @@ impl ProjectRoot {
     /// did. A directory or any other entry there is user state and is
     /// refused. A source on another filesystem than the project (scratch
     /// in a store elsewhere) is published as a copy of the checked file,
-    /// with its mode, under the same rules, and the source is removed.
+    /// with its permission bits, under the same rules, and the source is
+    /// removed.
     pub fn rename_in(&self, from: &Path, relative: &Path) -> io::Result<()> {
         let (Some(source_parent), Some(source_name)) = (from.parent(), from.file_name()) else {
             return Err(io::Error::new(
@@ -83,9 +83,9 @@ impl ProjectRoot {
         let parent_fd = held
             .as_ref()
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
-        let existing = match stat_at(parent_fd, name.as_bytes()) {
+        match stat_at(parent_fd, name.as_bytes()) {
             Ok(stat) => match stat.st_mode & libc::S_IFMT {
-                libc::S_IFREG | libc::S_IFLNK => Some(stat),
+                libc::S_IFREG | libc::S_IFLNK => {}
                 libc::S_IFDIR => {
                     return Err(refusal(format!(
                         "{} is a directory; refusing to replace it",
@@ -99,9 +99,9 @@ impl ProjectRoot {
                     )))
                 }
             },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
-        };
+        }
         // The name in scratch must still be the file checked above.
         let current = stat_at(source_dir.as_raw_fd(), source_name.as_bytes())?;
         if !same_inode(&current, &opened) {
@@ -118,15 +118,7 @@ impl ProjectRoot {
         ) {
             Ok(()) => fsync_directory(parent_fd),
             Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
-                self.copy_in(
-                    &source,
-                    &opened,
-                    relative,
-                    parent_fd,
-                    name,
-                    existing.as_ref(),
-                )
-                .map_err(|error| {
+                self.copy_in(&source, &opened, relative).map_err(|error| {
                     io::Error::new(
                         error.kind(),
                         format!(
@@ -148,29 +140,25 @@ impl ProjectRoot {
         }
     }
 
-    /// The cross-filesystem half of `rename_in`: the bytes and mode of the
-    /// source descriptor it checked, published through the held parent. A
-    /// symlink at the destination is unlinked first, the link the check
-    /// saw, so the copy replaces a link as the rename does. A link put back
-    /// in between is refused by the publish, never written through.
+    /// The cross-filesystem half of `rename_in`: the bytes of the source
+    /// descriptor it checked, published through the held parent with the
+    /// source's permission bits (not set-ID bits, which a write can clear).
+    /// The temporary is written and fsynced before one rename replaces the
+    /// destination, a symlink there included, so a failed copy leaves the
+    /// destination as it was.
     fn copy_in(
         &self,
         mut source: &fs::File,
         opened: &libc::stat,
         relative: &Path,
-        parent_fd: RawFd,
-        name: &OsStr,
-        existing: Option<&libc::stat>,
     ) -> io::Result<()> {
         let mut bytes = Vec::new();
         source.read_to_end(&mut bytes)?;
-        if let Some(stat) = existing.filter(|stat| stat.st_mode & libc::S_IFMT == libc::S_IFLNK) {
-            unlink_if_same(parent_fd, name.as_bytes(), stat, 0)?;
-        }
         self.publish_mode(
             relative,
             &bytes,
-            Some(opened.st_mode & 0o7777),
+            Some(opened.st_mode & 0o777),
+            true,
             &mut random_temp_name,
         )
     }

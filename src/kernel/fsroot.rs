@@ -219,7 +219,7 @@ impl ProjectRoot {
         bytes: &[u8],
         mode: libc::mode_t,
     ) -> io::Result<()> {
-        self.publish_mode(relative, bytes, Some(mode), &mut random_temp_name)
+        self.publish_mode(relative, bytes, Some(mode), false, &mut random_temp_name)
     }
 
     /// Point a project-relative symlink (a `.venv` or `node_modules`
@@ -1023,14 +1023,17 @@ impl ProjectRoot {
         bytes: &[u8],
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
-        self.publish_mode(relative, bytes, None, temp_name)
+        self.publish_mode(relative, bytes, None, false, temp_name)
     }
 
+    /// `replace_link` lets the rename replace a symlink at the destination
+    /// (the link itself, never what it names), as `rename_in` does.
     fn publish_mode(
         &self,
         relative: &Path,
         bytes: &[u8],
         mode: Option<libc::mode_t>,
+        replace_link: bool,
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
         let (parents, name) = split_relative(relative)?;
@@ -1042,6 +1045,7 @@ impl ProjectRoot {
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
         match stat_at(parent_fd, name.as_bytes()) {
             Ok(stat) => match stat.st_mode & libc::S_IFMT {
+                libc::S_IFLNK if replace_link => {}
                 libc::S_IFLNK => {
                     return Err(refusal(format!(
                         "{} is a symlink; refusing to replace it",
