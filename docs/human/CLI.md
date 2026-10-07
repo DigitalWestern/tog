@@ -619,7 +619,10 @@ extra, `[dependency-groups]`, a Poetry dev group) is not an exception: it
 is a choice, and no policy judges it. `status` lists it under the row as
 `optional <group> (<n> requirements) not installed: <where and why>`, and
 `--json` carries it as `optional_groups_skipped` (`group`, `detail`,
-`requirements`). `sbom` lists it as a `tog:optional-group-skipped`
+`requirements`). A list that cannot be read is reported as an unreadable
+exception list is: `unchecked` on an otherwise synced row, an
+`optional unreadable <why>` line under any other, and
+`optional_groups_skipped_error` in `--json`. `sbom` lists it as a `tog:optional-group-skipped`
 metadata property, apart from the `tog:exception:*` ones.
 
 **audit** answers "does this environment pass my policy?": it reads the

@@ -190,6 +190,9 @@ pub struct EcosystemStatus {
     /// Optional groups the sync left out because nobody requested them.
     /// Informational, never an exception (#71).
     pub optional_groups_skipped: Vec<OptionalGroupSkipped>,
+    /// Why that list could not be read, when it could not: reported the
+    /// way `exceptions_error` is, so both signed lists behave alike.
+    pub optional_groups_skipped_error: Option<String>,
 }
 
 impl EcosystemStatus {
@@ -241,6 +244,7 @@ pub fn status_in(platform: Platform, project: &ProjectRoot) -> io::Result<Vec<Ec
                 exceptions: Vec::new(),
                 exceptions_error: None,
                 optional_groups_skipped: Vec::new(),
+                optional_groups_skipped_error: None,
             });
             continue;
         };
@@ -260,15 +264,17 @@ pub fn status_in(platform: Platform, project: &ProjectRoot) -> io::Result<Vec<Ec
                 (Vec::new(), Some(error))
             }
         };
-        let optional_groups_skipped = match optional_groups_skipped(closure) {
-            Ok(groups) => groups,
-            Err(error) => {
-                if state == State::Synced {
-                    state = State::Unchecked(error.to_string());
+        let (optional_groups_skipped, optional_groups_skipped_error) =
+            match optional_groups_skipped(closure) {
+                Ok(groups) => (groups, None),
+                Err(error) => {
+                    let error = error.to_string();
+                    if state == State::Synced {
+                        state = State::Unchecked(error.clone());
+                    }
+                    (Vec::new(), Some(error))
                 }
-                Vec::new()
-            }
-        };
+            };
         rows.push(EcosystemStatus {
             ecosystem: ecosystem.into(),
             state,
@@ -276,6 +282,7 @@ pub fn status_in(platform: Platform, project: &ProjectRoot) -> io::Result<Vec<Ec
             exceptions,
             exceptions_error,
             optional_groups_skipped,
+            optional_groups_skipped_error,
         });
     }
     Ok(rows)
@@ -605,6 +612,7 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
                     "exceptions": row.exceptions,
                     "exceptions_error": row.exceptions_error,
                     "optional_groups_skipped": row.optional_groups_skipped,
+                    "optional_groups_skipped_error": row.optional_groups_skipped_error,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -656,10 +664,14 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
             out.push('\n');
         }
         // An unchecked row already printed this reason as its own.
-        if let Some(error) = &row.exceptions_error {
+        for (label, error) in [
+            ("exception", &row.exceptions_error),
+            ("optional ", &row.optional_groups_skipped_error),
+        ] {
+            let Some(error) = error else { continue };
             if !matches!(&row.state, State::Unchecked(why) if why == error) {
                 out.push_str(&printable(&format!(
-                    "{:width$}    exception   unreadable  {error}",
+                    "{:width$}    {label}   unreadable  {error}",
                     ""
                 )));
                 out.push('\n');
@@ -1781,6 +1793,48 @@ mod tests {
         assert!(
             text.contains("cargo   missing     .tog/cargo-home"),
             "{text}"
+        );
+
+        // A malformed optional-group list on a row that is not synced keeps
+        // the row's state and is reported beside it, as an unreadable
+        // exception list is (#552).
+        write_closure(
+            dir,
+            "cargo",
+            host,
+            json!({"cargo_lock_sha256": sha256_file(&dir.join("Cargo.lock")).unwrap(),
+                   "plan": {"rust_version": "1.96.1", "crates": []},
+                   "optional_groups_skipped": "not a list"}),
+        );
+        let rows = status(platform, dir).unwrap();
+        assert_eq!(
+            rows[1].state,
+            State::ProjectionMissing(".tog/cargo-home".into())
+        );
+        let error = rows[1].optional_groups_skipped_error.clone().unwrap();
+        assert!(
+            error.contains("malformed optional_groups_skipped"),
+            "{error}"
+        );
+        let text = render_status(dir, &rows, false).unwrap();
+        assert!(
+            text.contains("          optional    unreadable  ") && text.contains(&error),
+            "{text}"
+        );
+        let json: Value = serde_json::from_str(&render_status(dir, &rows, true).unwrap()).unwrap();
+        assert_eq!(
+            json["ecosystems"][1]["optional_groups_skipped_error"],
+            json!(error)
+        );
+        assert_eq!(
+            json["ecosystems"][0]["optional_groups_skipped_error"],
+            Value::Null
+        );
+        write_closure(
+            dir,
+            "cargo",
+            host,
+            json!({"cargo_lock_sha256": sha256_file(&dir.join("Cargo.lock")).unwrap(), "plan": {"rust_version": "1.96.1", "crates": []}}),
         );
 
         // A pre-field Go closure cannot verify the selected toolchain, even
