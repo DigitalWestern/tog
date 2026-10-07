@@ -153,6 +153,50 @@ fn hard_links_contained(kept: &[(&Entry, Vec<&str>)], strip: usize) -> io::Resul
     Ok(())
 }
 
+/// The stored name of the regular file the hard link `link` names, under
+/// extraction's hard-link rules with nothing stripped: every name in
+/// `entries` must be contained, and every hard link passes the checks
+/// [`validate_with_options`] applies to hard links, so the target is an
+/// earlier regular file, not the link itself, and neither is written
+/// twice. Symlinks and folded names are not checked: nothing is written to
+/// disk, so neither can change which bytes are read. A target spelled
+/// `pkg/./a` or `pkg/a/` finds the member stored as `pkg/a`, as tar would.
+pub(super) fn hard_link_target<'a>(entries: &'a [Entry], link: &Entry) -> io::Result<&'a str> {
+    let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
+    for entry in entries {
+        let components = contained_components(&entry.name)
+            .map_err(|reason| err(format!("archive entry {:?}: {reason}", entry.name)))?;
+        let kept_name = components
+            .into_iter()
+            .filter(|component| *component != ".")
+            .collect();
+        kept.push((entry, kept_name));
+    }
+    hard_links_contained(&kept, 0)?;
+    let target = link.link.as_deref().unwrap_or("");
+    let wanted: Vec<&str> = contained_components(target)
+        .map_err(|reason| err(format!("archive hard link {:?}: {reason}", link.name)))?
+        .into_iter()
+        .filter(|component| *component != ".")
+        .collect();
+    kept.iter()
+        .find(|(entry, name)| entry.kind == EntryKind::File && *name == wanted)
+        .map(|(entry, _)| entry.name.as_str())
+        .ok_or_else(|| err(format!("archive hard link {:?}: no target", link.name)))
+}
+
+/// `name` as extraction compares it with nothing stripped: its contained
+/// components, `.` dropped, so `pkg/./a` and `pkg/a/` are both `pkg/a`.
+pub(super) fn kept_name(name: &str) -> io::Result<String> {
+    let components = contained_components(name)
+        .map_err(|reason| err(format!("archive entry {name:?}: {reason}")))?;
+    Ok(components
+        .into_iter()
+        .filter(|component| *component != ".")
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
 /// An approximation of the form under which APFS compares two names:
 /// canonically decomposed (NFD, so `é` and `e` plus a combining acute are
 /// one), full Unicode case-folded (so `SS` and `ß` meet, as do Turkish
