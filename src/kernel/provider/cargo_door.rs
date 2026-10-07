@@ -88,17 +88,10 @@ pub fn cargo_spec(rust_obj: &Path, lock_root: &Path, args: &[&str]) -> DelegateS
 /// The words a TOML parse error of `name` is reported in: the position
 /// only. A parser's own message quotes the source line, and a project file
 /// can be a symlink to a secret (the signing key's `ed25519:<seed>` line),
-/// so no byte of the file is ever echoed.
+/// so no byte of the file is ever echoed. The position is
+/// `kernel::tomlerr`'s, the one rule every TOML reader shares.
 pub fn toml_refusal(name: &str, text: &str, error: &toml::de::Error) -> io::Error {
-    let at = error
-        .span()
-        .and_then(|span| text.get(..span.start))
-        .map(|before| {
-            let line = before.matches('\n').count() + 1;
-            let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
-            format!(" at line {line}, column {column}")
-        })
-        .unwrap_or_default();
+    let at = crate::kernel::tomlerr::position(text, error);
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!("{name} is not valid TOML{at}"),
