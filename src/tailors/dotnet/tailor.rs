@@ -194,6 +194,10 @@ impl Tailor for Dotnet {
             })
     }
 
+    fn runtime_programs(&self) -> &'static [&'static str] {
+        &["dotnet"]
+    }
+
     fn run_env(
         &self,
         ctx: &Context,
