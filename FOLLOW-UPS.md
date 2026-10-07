@@ -49,6 +49,11 @@ None open.
 
 ## Open work, each its own pull request
 
+- **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
+  - #612 held project root: go's post-build move, `tog fmt`, and `file:` packing still act by path.
+  - #613 archives: extraction should refuse duplicate members like `read_member`, and packed `file:` tarballs need a fixed gzip header.
+  - #614 test gaps: fetch caps and secrets, an EPERM rollback, a dropped supervise session, the real signing-key source, a real llvm host, an offline cli case.
+  - #615 design questions: SRI candidate choice, cargo's symlinked members, the ecosystem-arm check in `kernel/provider`, the `hard_link_target` doc.
 - **Found in the `tog <file>` work (2026-10-05).** One issue and one PR each:
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#466: ci: GitHub Actions job startup blocked by account billing or spending limit.** Actions jobs cannot start because of account billing or spending-limit restrictions. Pick: owner repairs account access, use documented local checks meanwhile.
