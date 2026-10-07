@@ -421,7 +421,10 @@ for tree in "$@"; do
     if [ -d "$tree/bin" ]; then
       for entry in "$tree"/bin/*; do echo "bin $(basename "$entry")"; done
     fi
-    [ -e "$tree/include/llvm" ] && echo include-llvm
+    # Curation may keep the directories of a dropped tree, so look for
+    # files: a header the view kept is a symlink into /.tog-host-files.
+    [ -n "$(find "$tree/include/llvm" \( -type f -o -type l \) -print -quit 2>/dev/null)" ] &&
+      echo include-llvm
     for archive in "$tree"/lib/*.a; do [ -e "$archive" ] && echo "archive $archive"; done
     if [ -x "$tree/bin/clang" ]; then
       resource=$("$tree/bin/clang" -print-resource-dir)
