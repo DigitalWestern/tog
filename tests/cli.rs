@@ -5066,18 +5066,25 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
         text(&out.stderr),
         "tog: error: unknown command 'dir.py'\nRun 'tog --help' for usage.\n"
     );
-    // A file of an ecosystem this project does not have is refused by
-    // name, never run with whatever `ruby` the host has, and no sync starts.
+    // A file of an ecosystem this project does not have runs on that
+    // ecosystem's runtime alone, never on whatever `ruby` the host has, and
+    // no sync starts. The project's `.ruby-version` names a Ruby no catalog
+    // has, so the selection refuses offline: proof the file took that road.
     std::fs::write(project.0.join("tool.rb"), "").unwrap();
-    let out = tog(&project.0, &home.0, &["tool.rb"]);
+    std::fs::write(project.0.join(".ruby-version"), "0.0.1\n").unwrap();
+    let out = tog(&project.0, &home.0, &["-v", "tool.rb"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("'tool.rb' is a ruby file, but there is no ruby project here"),
+        stderr.contains(
+            "'tool.rb' is a ruby file and there is no ruby project here: running it on the ruby \
+             runtime alone"
+        ),
         "{stderr}"
     );
-    assert!(stderr.contains("Gemfile"), "{stderr}");
+    assert!(stderr.contains("0.0.1"), "{stderr}");
     assert!(!stderr.contains("syncing first"), "{stderr}");
+    std::fs::remove_file(project.0.join(".ruby-version")).unwrap();
     // A file tog does not run by extension: exit 2, pointing at `tog run`.
     std::fs::write(project.0.join("notes.txt"), "").unwrap();
     let out = tog(&project.0, &home.0, &["notes.txt"]);
@@ -5112,14 +5119,27 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
         "{stderr}"
     );
     assert!(!stderr.contains("is a python file"), "{stderr}");
-    // Outside any project the file is refused the same way as in the
-    // wrong one.
+    // Outside any project the file takes the lone-file road too, on the
+    // shipped runtime: with the network cut, realizing it refuses, and
+    // nothing ran on the host's `python`.
     let empty = TempDir::boundary("cli-file-empty");
-    std::fs::write(empty.0.join("app.py"), "").unwrap();
-    let out = tog(&empty.0, &home.0, &["app.py"]);
+    std::fs::write(empty.0.join("app.py"), "print('host python ran')\n").unwrap();
+    let out = tog_offline(&empty.0, &home.0, &["-v", "app.py"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("no python project here"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "'app.py' is a python file and there is no python project here: running it on the \
+             python runtime alone"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("syncing first"), "{stderr}");
+    assert!(
+        !stderr.contains("no python project here (tog looks for"),
+        "{stderr}"
+    );
+    assert_eq!(text(&out.stdout), "", "{stderr}");
 }
 
 /// A TypeScript file on a Node too old to strip types is refused before
@@ -5141,4 +5161,19 @@ fn a_typescript_file_on_a_node_too_old_for_it_is_refused_naming_the_version() {
     );
     assert!(stderr.contains("tog update --toolchain node"), "{stderr}");
     assert!(!stderr.contains("syncing first"), "{stderr}");
+    // In a project without Node the file runs on the Node runtime alone,
+    // by the same rule, refused before anything is downloaded.
+    std::fs::remove_file(project.0.join("package.json")).unwrap();
+    std::fs::write(project.0.join("go.mod"), "module m\n\ngo 1.22\n").unwrap();
+    let out = tog(&project.0, &home.0, &["-v", "app.ts"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("running it on the node runtime alone"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("'app.ts': the project's Node is 22.4.0, which cannot run TypeScript"),
+        "{stderr}"
+    );
 }

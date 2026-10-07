@@ -102,6 +102,10 @@ pub enum Command {
     Run {
         command: Vec<String>,
     },
+    /// `tog <file>` for a file of an ecosystem the project does not have,
+    /// or outside any project: never parsed from argv, `commands::resolve`
+    /// builds it. The file runs on the runtime `x` would use there.
+    File(FileRun),
     /// `env [--shell <shell>]`: the environment `run` would give a child,
     /// printed as shell assignments. `None` leaves the choice to the
     /// command, which reads `$SHELL`: the grammar stays pure.
@@ -209,6 +213,15 @@ impl Command {
                 | Command::Plan { json: true }
         )
     }
+}
+
+/// `Command::File`: the ecosystem whose runtime runs `file`, and the
+/// arguments after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRun {
+    pub ecosystem: String,
+    pub file: String,
+    pub args: Vec<String>,
 }
 
 /// `tog attest --ledger-export` and `--ledger-import`.

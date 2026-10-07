@@ -16,7 +16,7 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
 use crate::tailors::{
-    ClosureListing, FileRunner, PackageRow, RegistryTool, SourceFile, SyncRequest, Tailor,
+    ClosureListing, FileRunner, LoneFile, PackageRow, RegistryTool, SourceFile, SyncRequest, Tailor,
 };
 use serde_json::Value;
 use std::io;
@@ -175,6 +175,17 @@ impl Tailor for Python {
 
     fn refused_command(&self, cmd: &[String]) -> Option<String> {
         python::run_refusal::refused_command(cmd)
+    }
+
+    /// A lone script runs on the interpreter alone, with no environment.
+    fn lone_file(
+        &self,
+        ctx: &Context,
+        toolchain: &Selected,
+        _extension: &str,
+    ) -> io::Result<Option<LoneFile>> {
+        let runtime = python::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        Ok(Some(LoneFile::in_bin(&runtime, "python3")))
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {

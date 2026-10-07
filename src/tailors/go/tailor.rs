@@ -18,7 +18,7 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
 use crate::tailors::{
-    ClosureListing, DoctorCheck, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor,
+    ClosureListing, DoctorCheck, FileRunner, LoneFile, PackageRow, SourceFile, SyncRequest, Tailor,
 };
 use serde_json::Value;
 use std::io;
@@ -201,6 +201,24 @@ impl Tailor for Go {
         let project = ProjectRoot::open(root)?;
         let (go_obj, modcache) = realize_and_project(ctx, &project, toolchain, attribution)?;
         go::build_sandboxed(ctx.platform, &ctx.activity, root, &go_obj, &modcache, args)
+    }
+
+    /// `go run` on a lone file with module mode off, so a go.mod above the
+    /// file does not apply: the standard library only, since nothing locks
+    /// a module to download (`GOPROXY=off`, an empty scratch module cache),
+    /// and never another toolchain (`GOTOOLCHAIN=local`).
+    fn lone_file(
+        &self,
+        ctx: &Context,
+        toolchain: &Selected,
+        _extension: &str,
+    ) -> io::Result<Option<LoneFile>> {
+        let runtime = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        let scratch = ctx.store.run_home(&ctx.project_dir(), "go")?;
+        let mut lone = LoneFile::in_bin(&runtime, "go");
+        lone.program.push("run".into());
+        lone.env = go::lone_env(&runtime, &scratch)?;
+        Ok(Some(lone))
     }
 
     fn runtime_programs(&self) -> &'static [&'static str] {
