@@ -164,6 +164,29 @@ fn scripts_in_view(
     }
 }
 
+/// What an `install-script-failed` exception and its strict-policy error
+/// tell the user to try.
+const ARTIFACTS_HINT: &str =
+    "If this package downloads files at install time, declare them as verified inputs in package.json — \
+     \"tog\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
+     placed where the package's downloader caches them (see README).";
+
+/// How much of a script failure's message the exception detail keeps.
+const DETAIL_CHARS: usize = 300;
+
+/// The `install-script-failed` detail for `error`: its first
+/// `DETAIL_CHARS` characters and `ARTIFACTS_HINT`. A script that failed in
+/// both views carries the whole-host retry's error first
+/// (`hostfallback::hermetic_first`), so the cut keeps the error left to
+/// fix and drops the hermetic attempt's, not the other way round.
+fn script_failure_detail(error: &io::Error) -> String {
+    let error = error.to_string();
+    format!(
+        "{}. {ARTIFACTS_HINT}",
+        error.chars().take(DETAIL_CHARS).collect::<String>()
+    )
+}
+
 /// One package's lifecycle work, ready to run: where it lives, the
 /// snapshots a failed attempt is restored from, and the sandbox mounts and
 /// environment every attempt gets.
@@ -223,11 +246,7 @@ impl PackageScripts<'_> {
             ScriptsOutcome::Stop(e) => return Err(e),
             ScriptsOutcome::Failed(e) => e,
         };
-        let hint = "If this package downloads files at install time, declare them as verified inputs in package.json — \
-                    \"tog\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
-                    placed where the package's downloader caches them (see README).";
-        let error = e.to_string();
-        let detail = format!("{}. {hint}", error.chars().take(300).collect::<String>());
+        let detail = script_failure_detail(&e);
         if let Err(policy_error) = crate::kernel::policy::record(
             crate::kernel::policy::INSTALL_SCRIPT_FAILED,
             &p.path,
@@ -235,7 +254,7 @@ impl PackageScripts<'_> {
         ) {
             return Err(err(format!(
                 "{}: install script failed under the network-denied build \
-                 sandbox: {e}. {hint} ({policy_error})",
+                 sandbox: {e}. {ARTIFACTS_HINT} ({policy_error})",
                 p.path
             )));
         }
@@ -404,6 +423,37 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
+    }
+
+    /// The exception detail of a script that failed in both views is cut at
+    /// `DETAIL_CHARS`, and what it keeps is the whole-host retry's error:
+    /// a hermetic error longer than the cut, which led before #609, no
+    /// longer hides it.
+    #[test]
+    fn the_detail_of_a_script_failing_in_every_view_keeps_the_retrys_error() {
+        let hermetic = format!("zlib.h: No such file or directory {}", "-".repeat(400));
+        let retry = "node-gyp: could not find node headers for v24";
+        let (outcome, _) = scripted(
+            &identity(Some(RUNTIME_ONLY_VIEW)),
+            &crate::kernel::policy::Policy::default(),
+            vec![
+                failed(io::ErrorKind::Other, &hermetic),
+                failed(io::ErrorKind::Other, retry),
+            ],
+        );
+        let ScriptsOutcome::Failed(error) = outcome else {
+            panic!("a script failing in every view is not a script failure: {outcome:?}");
+        };
+        let detail = script_failure_detail(&error);
+        let kept = detail.strip_suffix(&format!(". {ARTIFACTS_HINT}")).unwrap();
+        assert_eq!(kept.chars().count(), DETAIL_CHARS, "{detail}");
+        assert!(
+            kept.starts_with("the build against this machine's whole /usr failed (postinstall: "),
+            "{detail}"
+        );
+        assert!(kept.contains(retry), "{detail}");
+        assert!(!kept.contains(&hermetic), "{detail}");
+        assert!(error.to_string().contains(&hermetic), "{error}");
     }
 
     #[test]
