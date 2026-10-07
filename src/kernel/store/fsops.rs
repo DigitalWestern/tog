@@ -630,12 +630,20 @@ fn reopen_private_directory(
 /// actually stops the removal, and a directory that is already writable is
 /// still removed.
 fn restore_owner_bits(dirfd: RawFd, mode: libc::mode_t) -> io::Result<()> {
+    match fchmod_dir(dirfd, mode | 0o700) {
+        Err(error) if error.raw_os_error() != Some(libc::EPERM) => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// fchmod the directory held by `dirfd`. A test can make it fail with EPERM.
+fn fchmod_dir(dirfd: RawFd, mode: libc::mode_t) -> io::Result<()> {
+    if fchmod_eperm_failpoint() {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
     // SAFETY: dirfd is borrowed by the caller.
-    if unsafe { libc::fchmod(dirfd, mode | 0o700) } != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EPERM) {
-            return Err(error);
-        }
+    if unsafe { libc::fchmod(dirfd, mode) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -726,6 +734,24 @@ fn remove_tree_failpoint() {
 
 #[cfg(not(test))]
 fn remove_tree_failpoint() {}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to make `restore_owner_bits` see its fchmod fail with
+    /// EPERM, as it does on a directory owned by another user, without
+    /// needing a second user to own one.
+    static FCHMOD_EPERM_FAILPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fchmod_eperm_failpoint() -> bool {
+    FCHMOD_EPERM_FAILPOINT.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn fchmod_eperm_failpoint() -> bool {
+    false
+}
 
 /// Hold the directory a tree is removed from. Every use of it is a `*at`
 /// call relative to it (fstatat, openat, unlinkat), never a listing, so on
@@ -1013,6 +1039,48 @@ mod remove_tree_tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
         assert_eq!(fs::read_to_string(tree.join("new")).unwrap(), "kept");
+    }
+
+    fn with_fchmod_eperm<T>(run: impl FnOnce() -> T) -> T {
+        FCHMOD_EPERM_FAILPOINT.with(|slot| slot.set(true));
+        let result = run();
+        FCHMOD_EPERM_FAILPOINT.with(|slot| slot.set(false));
+        result
+    }
+
+    /// A directory whose owner bits cannot be restored (fchmod says EPERM,
+    /// as for a directory another user owns) does not stop the removal on
+    /// its own: a tree that is already writable is still removed.
+    #[test]
+    fn an_eperm_fchmod_on_a_writable_tree_still_removes_it() {
+        let temp = TempDir::named("remove-tree-eperm-writable");
+        let tree = temp.0.join("tree");
+        fs::create_dir_all(tree.join("nested")).unwrap();
+        fs::write(tree.join("nested/file"), "data").unwrap();
+        with_fchmod_eperm(|| remove_tree(&tree)).unwrap();
+        assert!(fs::symlink_metadata(&tree).is_err());
+    }
+
+    /// When the EPERM fchmod leaves a directory unwritable, the error
+    /// reported is the one that actually stops the removal: unlinking its
+    /// entry is refused (EACCES), not the swallowed EPERM.
+    #[test]
+    fn an_eperm_fchmod_reports_the_unlink_that_stops_the_removal() {
+        let temp = TempDir::named("remove-tree-eperm-readonly");
+        let tree = temp.0.join("tree");
+        let locked = tree.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("file"), "data").unwrap();
+        mode(&locked, 0o500);
+        if fs::write(locked.join("probe"), "").is_ok() {
+            mode(&locked, 0o700);
+            eprintln!("skipped: this user writes a 0500 directory (root or CAP_DAC_OVERRIDE)");
+            return;
+        }
+        let error = with_fchmod_eperm(|| remove_tree(&tree)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES), "{error}");
+        assert_eq!(fs::read_to_string(locked.join("file")).unwrap(), "data");
+        mode(&locked, 0o700);
     }
 
     /// A commit that finds its object already published (a cache hit)
