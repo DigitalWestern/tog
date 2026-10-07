@@ -130,5 +130,4 @@ None open.
 
 
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
-- **#559: no e2e for a Ruby gem that really falls back.** No rubygems.org gem needs a header this host has outside glibc and the native library set, and the host view has no test hook to add one. Options: a debug-build-only hook that binds a scratch include directory into the full view, or a gem source other than rubygems.org for fixtures. The other four items shipped or were decided in the #559 PR.
 - **#560: e2e layouts with HOME inside the project.** Python and Ruby tests that the PR 7 and PR 8 doors will refuse. One checklist.

@@ -105,12 +105,52 @@ pub(super) fn build_env(set: &Path, host_view: HostView) -> Vec<(String, String)
     env
 }
 
+/// Add the test-only stand-in for host development packages at `dev`
+/// (`hostview::test_host_dev_files`) to a whole-host attempt's `env`: its
+/// `usr/include` and `usr/lib` go after whatever `CPATH` and `LIBRARY_PATH`
+/// already name, so the set still wins where it has a library, and the
+/// host's own directories, which gcc searches last, come after both.
+pub(super) fn add_host_dev_files(env: &mut Vec<(String, String)>, dev: &Path) {
+    for (key, subdir) in [("CPATH", "usr/include"), ("LIBRARY_PATH", "usr/lib")] {
+        let dir = dev.join(subdir).display().to_string();
+        match env.iter_mut().find(|(k, _)| k == key) {
+            Some((_, value)) => {
+                value.push(':');
+                value.push_str(&dir);
+            }
+            None => env.push((key.to_string(), dir)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
         env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// The stand-in for host development packages goes after the set on
+    /// gcc's search paths, and only where the attempt already has them.
+    #[test]
+    fn host_dev_files_follow_the_set_on_the_compilers_search_paths() {
+        let dev = Path::new("/scratch/host");
+        let mut env = build_env(Path::new("/store/set"), HostView::Full);
+        add_host_dev_files(&mut env, dev);
+        assert_eq!(
+            lookup(&env, "CPATH"),
+            Some("/store/set/include:/scratch/host/usr/include")
+        );
+        assert_eq!(
+            lookup(&env, "LIBRARY_PATH"),
+            Some("/store/set/lib:/scratch/host/usr/lib")
+        );
+        assert_eq!(env.iter().filter(|(k, _)| k == "CPATH").count(), 1);
+        let mut bare = Vec::new();
+        add_host_dev_files(&mut bare, dev);
+        assert_eq!(lookup(&bare, "CPATH"), Some("/scratch/host/usr/include"));
+        assert_eq!(lookup(&bare, "LIBRARY_PATH"), Some("/scratch/host/usr/lib"));
     }
 
     /// The runtime-only attempt's pkg-config sees only the set; the

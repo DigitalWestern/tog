@@ -564,13 +564,35 @@ pub(crate) fn key_ids(paths: &[PathBuf]) -> Vec<FileId> {
     ids
 }
 
-/// Refuse when any regular file under `root` (not following symlinks,
-/// every depth, hidden directories included, `exclude`d paths skipped) is
-/// one of `keys`: a hard link to the signing key inside a tree a tool reads
-/// would put the key in front of that tool, and in front of the user in
-/// the tool's parse error.
-pub fn refuse_key_links_under(
-    root: &Path,
+/// Refuse when any regular file under the directory `root` holds (not
+/// following symlinks, every depth, hidden directories included,
+/// `exclude`d paths skipped) is one of `keys`: a hard link to the signing
+/// key inside a tree a tool reads would put the key in front of that tool,
+/// and in front of the user in the tool's parse error. Walked from the
+/// descriptor (`/proc/self/fd/<n>` on Linux) rather than the path: a tree
+/// renamed or replaced after tog opened it is not what is scanned, while
+/// the sandbox mounts the held one (#612). Messages name the path the root
+/// was opened at.
+pub fn refuse_key_links_in(
+    root: &crate::kernel::fsroot::ProjectRoot,
+    keys: &[FileId],
+    exclude: &[super::snapshot::PathGlob],
+) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let walk = {
+        use std::os::fd::AsRawFd as _;
+        PathBuf::from(format!("/proc/self/fd/{}", root.as_raw_fd()))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let walk = root.current_name()?;
+    refuse_key_links_walk(&walk, root.path(), keys, exclude)
+}
+
+/// The walk of `refuse_key_links_in`: below `walk`, with each entry named
+/// below `display`.
+fn refuse_key_links_walk(
+    walk: &Path,
+    display: &Path,
     keys: &[FileId],
     exclude: &[super::snapshot::PathGlob],
 ) -> io::Result<()> {
@@ -580,13 +602,13 @@ pub fn refuse_key_links_under(
     }
     let mut stack = vec![PathBuf::new()];
     while let Some(relative) = stack.pop() {
-        let entries = match fs::read_dir(root.join(&relative)) {
+        let entries = match fs::read_dir(walk.join(&relative)) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(io::Error::new(
                     error.kind(),
-                    format!("read {}: {error}", root.join(&relative).display()),
+                    format!("read {}: {error}", display.join(&relative).display()),
                 ))
             }
         };
@@ -605,7 +627,7 @@ pub fn refuse_key_links_under(
                     format!(
                         "{} is the signing key (the same file, by device and inode); move the \
                          key out of the project and point TOG_SIGNING_KEY at it",
-                        entry.path().display()
+                        display.join(&child).display()
                     ),
                 ));
             }
@@ -1399,19 +1421,19 @@ mod tests {
         }
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("Cargo.toml"), b"[package]\n").unwrap();
-        refuse_key_links_under(&root, &ids, &[]).unwrap();
+        refuse_key_links_walk(&root, &root, &ids, &[]).unwrap();
         fs::hard_link(&key, deep.join("config.toml")).unwrap();
-        let error = refuse_key_links_under(&root, &ids, &[]).unwrap_err();
+        let error = refuse_key_links_walk(&root, &root, &ids, &[]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(!error.to_string().contains("SEEDBYTES"));
         // An excluded tree is not walked.
         let exclude = [PathGlob::new(".hidden").unwrap()];
-        refuse_key_links_under(&root, &ids, &exclude).unwrap();
+        refuse_key_links_walk(&root, &root, &ids, &exclude).unwrap();
         // A symlink is not followed (the stage copies it as a link, and
         // the confined tool cannot reach its target).
         fs::remove_file(deep.join("config.toml")).unwrap();
         std::os::unix::fs::symlink(&key, root.join("link.toml")).unwrap();
-        refuse_key_links_under(&root, &ids, &[]).unwrap();
+        refuse_key_links_walk(&root, &root, &ids, &[]).unwrap();
     }
 
     #[test]

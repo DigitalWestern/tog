@@ -108,6 +108,14 @@ impl GemInstall<'_> {
                 env.extend(super::native_libs::build_env(set, host_view));
                 read.push(set.to_path_buf());
             }
+            // The test stand-in for host development packages is part of
+            // the whole host, so only the whole-host attempt sees it.
+            if host_view == HostView::Full {
+                if let Some(dev) = crate::kernel::hostview::test_host_dev_files() {
+                    super::native_libs::add_host_dev_files(&mut env, &dev);
+                    read.push(dev);
+                }
+            }
             let spec = BuildSpec {
                 argv,
                 cwd: home.clone(),

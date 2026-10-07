@@ -857,6 +857,21 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say("DONE");
             0
         }
+        // A child that never starts: with TOG_SUPERVISE_FAILPOINT
+        // `before-spawn` a signal arrives just before the spawn, which then
+        // fails. The session ends without concluding, and a wrapped error
+        // from the command still names the signal.
+        "signal-then-spawn-fail" => {
+            let mut command = Command::new("/nonexistent/tog-supervise-missing-program");
+            match supervise::status(&mut command, activity) {
+                Ok(status) => say(&format!("SPAWN_OK {}", code_of(status))),
+                Err(error) => say(&format!("SPAWN_ERR {:?}", error.kind())),
+            }
+            let retry = std::io::Error::new(std::io::ErrorKind::Interrupted, "retry later");
+            say(&format!("STOP {:?}", supervise::stop_signal(&retry)));
+            say("DONE");
+            0
+        }
         "blocked-orphan" => {
             let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
             let result = supervise::output(&mut drained_child(&fifo), activity);
@@ -2259,6 +2274,35 @@ fn interrupts_at_registration_and_departure_are_reported() {
             assert_eq!(harness.finish().code(), Some(0));
             store.wait_until_free();
         }
+    }
+}
+
+/// A session dropped without concluding (its child failed to start)
+/// still records the signal that arrived during it, so a later wrapped
+/// `Interrupted` error exits 128+signal rather than 1.
+#[test]
+fn a_signal_before_a_failed_spawn_is_still_recorded() {
+    for (name, number) in [("INT", 2), ("HUP", 1), ("QUIT", 3)] {
+        let store = TempStore::new(&format!("signal-spawn-fail-{name}"));
+        let gate = store.fifo("spawn");
+        let mut harness =
+            spawn_harness_with("signal-then-spawn-fail", &store, None, None, |command| {
+                command
+                    .env("TOG_SUPERVISE_FAILPOINT", "before-spawn")
+                    .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate)
+                    .env("TOG_SUPERVISE_BOUNDARY_SIGNAL", name);
+            });
+        harness.markers.wait_for("FAILPOINT PAUSED before-spawn");
+        release_fifo(&gate);
+        harness.markers.wait_for("DONE");
+        let text = harness.markers.text();
+        assert!(text.contains("SPAWN_ERR NotFound"), "{name}: {text}");
+        assert!(
+            text.contains(&format!("STOP Some({number})")),
+            "{name}: {text}"
+        );
+        assert_eq!(harness.finish().code(), Some(0));
+        store.wait_until_free();
     }
 }
 

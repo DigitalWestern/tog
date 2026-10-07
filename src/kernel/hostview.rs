@@ -23,7 +23,8 @@
 //! (`Curation::Subtree`), so an explicit `-I` or `-L` into it finds no more
 //! than the default paths do (#331). The compiler's own directories (`gcc`,
 //! `clang`, and a versioned `llvm-<N>`'s `bin`) are bound whole; the rest of
-//! `llvm-<N>`, LLVM's own headers and archives, is curated like any tree.
+//! `llvm-<N>`, LLVM's own headers (its whole `include`) and archives, is
+//! curated like any tree.
 
 use crate::kernel::ldcache::MovedLibrary;
 use crate::kernel::sandbox::{host_layout_error, push_arg};
@@ -421,13 +422,13 @@ enum Placement {
 /// `RuntimeOnly` view. One rule for both, so a `-L` into a curated
 /// subdirectory finds no more than the default paths do.
 ///
-/// Dropped: `pkgconfig` and `cmake` directories, headers, static (`.a`),
-/// libtool (`.la`) and object (`.o`) files, and every `lib*.so` symlink or
-/// linker script a link step would find by `-l` (what a `-dev` package
-/// adds). A subdirectory is bound whole unless something under it is a
-/// development file (`holds_dev_files`), and curated in turn otherwise;
-/// the compiler's own directories (`gcc`, `clang`, a versioned
-/// `llvm-<N>/bin`) are always whole.
+/// Dropped: `pkgconfig`, `cmake` and `include` directories, headers,
+/// static (`.a`), libtool (`.la`) and object (`.o`) files, and every
+/// `lib*.so` symlink or linker script a link step would find by `-l`
+/// (what a `-dev` package adds). A subdirectory is bound whole unless
+/// something under it is a development file (`holds_dev_files`), and
+/// curated in turn otherwise; the compiler's own directories (`gcc`,
+/// `clang`, a versioned `llvm-<N>/bin`) are always whole.
 ///
 /// The two curations differ where a library directory and a subdirectory
 /// hold different things:
@@ -457,7 +458,7 @@ fn library_entry_placement(
             Placement::Drop
         }
     };
-    if name == "pkgconfig" || name == "cmake" || name == RUNTIME_SUBDIR {
+    if is_dev_dir(name) || name == RUNTIME_SUBDIR {
         return Placement::Drop;
     }
     if file_type.is_dir() {
@@ -500,6 +501,19 @@ fn library_entry_placement(
     Placement::Keep
 }
 
+/// Whether a library subdirectory's own subdirectory is development files
+/// whatever is in it: `pkgconfig`, `cmake`, and an `include` tree, whose
+/// files are headers by suffix or not (`llvm-<N>/include/llvm` holds
+/// `.def`, `.inc` and `.td` files beside its `.h` ones). An `include` of
+/// some other data drops too (Fedora's legacy `kbd` keymaps, which only
+/// `loadkeys` reads): a build has no use for it, and a rule by name
+/// misses no header a suffix list would. The compiler's own `include`,
+/// under `gcc` or `lib/clang`, is in a directory bound whole before this
+/// rule is reached.
+fn is_dev_dir(name: &str) -> bool {
+    matches!(name, "pkgconfig" | "cmake" | "include")
+}
+
 /// Whether `name` is a header file.
 fn is_header(name: &str) -> bool {
     HEADER_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
@@ -507,15 +521,15 @@ fn is_header(name: &str) -> bool {
 
 /// Whether a library subdirectory entry marks the subdirectory as holding
 /// a `-devel` package's files: a header, a static or libtool archive, a
-/// `pkgconfig` or `cmake` directory. Narrower than what curation then
-/// drops: a `lib*.so` symlink alone marks nothing, as plugin directories
+/// `pkgconfig`, `cmake` or `include` directory. Narrower than what
+/// curation then drops: a `lib*.so` symlink alone marks nothing, as plugin directories
 /// are full of them (`bfd-plugins/liblto_plugin.so`, which `ld` loads by
 /// that name, `sasl2`, `xtables`, `libibverbs`), and dropping them would
 /// break the programs that load them. A subdirectory whose only
 /// development file is such a symlink or linker script is bound whole.
 fn marks_dev_dir(name: &str, file_type: fs::FileType) -> bool {
     if file_type.is_dir() {
-        return name == "pkgconfig" || name == "cmake";
+        return is_dev_dir(name);
     }
     is_header(name) || name.ends_with(".a") || name.ends_with(".la")
 }
@@ -968,8 +982,31 @@ fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Ve
 /// classifies entries with the view's own rules (`classify_dir`), so the
 /// two cannot disagree about what is dropped. Any read that fails is an
 /// error: an unreadable directory never passes for an empty one.
+///
+/// A debug build with the test stand-in for host development packages set
+/// (`test_host_dev_files`) folds that tree in the same way: what a build
+/// that saw it made is not what one that did not would reuse.
 pub(crate) fn host_build_inputs() -> io::Result<String> {
-    host_build_inputs_at(Path::new("/"))
+    let host = host_build_inputs_at(Path::new("/"))?;
+    match test_host_dev_files() {
+        None => Ok(host),
+        Some(dev) => with_dev_files(&host, &dev),
+    }
+}
+
+/// `host` with the tree at `dev` folded in, by the same stat-based walk.
+fn with_dev_files(host: &str, dev: &Path) -> io::Result<String> {
+    use sha2::Digest as _;
+    let mut digest = Fingerprint {
+        host_root: Path::new("/"),
+        digest: sha2::Sha256::new(),
+    };
+    digest.digest.update(b"tog-host-build-inputs/3+dev-files");
+    digest.field(host.as_bytes());
+    if digest.entry(dev, dev)? {
+        digest.tree(dev, dev)?;
+    }
+    Ok(hex::encode(digest.digest.finalize()))
 }
 
 fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
@@ -1155,6 +1192,24 @@ fn digest_field(digest: &mut sha2::Sha256, bytes: &[u8]) {
     digest.update(bytes);
 }
 
+/// Test-only, read in debug builds alone: a directory laid out like a host
+/// root (`usr/include`, `usr/lib`) standing in for development packages
+/// the host does not have, named by `TOG_TEST_HOST_DEV_FILES`. A build
+/// against the whole host (`HostView::Full`) reads it and searches its
+/// headers and libraries after the host's own; the runtime-only attempt
+/// never sees it, as it never sees the host's. An e2e test of the
+/// fallback puts a header there that neither the C runtime nor the native
+/// library set has, on a host that has nothing else (#559). A release
+/// build never widens a build's view on an environment variable.
+pub(crate) fn test_host_dev_files() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("TOG_TEST_HOST_DEV_FILES").map(PathBuf::from)
+    }
+    #[cfg(not(debug_assertions))]
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1162,6 +1217,23 @@ mod tests {
 
     fn temp_dir(test_name: &str) -> TempDir {
         TempDir::named(&format!("hostview-{test_name}"))
+    }
+
+    /// The stand-in for host development packages changes the host's
+    /// fingerprint, and a change inside it changes it again (#559).
+    #[test]
+    fn dev_files_are_part_of_the_host_build_inputs() {
+        let temp = temp_dir("dev-files");
+        let dev = temp.0.join("dev");
+        fs::create_dir_all(dev.join("usr/include")).unwrap();
+        fs::write(dev.join("usr/include/probe.h"), "int probe;\n").unwrap();
+        let host = "0".repeat(64);
+        let with = with_dev_files(&host, &dev).unwrap();
+        assert_ne!(with, host);
+        assert_eq!(with_dev_files(&host, &dev).unwrap(), with);
+        fs::write(dev.join("usr/include/probe.h"), "int probe, more;\n").unwrap();
+        assert_ne!(with_dev_files(&host, &dev).unwrap(), with);
+        assert_ne!(with_dev_files(&"1".repeat(64), &dev).unwrap(), with);
     }
 
     /// A fake host with one of each entry the `RuntimeOnly` rules decide
@@ -1180,9 +1252,10 @@ mod tests {
             "usr/lib64/cmake",
             "usr/lib64/gcc",
             "usr/lib64/llvm-14/lib/clang/14.0.0/include",
-            "usr/lib64/llvm-14/include/llvm",
+            "usr/lib64/llvm-14/include/llvm/IR",
             "usr/lib64/llvm-14/bin",
             "usr/lib64/python3/site-packages",
+            "usr/lib64/onlyinclude/include/sub",
             "usr/lib64/perl5/CORE",
             "usr/lib64/perl5/pkgconfig",
             "usr/share/pkgconfig",
@@ -1222,7 +1295,20 @@ mod tests {
             "usr/lib64/llvm-14/include/llvm/Config.h",
             b"/* llvm-14-dev */\n",
         );
+        // Ubuntu's llvm-<N>-dev also ships headers no suffix names, some
+        // in a directory with no `.h` in it (#617).
+        write(
+            "usr/lib64/llvm-14/include/llvm/IR/Instruction.def",
+            b"/* llvm-14-dev */\n",
+        );
         write("usr/lib64/llvm-14/lib/libLLVMCore.a", b"!<arch>\n");
+        // A subdirectory whose one development file is in an `include`,
+        // under no header suffix: the `include` alone curates it.
+        write("usr/lib64/onlyinclude/plugin.so", b"\x7fELF\x02\x01\x01");
+        write(
+            "usr/lib64/onlyinclude/include/sub/table.def",
+            b"/* -dev */\n",
+        );
         write("usr/lib64/python3/site-packages/mod.py", b"pass\n");
         write("usr/lib64/perl5/CORE/perl.h", b"/* perl-devel */\n");
         write("usr/lib64/perl5/CORE/libperl.so", b"\x7fELF\x02\x01\x01");
@@ -1363,8 +1449,23 @@ mod tests {
         // its headers and archives are gone (#559).
         assert!(!bound("/usr/lib64/llvm-14"), "{args:?}");
         for dropped in [
+            "/usr/lib64/llvm-14/include",
             "/usr/lib64/llvm-14/include/llvm/Config.h",
+            "/usr/lib64/llvm-14/include/llvm/IR",
+            "/usr/lib64/llvm-14/include/llvm/IR/Instruction.def",
             "/usr/lib64/llvm-14/lib/libLLVMCore.a",
+        ] {
+            assert!(!bound(dropped), "{dropped} bound: {args:?}");
+            assert!(!mirrored(dropped), "{dropped} mirrored");
+        }
+        assert!(!bound("/usr/lib64/onlyinclude"), "{args:?}");
+        assert!(linked(
+            "/usr/lib64/onlyinclude/plugin.so",
+            "/usr/lib64/onlyinclude/plugin.so"
+        ));
+        for dropped in [
+            "/usr/lib64/onlyinclude/include",
+            "/usr/lib64/onlyinclude/include/sub/table.def",
         ] {
             assert!(!bound(dropped), "{dropped} bound: {args:?}");
             assert!(!mirrored(dropped), "{dropped} mirrored");

@@ -1316,13 +1316,18 @@ pub fn build_sandboxed(
                 ),
             )
         });
+    // Each output goes into the directory `project` holds, never by the
+    // project's pathname, so a project renamed or replaced during the build
+    // cannot redirect the binary (#612). Scratch lives in the store, which
+    // can be on another filesystem than the project: there `rename_in`
+    // publishes a copy, through the same descriptor and with the same
+    // rules.
     let moved: io::Result<()> = result.and_then(|_| {
         for entry in fs::read_dir(&outdir)? {
             let entry = entry?;
-            let dest = project_dir.join(entry.file_name());
-            fs::rename(entry.path(), &dest)
-                .or_else(|_| fs::copy(entry.path(), &dest).map(|_| ()))?;
-            ui::note(&format!("built {}", dest.display()));
+            let name = PathBuf::from(entry.file_name());
+            project.rename_in(&entry.path(), &name)?;
+            ui::note(&format!("built {}", project_dir.join(&name).display()));
         }
         Ok(())
     });

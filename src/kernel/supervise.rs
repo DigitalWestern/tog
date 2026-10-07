@@ -547,7 +547,7 @@ fn failpoint_after_sigaction(_call: usize) {
     }
 }
 
-/// Pause exactly at a registration or departure boundary, in integration tests.
+/// Pause exactly at a registration, spawn or departure boundary, in integration tests.
 fn pause_boundary(_name: &str) {
     #[cfg(debug_assertions)]
     if std::env::var("TOG_SUPERVISE_FAILPOINT").as_deref() == Ok(_name)
@@ -662,7 +662,7 @@ impl Session {
         let quit_cursor = term_count(SESSION_QUIT.fetch_add(ONE_SESSION, Ordering::SeqCst));
         let packed = SESSION_TERM.fetch_add(ONE_SESSION, Ordering::SeqCst);
         pause_boundary("after-register");
-        let session = Self {
+        let mut session = Self {
             child_pid: Cell::new(-1),
             term_cursor: Cell::new(term_count(packed)),
             int_cursor: Cell::new(int_cursor),
@@ -677,7 +677,6 @@ impl Session {
             active: true,
         };
         drop(registry);
-        let mut session = session;
         // SAFETY: a null set queries this thread's mask into the slot.
         let queried = unsafe {
             libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut session.old_mask)
@@ -770,6 +769,7 @@ impl Session {
                 Ok(())
             });
         }
+        pause_boundary("before-spawn");
     }
 
     fn publish_child(&self, child: &Child) -> io::Result<()> {

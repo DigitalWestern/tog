@@ -38,6 +38,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 mod held;
+mod rename_in;
 use held::HeldEntry;
 pub(crate) use held::{held_root_for, start_in};
 
@@ -218,7 +219,7 @@ impl ProjectRoot {
         bytes: &[u8],
         mode: libc::mode_t,
     ) -> io::Result<()> {
-        self.publish_mode(relative, bytes, Some(mode), &mut random_temp_name)
+        self.publish_mode(relative, bytes, Some(mode), false, &mut random_temp_name)
     }
 
     /// Point a project-relative symlink (a `.venv` or `node_modules`
@@ -1022,14 +1023,17 @@ impl ProjectRoot {
         bytes: &[u8],
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
-        self.publish_mode(relative, bytes, None, temp_name)
+        self.publish_mode(relative, bytes, None, false, temp_name)
     }
 
+    /// `replace_link` lets the rename replace a symlink at the destination
+    /// (the link itself, never what it names), as `rename_in` does.
     fn publish_mode(
         &self,
         relative: &Path,
         bytes: &[u8],
         mode: Option<libc::mode_t>,
+        replace_link: bool,
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
         let (parents, name) = split_relative(relative)?;
@@ -1041,6 +1045,7 @@ impl ProjectRoot {
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
         match stat_at(parent_fd, name.as_bytes()) {
             Ok(stat) => match stat.st_mode & libc::S_IFMT {
+                libc::S_IFLNK if replace_link => {}
                 libc::S_IFLNK => {
                     return Err(refusal(format!(
                         "{} is a symlink; refusing to replace it",
@@ -2480,5 +2485,151 @@ mod tests {
             Path::new("target")
         );
         assert!(dir.join("temp").symlink_metadata().is_err());
+    }
+
+    /// `rename_in` moves a file from outside the project into the held
+    /// directory with its mode, replaces a regular file there, and leaves
+    /// no temporary behind. A project renamed after it was opened receives
+    /// the file in the directory tog holds, not at the old path.
+    #[test]
+    fn rename_in_moves_a_file_into_the_held_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = TempDir::named("rename-in");
+        let dir = project(&temp);
+        let scratch = temp.0.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let built = scratch.join("app");
+        fs::write(&built, b"binary").unwrap();
+        fs::set_permissions(&built, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("app"), b"old").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        root.rename_in(&built, Path::new("app")).unwrap();
+        assert!(built.symlink_metadata().is_err());
+        assert_eq!(fs::read(dir.join("app")).unwrap(), b"binary");
+        let mode = fs::metadata(dir.join("app")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        // Missing parents are created below the held root.
+        fs::write(&built, b"nested").unwrap();
+        root.rename_in(&built, Path::new("bin/app")).unwrap();
+        assert_eq!(fs::read(dir.join("bin/app")).unwrap(), b"nested");
+
+        // Renamed, with another directory at the old path.
+        let moved = temp.0.join("moved");
+        fs::rename(&dir, &moved).unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(&built, b"held").unwrap();
+        root.rename_in(&built, Path::new("app")).unwrap();
+        assert_eq!(fs::read(moved.join("app")).unwrap(), b"held");
+        assert!(dir.join("app").symlink_metadata().is_err());
+        assert!(!entries(&moved)
+            .iter()
+            .any(|name| name.starts_with(".tog-tmp")));
+    }
+
+    /// A symlink at the destination is replaced by the file, never written
+    /// through: its target keeps its bytes. A directory there is refused
+    /// and left alone, and so is a FIFO. A symlink or a directory as the
+    /// source is never moved in.
+    #[test]
+    fn rename_in_replaces_a_symlink_and_refuses_a_directory() {
+        let temp = TempDir::named("rename-in-refuse");
+        let dir = project(&temp);
+        let scratch = temp.0.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let outside = temp.0.join("outside");
+        fs::write(&outside, b"keep").unwrap();
+        symlink(&outside, dir.join("app")).unwrap();
+        let built = scratch.join("app");
+        fs::write(&built, b"binary").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        root.rename_in(&built, Path::new("app")).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+        let entry = dir.join("app").symlink_metadata().unwrap();
+        assert!(entry.file_type().is_file());
+        assert_eq!(fs::read(dir.join("app")).unwrap(), b"binary");
+
+        fs::create_dir_all(dir.join("tool/src")).unwrap();
+        fs::write(&built, b"binary").unwrap();
+        let error = root.rename_in(&built, Path::new("tool")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("is a directory"), "{error}");
+        assert!(dir.join("tool/src").is_dir());
+        assert!(built.is_file(), "a refused source was consumed");
+
+        let fifo = CString::new(dir.join("pipe").as_os_str().as_bytes()).unwrap();
+        // SAFETY: the path is NUL-terminated and outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let error = root.rename_in(&built, Path::new("pipe")).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert!(fs::symlink_metadata(dir.join("pipe"))
+            .unwrap()
+            .file_type()
+            .is_fifo());
+
+        // A parent in the project that is a symlink is not walked through.
+        symlink(&scratch, dir.join("linked")).unwrap();
+        let error = root.rename_in(&built, Path::new("linked/app")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        assert!(built.is_file());
+
+        let link = scratch.join("link");
+        symlink(&outside, &link).unwrap();
+        let error = root.rename_in(&link, Path::new("other")).unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+        assert!(dir.join("other").symlink_metadata().is_err());
+        let error = root.rename_in(&scratch, Path::new("other")).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert!(scratch.is_dir());
+    }
+
+    /// A source on another filesystem than the project is published as a
+    /// copy with its mode, under the rename's rules: a symlink at the
+    /// destination is replaced, its target untouched, and the source is
+    /// removed. `/dev/shm` is the second filesystem where it is one.
+    #[test]
+    fn rename_in_across_filesystems_publishes_a_copy() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        const NAME: &str = "rename_in_across_filesystems_publishes_a_copy";
+        let temp = TempDir::named("rename-in-xdev");
+        let dir = project(&temp);
+        let shm = Path::new("/dev/shm");
+        let Ok(shm_meta) = fs::metadata(shm) else {
+            eprintln!("skip {NAME}: no /dev/shm");
+            return;
+        };
+        if shm_meta.dev() == fs::metadata(&dir).unwrap().dev() {
+            eprintln!("skip {NAME}: /dev/shm shares the temp filesystem");
+            return;
+        }
+        let other = TempDir(shm.join(format!("tog-rename-in-xdev-{}", random_suffix().unwrap())));
+        fs::create_dir(&other.0).unwrap();
+        let built = other.0.join("app");
+        fs::write(&built, b"binary").unwrap();
+        fs::set_permissions(&built, fs::Permissions::from_mode(0o750)).unwrap();
+        let outside = temp.0.join("outside");
+        fs::write(&outside, b"keep").unwrap();
+        symlink(&outside, dir.join("app")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        root.rename_in(&built, Path::new("app")).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+        let entry = dir.join("app").symlink_metadata().unwrap();
+        assert!(entry.file_type().is_file());
+        assert_eq!(entry.permissions().mode() & 0o7777, 0o750);
+        assert_eq!(fs::read(dir.join("app")).unwrap(), b"binary");
+        assert!(built.symlink_metadata().is_err());
+        assert!(!entries(&dir)
+            .iter()
+            .any(|name| name.starts_with(".tog-tmp")));
+
+        // A directory there is refused across filesystems too, and the
+        // source stays.
+        fs::write(&built, b"binary").unwrap();
+        fs::create_dir(dir.join("tool")).unwrap();
+        let error = root.rename_in(&built, Path::new("tool")).unwrap_err();
+        assert!(error.to_string().contains("is a directory"), "{error}");
+        assert!(built.is_file());
     }
 }
