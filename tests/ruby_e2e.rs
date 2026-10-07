@@ -862,3 +862,243 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
         "{after}"
     );
 }
+
+/// Linux project whose only gem is the source `gdbm` gem. Its `extconf.rb`
+/// needs `gdbm.h` and `libgdbm`, which neither the C runtime nor tog's
+/// native library set has, so its build against the C runtime alone fails
+/// whatever the host has installed.
+fn gdbm_project_files(project: &Path) {
+    std::fs::write(
+        project.join("Gemfile"),
+        r#"source "https://rubygems.org"
+
+gem "gdbm", "2.1.0"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("Gemfile.lock"),
+        r#"GEM
+  remote: https://rubygems.org/
+  specs:
+    gdbm (2.1.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  gdbm (= 2.1.0)
+
+BUNDLED WITH
+   2.6.9
+"#,
+    )
+    .unwrap();
+}
+
+/// A stand-in for the host's `gdbm-devel` package: what the gem's
+/// `extconf.rb` probes (`gdbm_open` in `libgdbm`, `gdbm.h`) and what its
+/// `gdbm.c` compiles against. The functions are declared, never run.
+const STUB_GDBM_H: &str = r#"
+#ifndef TOG_STUB_GDBM_H
+#define TOG_STUB_GDBM_H
+typedef struct { char *dptr; int dsize; } datum;
+typedef struct gdbm_file_info *GDBM_FILE;
+#define GDBM_READER 0
+#define GDBM_WRITER 1
+#define GDBM_WRCREAT 2
+#define GDBM_NEWDB 3
+#define GDBM_FAST 0x010
+#define GDBM_SYNC 0x020
+#define GDBM_NOLOCK 0x040
+#define GDBM_CLOEXEC 0x100
+#define GDBM_INSERT 0
+#define GDBM_REPLACE 1
+#define GDBM_CACHESIZE 1
+#define GDBM_FASTMODE 2
+#define GDBM_SYNCMODE 3
+#define GDBM_FILE_OPEN_ERROR 3
+#define GDBM_CANT_BE_READER 9
+#define GDBM_CANT_BE_WRITER 10
+extern int gdbm_errno;
+extern const char *gdbm_version;
+GDBM_FILE gdbm_open(const char *, int, int, int, void (*)(const char *));
+void gdbm_close(GDBM_FILE);
+int gdbm_store(GDBM_FILE, datum, datum, int);
+datum gdbm_fetch(GDBM_FILE, datum);
+int gdbm_delete(GDBM_FILE, datum);
+datum gdbm_firstkey(GDBM_FILE);
+datum gdbm_nextkey(GDBM_FILE, datum);
+int gdbm_reorganize(GDBM_FILE);
+void gdbm_sync(GDBM_FILE);
+int gdbm_exists(GDBM_FILE, datum);
+int gdbm_setopt(GDBM_FILE, int, void *, int);
+int gdbm_fdesc(GDBM_FILE);
+const char *gdbm_strerror(int);
+#endif
+"#;
+
+/// The one symbol `have_library("gdbm", "gdbm_open")` links against.
+const STUB_LIBGDBM_C: &str = r#"
+#include <gdbm.h>
+int gdbm_errno;
+const char *gdbm_version = "tog stub";
+GDBM_FILE gdbm_open(const char *name, int block, int flags, int mode, void (*fatal)(const char *)) {
+    (void)name; (void)block; (void)flags; (void)mode; (void)fatal;
+    return 0;
+}
+"#;
+
+/// A directory laid out like a host root with the stub `gdbm-devel` in it,
+/// for `TOG_TEST_HOST_DEV_FILES` (`hostview::test_host_dev_files`): the
+/// header under `usr/include`, `libgdbm.so` under `usr/lib`, built with the
+/// host's gcc, with the real library's soname so the extension's NEEDED
+/// entry reads the same on a host that has `libgdbm-dev` installed.
+fn stub_host_dev_files(dev: &Path) {
+    let include = dev.join("usr/include");
+    let lib = dev.join("usr/lib");
+    std::fs::create_dir_all(&include).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(include.join("gdbm.h"), STUB_GDBM_H).unwrap();
+    let source = dev.join("libgdbm.c");
+    std::fs::write(&source, STUB_LIBGDBM_C).unwrap();
+    let output = Command::new("gcc")
+        .args(["-shared", "-fPIC", "-Wl,-soname,libgdbm.so.6", "-I"])
+        .arg(&include)
+        .arg("-o")
+        .arg(lib.join("libgdbm.so"))
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_ok(output, "gcc builds the stub libgdbm");
+}
+
+/// A gem that needs a development package the C runtime and tog's native
+/// library set lack still installs: its hermetic build fails, what that
+/// attempt left in the shared GEM_HOME is discarded, it is rebuilt against
+/// the whole host, and the object is committed under its own
+/// `host-fallback/1` identity with a `host-build-inputs` exception naming
+/// the gem (issue #304). The next sync on the unchanged host reaches that
+/// object through the store record instead of building again.
+///
+/// The development package is a stand-in a debug build reads from
+/// `TOG_TEST_HOST_DEV_FILES` (`stub_host_dev_files`): no rubygems.org gem
+/// needs a header every host has outside glibc and the set, and the Ruby
+/// tailor admits no other gem source (#559).
+#[test]
+#[ignore]
+#[cfg(target_os = "linux")]
+fn ruby_gem_needing_host_headers_falls_back_once() {
+    const GDBM_SHA256: &str = "0b618465946a6e7a630b8dd3d10e30570cbc8fb8710bcb28f2db89058a7bbe77";
+    let temp = TempDir::new("ruby-e2e-host-fallback");
+    let project = temp.0.join("ruby-gdbm");
+    std::fs::create_dir_all(&project).unwrap();
+    gdbm_project_files(&project);
+    let dev = temp.0.join("host-dev-files");
+    stub_host_dev_files(&dev);
+    let store = temp.0.join("store");
+
+    assert_ok(
+        common::tog_env(
+            &project,
+            &temp.0,
+            &["sync"],
+            &[("TOG_TEST_HOST_DEV_FILES", dev.as_os_str())],
+        ),
+        "sync",
+    );
+    let (gems_obj, gems_meta) = find_object(&store, "ruby-gems").expect("gems object published");
+    assert_immutable_tree(&gems_obj);
+    let inputs = gems_meta["identity"]["inputs"].as_object().unwrap();
+    assert_eq!(
+        inputs["gem:gdbm-2.1.0"].as_str(),
+        Some(GDBM_SHA256),
+        "{inputs:?}"
+    );
+    assert_eq!(
+        inputs["build_view"].as_str(),
+        Some("host-fallback/1"),
+        "{inputs:?}"
+    );
+    assert_eq!(
+        inputs["host_fallback"].as_str(),
+        Some("gdbm-2.1.0"),
+        "{inputs:?}"
+    );
+    // Keyed by this host's build inputs too (`hostview::host_build_inputs`).
+    assert!(
+        inputs["host_inputs"]
+            .as_str()
+            .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())),
+        "{inputs:?}"
+    );
+    assert_eq!(inputs["native"].as_str(), Some("native-libs"), "{inputs:?}");
+    let exceptions = gems_meta["exceptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        exceptions
+            .iter()
+            .any(|exception| exception["kind"] == "host-build-inputs"
+                && exception["subject"] == "gdbm-2.1.0"),
+        "no host-build-inputs exception for gdbm-2.1.0: {exceptions:?}"
+    );
+    // The retry started from what a clean install would leave: one gem,
+    // one extension, and a build log that is the retry's, which found the
+    // header the hermetic attempt could not.
+    let mut extensions = Vec::new();
+    collect_files(&gems_obj.join("extensions"), "/gdbm.so", &mut extensions);
+    assert_eq!(extensions.len(), 1, "{extensions:?}");
+    let dynamic = tool("readelf", &["-dW"], &extensions[0]);
+    assert!(dynamic.contains("[libgdbm.so.6]"), "{dynamic}");
+    let mut logs = Vec::new();
+    collect_files(&gems_obj.join("extensions"), "/mkmf.log", &mut logs);
+    assert_eq!(logs.len(), 1, "{logs:?}");
+    let log = std::fs::read_to_string(&logs[0]).unwrap();
+    assert!(
+        log.contains("have_header: checking for gdbm.h... -------------------- yes"),
+        "{log}"
+    );
+    let gems: Vec<String> = std::fs::read_dir(gems_obj.join("gems"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(gems, ["gdbm-2.1.0"]);
+    let records = store.join("records/ruby-gems-host-fallback");
+    assert_eq!(
+        std::fs::read_dir(&records).unwrap().count(),
+        1,
+        "the fallback was not recorded"
+    );
+
+    // The next sync reaches the fallback object through the record, never
+    // by building again: with the `.gem` gone from the artifact cache, the
+    // network cut and the stand-in development package gone, a rebuild
+    // could not even start.
+    let closure = |project: &Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
+            .unwrap()
+    };
+    let before = closure(&project);
+    let cached = store.join("cache/sha256").join(GDBM_SHA256);
+    assert!(cached.exists(), "the gdbm gem is not in the artifact cache");
+    tog::kernel::store::remove_tree(&cached)
+        .or_else(|_| std::fs::remove_file(&cached))
+        .unwrap();
+    tog::kernel::store::remove_tree(&dev).unwrap();
+    let second = assert_ok(
+        tog_offline(&project, &temp.0, &["sync"]),
+        "offline re-sync over the fallback object",
+    );
+    eprintln!("second sync: {second}");
+    let after = closure(&project);
+    assert_eq!(
+        after["body"]["gems_object"], before["body"]["gems_object"],
+        "the re-sync projected a different gems object"
+    );
+    assert_eq!(
+        after["body"]["gems_object"]["id"], gems_meta["id"],
+        "{after}"
+    );
+}

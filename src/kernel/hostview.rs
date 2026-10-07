@@ -1155,6 +1155,24 @@ fn digest_field(digest: &mut sha2::Sha256, bytes: &[u8]) {
     digest.update(bytes);
 }
 
+/// Test-only, read in debug builds alone: a directory laid out like a host
+/// root (`usr/include`, `usr/lib`) standing in for development packages
+/// the host does not have, named by `TOG_TEST_HOST_DEV_FILES`. A build
+/// against the whole host (`HostView::Full`) reads it and searches its
+/// headers and libraries after the host's own; the runtime-only attempt
+/// never sees it, as it never sees the host's. An e2e test of the
+/// fallback puts a header there that neither the C runtime nor the native
+/// library set has, on a host that has nothing else (#559). A release
+/// build never widens a build's view on an environment variable.
+pub(crate) fn test_host_dev_files() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("TOG_TEST_HOST_DEV_FILES").map(PathBuf::from)
+    }
+    #[cfg(not(debug_assertions))]
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
