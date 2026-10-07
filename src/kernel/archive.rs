@@ -1125,10 +1125,11 @@ pub(crate) fn extract_validated_with_activity_and_options(
 /// extracted here. The capturing pass still reads every header, and
 /// refuses every layout the in-process reader refuses for `list`. A hard
 /// link is followed only once it passes the link rules extraction applies.
-/// A member written more than once is refused: tar extracts the last write
-/// (or, for a hard link, writes through the shared file), so no one entry's
-/// bytes are what an extracted tree holds. `member` is the exact stored
-/// name; `cap` bounds the member's declared size.
+/// An archive that writes any name more than once is refused, as
+/// extraction refuses it (`validate::written_once`): tar extracts the last
+/// write (or, for a hard link, writes through the shared file), so no one
+/// entry's bytes are what an extracted tree holds. `member` is the exact
+/// stored name; `cap` bounds the member's declared size.
 pub fn read_member(
     archive: &Path,
     compression: Compression,
@@ -1136,19 +1137,8 @@ pub fn read_member(
     cap: u64,
 ) -> io::Result<Vec<u8>> {
     let (entries, wanted) = capture(archive, compression, member, cap)?;
-    let kept = validate::kept_name(member)?;
-    let mut writes = 0;
-    for entry in &entries {
-        if validate::kept_name(&entry.name)? == kept {
-            writes += 1;
-        }
-    }
-    if writes > 1 {
-        return Err(err(format!(
-            "archive {} writes member {member:?} more than once; refusing to read it",
-            archive.display()
-        )));
-    }
+    validate::members_written_once(&entries)
+        .map_err(|e| io::Error::new(e.kind(), format!("archive {}: {e}", archive.display())))?;
     if let Some(bytes) = wanted {
         return Ok(bytes);
     }
@@ -2381,8 +2371,9 @@ mod tests {
         collide("pkg/Lib/a", "pkg/lib/b", 0);
         // After stripping one component the two land in the same place.
         collide("a/README", "b/readme", 1);
-        // Exact duplicates are tar's last-one-wins on both platforms.
-        validate(&[file("pkg/x"), file("pkg/x")], 0).unwrap();
+        // Exact duplicates are not a folding collision; `written_once`
+        // refuses them on its own.
+        refused(&[file("pkg/x"), file("pkg/x")], 0, "written more than once");
         // Different directories do not fold together.
         validate(&[file("pkg/a/README"), file("pkg/b/readme")], 0).unwrap();
         // Stripped-away entries are never written, so they cannot collide.
@@ -2930,6 +2921,99 @@ mod tests {
             read_member(&archive, Compression::None, "pkg/a", 1 << 20).unwrap(),
             b"only"
         );
+    }
+
+    /// Extraction refuses the archives `read_member` refuses, by the one
+    /// rule (#613): a name written twice as two regular files, as a file
+    /// then a hard link, as two spellings (`pkg/./a`), as a file then a
+    /// directory, or as two names `--strip-components` folds into one.
+    /// Nothing is written. A directory listed twice is one directory to
+    /// every tar and extracts.
+    #[test]
+    fn extraction_refuses_a_member_written_more_than_once() {
+        let temp = temp_dir("extract-twice");
+        for (name, strip, members) in [
+            (
+                "regular-then-regular",
+                0,
+                vec![
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/a", b'0', "", b"second"),
+                ],
+            ),
+            (
+                "regular-then-hardlink",
+                0,
+                vec![
+                    ustar("pkg/x", b'0', "", b"other"),
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/a", b'1', "pkg/x", b""),
+                ],
+            ),
+            (
+                "second-spelling",
+                0,
+                vec![
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/./a", b'0', "", b"second"),
+                ],
+            ),
+            (
+                "file-then-directory",
+                0,
+                vec![
+                    ustar("pkg/a", b'0', "", b"first"),
+                    ustar("pkg/a/", b'5', "", b""),
+                ],
+            ),
+            (
+                "symlink-then-regular",
+                0,
+                vec![
+                    ustar("pkg/a", b'2', "b", b""),
+                    ustar("pkg/a", b'0', "", b"second"),
+                ],
+            ),
+            (
+                "folded-by-strip",
+                1,
+                vec![
+                    ustar("one/a", b'0', "", b"first"),
+                    ustar("two/a", b'0', "", b"second"),
+                ],
+            ),
+        ] {
+            let archive = temp.0.join(format!("{name}.tar"));
+            write_tar(&archive, &members);
+            let destination = temp.0.join(name);
+            fs::create_dir_all(&destination).unwrap();
+            let error = extract(&archive, &destination, strip, Compression::None).expect_err(name);
+            assert!(
+                error.to_string().contains("written more than once"),
+                "{name}: {error}"
+            );
+            assert!(
+                fs::read_dir(&destination).unwrap().next().is_none(),
+                "{name}: something was written"
+            );
+        }
+        // Control: a directory entry repeated, under two spellings, with a
+        // file below it, extracts as one directory.
+        let archive = temp.0.join("dir-twice.tar");
+        write_tar(
+            &archive,
+            &[
+                ustar("pkg/", b'5', "", b""),
+                ustar("pkg/d/", b'5', "", b""),
+                ustar("pkg/d/a", b'0', "", b"only"),
+                ustar("pkg/./d/", b'5', "", b""),
+                ustar("pkg/", b'5', "", b""),
+            ],
+        );
+        let destination = temp.0.join("dir-twice");
+        fs::create_dir_all(&destination).unwrap();
+        extract(&archive, &destination, 1, Compression::None).unwrap();
+        assert_eq!(fs::read(destination.join("d/a")).unwrap(), b"only");
     }
 
     #[test]

@@ -22,27 +22,11 @@ pub fn validate(entries: &[Entry], strip: usize) -> io::Result<()> {
 /// ever extracts (see [`ExtractOptions::platform_specific`]).
 pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io::Result<()> {
     let strip = options.strip;
-    let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
-    // Special files never become entries: the listing refuses them where
-    // it reads their type.
-    for entry in entries {
-        let components = contained_components(&entry.name)
-            .map_err(|reason| err(format!("archive entry {:?}: {reason}", entry.name)))?;
-        if components.len() <= strip {
-            continue;
-        }
-        let stripped: Vec<&str> = components[strip..]
-            .iter()
-            .copied()
-            .filter(|component| *component != ".")
-            .collect();
-        kept.push((entry, stripped));
-    }
+    let kept = kept_entries(entries, strip)?;
     // Two names APFS would treat as one extract as one file there and two
     // on Linux, so one archive would realize two different trees. Every
     // prefix counts, since `Lib/a` and `lib/b` share one directory on APFS
-    // and two on Linux. Identical spellings are tar's ordinary
-    // last-one-wins on both.
+    // and two on Linux. Identical spellings are `written_once`'s rule.
     //
     // A per-platform build is only ever extracted on its own platform, so
     // there is no second tree to diverge from: Linux keeps both names, as
@@ -93,21 +77,72 @@ pub fn validate_with_options(entries: &[Entry], options: &ExtractOptions) -> io:
             })?;
         }
     }
-    hard_links_contained(&kept, strip)
+    hard_links_contained(&kept, strip)?;
+    written_once(&kept)
+}
+
+/// The entries tar writes after `--strip-components strip`, each with its
+/// name as extraction compares names: the components past the first
+/// `strip`, `.` dropped, so `pkg/./a` and `pkg/a/` are both `pkg/a`. An
+/// absolute name or a `..` component is refused wherever it sits. Special
+/// files never become entries: the listing refuses them where it reads
+/// their type.
+fn kept_entries(entries: &[Entry], strip: usize) -> io::Result<Vec<(&Entry, Vec<&str>)>> {
+    let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
+    for entry in entries {
+        let components = contained_components(&entry.name)
+            .map_err(|reason| err(format!("archive entry {:?}: {reason}", entry.name)))?;
+        if components.len() <= strip {
+            continue;
+        }
+        let stripped: Vec<&str> = components[strip..]
+            .iter()
+            .copied()
+            .filter(|component| *component != ".")
+            .collect();
+        kept.push((entry, stripped));
+    }
+    Ok(kept)
+}
+
+/// No name is written more than once: tar extracts the last write, so
+/// neither entry's bytes are what the whole archive says, and whether a
+/// later write replaces a hard-linked file or writes through it differs by
+/// tar, so two platforms could realize different trees. The rule is the
+/// one `read_member` applies (#556, #613): a member read in process and
+/// the tree extracted on disk refuse the same archives, so a manifest read
+/// out of an sdist can never see bytes its build does not.
+///
+/// A directory entry may repeat (`pkg/` then `pkg/./`): a directory
+/// carries no bytes, tar creates it once and the second entry only reapplies
+/// metadata the store normalizes away, so every tar realizes one directory.
+/// A directory sharing its name with a file, link or symlink is refused
+/// with the rest: one tar fails on the existing entry where another
+/// replaces it.
+fn written_once(kept: &[(&Entry, Vec<&str>)]) -> io::Result<()> {
+    let mut seen: BTreeMap<String, &Entry> = BTreeMap::new();
+    for (entry, stripped) in kept {
+        match seen.insert(stripped.join("/"), entry) {
+            Some(earlier) if earlier.kind == EntryKind::Dir && entry.kind == EntryKind::Dir => {}
+            Some(earlier) => {
+                return Err(err(format!(
+                    "archive entry {:?} is written more than once (also as {:?}); refusing",
+                    earlier.name, entry.name
+                )));
+            }
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 /// A hard link is tar's second name for a member it already extracted, so
 /// it is accepted when that member is an earlier regular file kept after
 /// `--strip-components`. Both tars strip a hard link's target the way they
-/// strip its name, so the target is compared in stripped form. A name
-/// written twice is refused when a hard link names it or is it: whether a
-/// later write replaces the shared file or writes through it differs by
-/// tar, so the two platforms could realize different bytes.
+/// strip its name, so the target is compared in stripped form. A link or
+/// target written twice is refused by `written_once`, with every other
+/// repeated name.
 fn hard_links_contained(kept: &[(&Entry, Vec<&str>)], strip: usize) -> io::Result<()> {
-    let mut writes: BTreeMap<String, usize> = BTreeMap::new();
-    for (_, stripped) in kept {
-        *writes.entry(stripped.join("/")).or_default() += 1;
-    }
     let mut earlier_files: BTreeSet<String> = BTreeSet::new();
     for (entry, stripped) in kept {
         let name = stripped.join("/");
@@ -141,11 +176,6 @@ fn hard_links_contained(kept: &[(&Entry, Vec<&str>)], strip: usize) -> io::Resul
                         "the target is not an earlier regular file in the archive",
                     ));
                 }
-                if writes.get(&name) > Some(&1) || writes.get(&target_name) > Some(&1) {
-                    return Err(refuse(
-                        "the link or its target is written more than once in the archive",
-                    ));
-                }
             }
             EntryKind::Dir | EntryKind::Symlink => {}
         }
@@ -162,17 +192,9 @@ fn hard_links_contained(kept: &[(&Entry, Vec<&str>)], strip: usize) -> io::Resul
 /// disk, so neither can change which bytes are read. A target spelled
 /// `pkg/./a` or `pkg/a/` finds the member stored as `pkg/a`, as tar would.
 pub(super) fn hard_link_target<'a>(entries: &'a [Entry], link: &Entry) -> io::Result<&'a str> {
-    let mut kept: Vec<(&Entry, Vec<&str>)> = Vec::new();
-    for entry in entries {
-        let components = contained_components(&entry.name)
-            .map_err(|reason| err(format!("archive entry {:?}: {reason}", entry.name)))?;
-        let kept_name = components
-            .into_iter()
-            .filter(|component| *component != ".")
-            .collect();
-        kept.push((entry, kept_name));
-    }
+    let kept = kept_entries(entries, 0)?;
     hard_links_contained(&kept, 0)?;
+    written_once(&kept)?;
     let target = link.link.as_deref().unwrap_or("");
     let wanted: Vec<&str> = contained_components(target)
         .map_err(|reason| err(format!("archive hard link {:?}: {reason}", link.name)))?
@@ -185,16 +207,11 @@ pub(super) fn hard_link_target<'a>(entries: &'a [Entry], link: &Entry) -> io::Re
         .ok_or_else(|| err(format!("archive hard link {:?}: no target", link.name)))
 }
 
-/// `name` as extraction compares it with nothing stripped: its contained
-/// components, `.` dropped, so `pkg/./a` and `pkg/a/` are both `pkg/a`.
-pub(super) fn kept_name(name: &str) -> io::Result<String> {
-    let components = contained_components(name)
-        .map_err(|reason| err(format!("archive entry {name:?}: {reason}")))?;
-    Ok(components
-        .into_iter()
-        .filter(|component| *component != ".")
-        .collect::<Vec<_>>()
-        .join("/"))
+/// [`written_once`] over the whole listing with nothing stripped, for a
+/// read that extracts nothing (`read_member`): the archive is refused on
+/// the same repeated names extraction refuses it on.
+pub(super) fn members_written_once(entries: &[Entry]) -> io::Result<()> {
+    written_once(&kept_entries(entries, 0)?)
 }
 
 /// An approximation of the form under which APFS compares two names:
