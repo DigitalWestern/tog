@@ -1,6 +1,7 @@
 //! `tog fmt`: the pinned formatter of the one ecosystem that has one
 //! (Rust today), or a delegated package.json `fmt` script. The formatter
-//! itself is `Tailor::fmt`; this file only decides which of the two runs.
+//! itself is a `tailors::Formatter`; this file only decides which of the
+//! two runs.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode};
 use crate::commands::inspect;
@@ -34,13 +35,15 @@ pub fn run(
     // Without it, a script named fmt wins over the named command, matching
     // `tog run fmt`. Preserve the command's user arguments for the script;
     // `--eco` is never appended to a delegated command line.
-    let formatter: &dyn Tailor = match ecosystem {
+    let formats =
+        |tailor: &&'static dyn Tailor| tailor.formatter().map(|formatter| (*tailor, formatter));
+    let (tailor, formatter) = match ecosystem {
         Some(ecosystem) => match tailors::registry()
             .iter()
-            .copied()
-            .find(|tailor| tailor.fmt_ecosystem() == Some(ecosystem))
+            .filter_map(formats)
+            .find(|(_, formatter)| formatter.word() == ecosystem)
         {
-            Some(tailor) => tailor,
+            Some(found) => found,
             // The parser accepts only `cli::spec::fmt_words`.
             None => {
                 return Err(io::Error::new(
@@ -67,8 +70,7 @@ pub fn run(
             }
             tailors::registry()
                 .iter()
-                .copied()
-                .find(|tailor| tailor.fmt_ecosystem().is_some())
+                .find_map(formats)
                 .expect("one ecosystem has a pinned formatter")
         }
     };
@@ -76,7 +78,7 @@ pub fn run(
     // dispatch: a delegated package.json `fmt` script needs no formatter
     // pin. The tailor refuses a host with no pinned component here, before
     // the store is opened.
-    formatter.fmt_preflight(platform)?;
+    formatter.preflight(platform)?;
     let detected = inspect::detected(&cwd)?;
     if ecosystem.is_none() && detected.len() > 1 {
         return Err(io::Error::new(
@@ -87,7 +89,7 @@ pub fn run(
             ),
         ));
     }
-    formatter.fmt_check_project(&cwd)?;
+    formatter.check_project(&cwd)?;
 
     let ctx = Context::open(platform)?;
     // The formatter rides in the same bundle as the toolchain, so it is
@@ -102,11 +104,11 @@ pub fn run(
         project_toolchain::resolve(
             &held,
             platform,
-            ecosystem_inputs(&[formatter])?,
+            ecosystem_inputs(&[tailor])?,
             Mode::ReadOnly,
             false,
         )?
-        .get(formatter.lock_ecosystem())
+        .get(tailor.lock_ecosystem())
         .cloned()
     };
     let cwd_real = cwd.canonicalize()?;
@@ -119,7 +121,7 @@ pub fn run(
     // and `tog fmt` publishes no closure to carry it (a synced project's
     // cargo closure records the same fact), so the frame is discarded.
     let attribution = policy::Attribution::open("fmt")?;
-    let root = formatter.fmt_root(&ctx, &cwd, &first)?;
+    let root = formatter.root(&ctx, &cwd, &first)?;
     let decides = if root.join(LOCK_PATH).symlink_metadata().is_ok() {
         root
     } else {
@@ -130,7 +132,7 @@ pub fn run(
     } else {
         resolve_at(&decides)?
     };
-    let status = formatter.fmt(&ctx, &cwd, check, args, &selected)?;
+    let status = formatter.run(&ctx, &cwd, check, args, &selected)?;
     attribution.discard();
     Ok(status)
 }

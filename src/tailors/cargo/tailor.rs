@@ -17,7 +17,9 @@ use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
-use crate::tailors::{ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor};
+use crate::tailors::{
+    ClosureListing, FileRunner, Formatter, PackageRow, SourceFile, SyncRequest, Tailor,
+};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -358,18 +360,35 @@ impl Tailor for Cargo {
         Ok(())
     }
 
-    fn fmt_ecosystem(&self) -> Option<&'static str> {
-        Some("rust")
+    fn formatter(&self) -> Option<&'static dyn Formatter> {
+        Some(&Rustfmt)
     }
 
-    fn fmt_preflight(&self, platform: Platform) -> io::Result<()> {
+    fn object_kinds(&self) -> &'static [ObjectKind] {
+        super::objects::KINDS
+    }
+
+    fn toolchain_kinds(&self) -> &'static [&'static str] {
+        &["rust", "rustfmt"]
+    }
+}
+
+/// `tog fmt` for Rust: the rustfmt component the toolchain lock pins.
+pub struct Rustfmt;
+
+impl Formatter for Rustfmt {
+    fn word(&self) -> &'static str {
+        "rust"
+    }
+
+    fn preflight(&self, platform: Platform) -> io::Result<()> {
         // A platform with no pinned component is refused here, before
         // `Store::open` and before the Rust realization downloads ~105 MB of
         // toolchain.
         rustfmt::preflight_platform(platform)
     }
 
-    fn fmt_check_project(&self, cwd: &Path) -> io::Result<()> {
+    fn check_project(&self, cwd: &Path) -> io::Result<()> {
         if !cwd
             .ancestors()
             .any(|dir| dir.join("Cargo.toml").is_file() || dir.join("Cargo.lock").is_file())
@@ -384,13 +403,13 @@ impl Tailor for Cargo {
 
     /// The Cargo workspace root, found by tog's own walk of the manifests
     /// (no cargo runs on the host).
-    fn fmt_root(&self, _ctx: &Context, cwd: &Path, _toolchain: &Selected) -> io::Result<PathBuf> {
+    fn root(&self, _ctx: &Context, cwd: &Path, _toolchain: &Selected) -> io::Result<PathBuf> {
         inputs::locate_cargo_root(cwd)?.canonicalize()
     }
 
     /// Realize only the Rust toolchain and its paired rustfmt component, then
     /// format the Cargo workspace without resolving dependencies.
-    fn fmt(
+    fn run(
         &self,
         ctx: &Context,
         cwd: &Path,
@@ -459,14 +478,6 @@ impl Tailor for Cargo {
             args,
         )?;
         Ok(child_status_code(&status))
-    }
-
-    fn object_kinds(&self) -> &'static [ObjectKind] {
-        super::objects::KINDS
-    }
-
-    fn toolchain_kinds(&self) -> &'static [&'static str] {
-        &["rust", "rustfmt"]
     }
 }
 

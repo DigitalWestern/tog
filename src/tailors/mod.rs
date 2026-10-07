@@ -457,43 +457,9 @@ pub trait Tailor: Sync {
         Ok(BTreeMap::new())
     }
 
-    /// The `--eco` word `tog fmt` accepts for this ecosystem, when it
-    /// has a pinned formatter.
-    fn fmt_ecosystem(&self) -> Option<&'static str> {
+    /// `tog fmt`: this ecosystem's pinned formatter, when it has one.
+    fn formatter(&self) -> Option<&'static dyn Formatter> {
         None
-    }
-
-    /// `tog fmt`, before the store is opened: refuse a host with no
-    /// pinned formatter component.
-    fn fmt_preflight(&self, _platform: Platform) -> io::Result<()> {
-        Err(unsupported(self.id(), "fmt"))
-    }
-
-    /// `tog fmt`, before the store is opened: is there a project of this
-    /// ecosystem to format from `cwd`?
-    fn fmt_check_project(&self, _cwd: &Path) -> io::Result<()> {
-        Err(unsupported(self.id(), "fmt"))
-    }
-
-    /// `tog fmt`: the root of the workspace `cwd` belongs to, found with
-    /// the toolchain `toolchain` names. The workspace is formatted as one,
-    /// so `tog fmt` takes its toolchain from that directory's lock when it
-    /// has one, whichever member it was run from.
-    fn fmt_root(&self, _ctx: &Context, cwd: &Path, _toolchain: &Selected) -> io::Result<PathBuf> {
-        cwd.canonicalize()
-    }
-
-    /// `tog fmt`: realize the formatter the lock pins and run it sandboxed
-    /// over the workspace `cwd` belongs to. It writes no closure.
-    fn fmt(
-        &self,
-        _ctx: &Context,
-        _cwd: &Path,
-        _check: bool,
-        _args: &[String],
-        _toolchain: &Selected,
-    ) -> io::Result<i32> {
-        Err(unsupported(self.id(), "fmt"))
     }
 
     /// `tog add`: the ecosystem's public package registry, the `prefix:`
@@ -656,6 +622,39 @@ pub fn install_resolution_files() {
             None => Ok(None),
         },
     ));
+}
+
+/// `tog fmt`: an ecosystem's pinned formatter (`Tailor::formatter`),
+/// Rust's rustfmt today. The command picks the formatter and the toolchain
+/// lock that decides; the formatter owns everything about running it.
+pub trait Formatter: Sync {
+    /// The `--eco` word `tog fmt` selects this formatter by.
+    fn word(&self) -> &'static str;
+
+    /// Before the store is opened: refuse a host with no pinned formatter
+    /// component.
+    fn preflight(&self, platform: Platform) -> io::Result<()>;
+
+    /// Before the store is opened: is there a project of this ecosystem to
+    /// format from `cwd`?
+    fn check_project(&self, cwd: &Path) -> io::Result<()>;
+
+    /// The root of the workspace `cwd` belongs to, found with the toolchain
+    /// `toolchain` names. The workspace is formatted as one, so `tog fmt`
+    /// takes its toolchain from that directory's lock when it has one,
+    /// whichever member it was run from.
+    fn root(&self, ctx: &Context, cwd: &Path, toolchain: &Selected) -> io::Result<PathBuf>;
+
+    /// Realize the formatter the lock pins and run it sandboxed over the
+    /// workspace `cwd` belongs to. It writes no closure.
+    fn run(
+        &self,
+        ctx: &Context,
+        cwd: &Path,
+        check: bool,
+        args: &[String],
+        toolchain: &Selected,
+    ) -> io::Result<i32>;
 }
 
 /// What `tog x` asks of an ecosystem that installs tools from a public
