@@ -17,7 +17,7 @@ git commit -s
 That line is your statement of the
 [Developer Certificate of Origin](https://developercertificate.org): you
 wrote the change, or have the right to submit it under the project's
-license. The `dco` job in `.github/workflows/ci.yml` checks every commit
+license. The `dco` job in `.github/workflows/dco.yml` checks every commit
 a pull request adds, with `tools/dco.sh`; a commit without the line fails
 the check, and so does one authored or signed off by an agent's address
 (`noreply@anthropic.com`): the sign-off is a person's. A `Co-Authored-By`

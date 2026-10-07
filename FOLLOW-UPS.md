@@ -51,7 +51,6 @@ None open.
 
 - **Found in the `tog <file>` work (2026-10-05).** One issue and one PR each:
   - #561 run: `tog <file>` outside a project, or in a project without that ecosystem, on the locked or shipped toolchain. Pick: realize the runtime as `x` does.
-  - #565 ci: the `dco` job is skipped by `paths-ignore`, so a pointer-only pull request (allowed since 2026-10-06) merges with no sign-off check. Pick: its own workflow file, when there are outside contributors.
 - **#463: tests: sandbox socket fixtures fail before assertions under a long TMPDIR.** sandbox socket fixtures exceed SUN_LEN with a long TMPDIR. The shared helper is `kernel::testutil::bind_socket` (#462); left is calling it from `sandbox.rs`, batched with required sandbox work.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#465: heavy: audit shared state before allowing parallel ignored suites.** audit shared state before running ignored suites in parallel. Keep --test-threads=1 until local evidence supports removal.
