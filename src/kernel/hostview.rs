@@ -22,7 +22,8 @@
 //! tog cannot list, is curated in turn with the library rule
 //! (`Curation::Subtree`), so an explicit `-I` or `-L` into it finds no more
 //! than the default paths do (#331). The compiler's own directories (`gcc`,
-//! `clang`) are bound whole.
+//! `clang`, and a versioned `llvm-<N>`'s `bin`) are bound whole; the rest of
+//! `llvm-<N>`, LLVM's own headers and archives, is curated like any tree.
 
 use crate::kernel::ldcache::MovedLibrary;
 use crate::kernel::sandbox::{host_layout_error, push_arg};
@@ -63,7 +64,39 @@ const LD_CACHE: &str = "ld.so.cache";
 
 /// The subdirectories of a library directory that are the compiler's own,
 /// bound whole: their headers and archives are what every compile reads.
+/// Under a versioned LLVM tree (`is_llvm_tree`) the same names count, so
+/// clang's resource directory, `llvm-14/lib/clang`, is whole.
 const COMPILER_DIRS: &[&str] = &["gcc", "clang"];
+
+/// Whether a library subdirectory is the compiler's own (`COMPILER_DIRS`).
+fn is_compiler_dir(name: &str) -> bool {
+    COMPILER_DIRS.contains(&name)
+}
+
+/// Whether a library subdirectory is a versioned LLVM tree, Debian and
+/// Ubuntu's `llvm-<N>` (clang's resource directory is
+/// `/usr/lib/llvm-14/lib/clang/14.0.0` on Ubuntu 22.04, its headers the
+/// ones every clang compile reads) or Fedora's `llvm<N>` compat packages
+/// (#559). Only its `bin` and its `lib/clang` are the compiler's own; the
+/// rest is LLVM the library (`llvm-<N>-dev`'s `include/llvm`,
+/// `lib/libLLVMCore.a`), curated like any other tree so a hermetic build
+/// cannot link the host's unpinned LLVM.
+fn is_llvm_tree(name: &str) -> bool {
+    name.strip_prefix("llvm")
+        .map(|rest| rest.strip_prefix('-').unwrap_or(rest))
+        .is_some_and(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether `host_entry` is a versioned LLVM tree's `bin`, its compiler's
+/// executables, bound whole.
+fn is_llvm_bin(name: &str, host_entry: &Path) -> bool {
+    name == "bin"
+        && host_entry
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            .is_some_and(is_llvm_tree)
+}
 
 /// The suffixes of a header file in a library subdirectory
 /// (`Curation::Subtree`).
@@ -393,7 +426,8 @@ enum Placement {
 /// linker script a link step would find by `-l` (what a `-dev` package
 /// adds). A subdirectory is bound whole unless something under it is a
 /// development file (`holds_dev_files`), and curated in turn otherwise;
-/// the compiler's own directories (`gcc`, `clang`) are always whole.
+/// the compiler's own directories (`gcc`, `clang`, a versioned
+/// `llvm-<N>/bin`) are always whole.
 ///
 /// The two curations differ where a library directory and a subdirectory
 /// hold different things:
@@ -427,7 +461,10 @@ fn library_entry_placement(
         return Placement::Drop;
     }
     if file_type.is_dir() {
-        return if COMPILER_DIRS.contains(&name) || !holds_dev_files(host_entry) {
+        return if is_compiler_dir(name)
+            || is_llvm_bin(name, host_entry)
+            || !holds_dev_files(host_entry)
+        {
             Placement::Keep
         } else {
             Placement::Curate
@@ -1142,6 +1179,9 @@ mod tests {
             "usr/lib64/pkgconfig",
             "usr/lib64/cmake",
             "usr/lib64/gcc",
+            "usr/lib64/llvm-14/lib/clang/14.0.0/include",
+            "usr/lib64/llvm-14/include/llvm",
+            "usr/lib64/llvm-14/bin",
             "usr/lib64/python3/site-packages",
             "usr/lib64/perl5/CORE",
             "usr/lib64/perl5/pkgconfig",
@@ -1168,6 +1208,21 @@ mod tests {
         write("usr/lib64/foo.o", b"\x7fELF\x02\x01\x01");
         write("usr/share/pkgconfig/zlib.pc", b"Name: zlib\n");
         write("usr/lib64/gcc/stddef.h", b"/* gcc */\n");
+        write(
+            "usr/lib64/llvm-14/lib/clang/14.0.0/include/stddef.h",
+            b"/* clang */\n",
+        );
+        write("usr/lib64/llvm-14/bin/clang", b"\x7fELF\x02\x01\x01");
+        // A header would curate `bin`; as LLVM's own, it is bound whole.
+        write(
+            "usr/lib64/llvm-14/bin/llvm-config.h",
+            b"/* oddly placed */\n",
+        );
+        write(
+            "usr/lib64/llvm-14/include/llvm/Config.h",
+            b"/* llvm-14-dev */\n",
+        );
+        write("usr/lib64/llvm-14/lib/libLLVMCore.a", b"!<arch>\n");
         write("usr/lib64/python3/site-packages/mod.py", b"pass\n");
         write("usr/lib64/perl5/CORE/perl.h", b"/* perl-devel */\n");
         write("usr/lib64/perl5/CORE/libperl.so", b"\x7fELF\x02\x01\x01");
@@ -1195,6 +1250,30 @@ mod tests {
             .filter(|window| window[0] == "--ro-bind")
             .map(|window| (PathBuf::from(&window[1]), PathBuf::from(&window[2])))
             .collect()
+    }
+
+    #[test]
+    fn llvm_trees_are_named_by_version() {
+        for name in ["llvm-14", "llvm-18", "llvm19", "llvm-20"] {
+            assert!(is_llvm_tree(name), "{name}");
+            assert!(!is_compiler_dir(name), "{name}");
+        }
+        for name in ["gcc", "clang"] {
+            assert!(is_compiler_dir(name), "{name}");
+        }
+        for name in [
+            "llvm",
+            "llvm-",
+            "llvm-x",
+            "llvmpipe",
+            "perl5",
+            "gcc-plugins",
+        ] {
+            assert!(!is_compiler_dir(name) && !is_llvm_tree(name), "{name}");
+        }
+        assert!(is_llvm_bin("bin", Path::new("/usr/lib/llvm-14/bin")));
+        assert!(!is_llvm_bin("bin", Path::new("/usr/lib/perl5/bin")));
+        assert!(!is_llvm_bin("lib", Path::new("/usr/lib/llvm-14/lib")));
     }
 
     /// Every rule, against a merged-/usr host: allowed entries are bound
@@ -1272,8 +1351,23 @@ mod tests {
         }
         // A subdirectory with no development files in it, and the
         // compiler's own, headers and all, are bound whole.
-        for kept in ["/usr/lib64/gcc", "/usr/lib64/python3"] {
+        for kept in [
+            "/usr/lib64/gcc",
+            "/usr/lib64/llvm-14/lib/clang",
+            "/usr/lib64/llvm-14/bin",
+            "/usr/lib64/python3",
+        ] {
             assert!(from_host(kept), "{kept} not bound from the host: {args:?}");
+        }
+        // The rest of a versioned LLVM tree is LLVM the library, curated:
+        // its headers and archives are gone (#559).
+        assert!(!bound("/usr/lib64/llvm-14"), "{args:?}");
+        for dropped in [
+            "/usr/lib64/llvm-14/include/llvm/Config.h",
+            "/usr/lib64/llvm-14/lib/libLLVMCore.a",
+        ] {
+            assert!(!bound(dropped), "{dropped} bound: {args:?}");
+            assert!(!mirrored(dropped), "{dropped} mirrored");
         }
         // One with development files is curated in turn: its plugin stays,
         // its headers, archives and pkg-config are gone (#331).
