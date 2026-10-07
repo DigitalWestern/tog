@@ -26,17 +26,23 @@ pub struct Dotnet;
 /// What `sync` and `build` share: realize the SDK and the restored
 /// packages, then project the closure through the descriptor the command
 /// holds. Returns the SDK object and the packages object.
+/// Realize and project from one preflight: `checked`, or a fresh one.
 fn realize_and_project(
     ctx: &Context,
     project: &ProjectRoot,
     toolchain: &Selected,
+    checked: Option<dotnet::Preflight>,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<(PathBuf, PathBuf)> {
     let (activity, platform, store) = (&ctx.activity, ctx.platform, &ctx.store);
+    let checked = match checked {
+        Some(checked) => checked,
+        None => dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?,
+    };
     let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
-    let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain)?;
+    let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain, &checked)?;
     let packages =
-        dotnet::realize_packages(store, activity, platform, &plan, &sdk, project, toolchain)?;
+        dotnet::realize_packages(store, activity, platform, &plan, &sdk, toolchain, &checked)?;
     dotnet::project_dotnet_env(
         activity,
         project,
@@ -122,7 +128,8 @@ impl Tailor for Dotnet {
         _door: &mut ResolutionDoor<'_>,
     ) -> io::Result<Option<String>> {
         // The plan is read from the lock alone: no SDK is realized.
-        let (plan, _) = dotnet::plan_dotnet(project, toolchain)?;
+        let checked = dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
+        let (plan, _) = dotnet::plan_dotnet(project, toolchain, &checked)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -134,9 +141,10 @@ impl Tailor for Dotnet {
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool> {
         let toolchain = request.toolchain;
-        dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
+        let checked = dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?;
         dotnet::require_lock(project)?;
-        let (_, packages) = realize_and_project(ctx, project, toolchain, attribution)?;
+        let (_, packages) =
+            realize_and_project(ctx, project, toolchain, Some(checked), attribution)?;
         ui::synced("nuget packages", &packages);
         Ok(true)
     }
@@ -163,7 +171,8 @@ impl Tailor for Dotnet {
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<()> {
         let project = ProjectRoot::open(cwd)?;
-        let (sdk, packages) = realize_and_project(ctx, &project, toolchain, attribution)?;
+        // build_sandboxed checks the project again right before the build.
+        let (sdk, packages) = realize_and_project(ctx, &project, toolchain, None, attribution)?;
         dotnet::build_sandboxed(
             ctx.platform,
             &ctx.activity,

@@ -868,7 +868,7 @@ fn parse_lock(text: &str) -> io::Result<ParsedLock> {
 
 /// What preflight checked: the canonical project file, and the lock's text
 /// and parse when the project has one (it may not exist until delegated
-/// planning writes it).
+/// planning writes it). Planning and realization take it as proof.
 #[derive(Debug)]
 pub struct Preflight {
     pub csproj: PathBuf,
@@ -989,11 +989,16 @@ pub fn generate_lock(
 }
 
 /// Plan from packages.lock.json (v1 only; tog makes the opt-in lock
-/// mandatory). The project is read through the held descriptor.
-pub fn plan_dotnet(project: &ProjectRoot, selected: &Selected) -> io::Result<(DotnetPlan, String)> {
+/// mandatory), as `checked` read and parsed it. The project is read
+/// through the held descriptor.
+pub fn plan_dotnet(
+    project: &ProjectRoot,
+    selected: &Selected,
+    checked: &Preflight,
+) -> io::Result<(DotnetPlan, String)> {
     let lock_rel = Path::new(LOCK_FILE);
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    let Preflight { csproj, lock } = preflight(project, &sdk_version)?;
+    let Preflight { csproj, lock } = checked;
     let Some((lock, ParsedLock { targets, packages })) = lock else {
         return Err(crate::tailors::missing_lock(project, LOCK_FILE));
     };
@@ -1005,12 +1010,12 @@ pub fn plan_dotnet(project: &ProjectRoot, selected: &Selected) -> io::Result<(Do
             .and_then(|n| n.to_str())
             .unwrap_or("project")
             .to_string(),
-        targets,
-        packages,
+        targets: targets.clone(),
+        packages: packages.clone(),
     };
     validate_plan(&plan, &sdk_version)?;
     let now = read_input_text(project, lock_rel)?;
-    if now != lock {
+    if now != *lock {
         return Err(err(
             "packages.lock.json changed while planning; re-run 'tog'",
         ));
@@ -1133,13 +1138,12 @@ pub fn realize_packages(
     platform: Platform,
     plan: &DotnetPlan,
     sdk_obj: &Path,
-    project: &ProjectRoot,
     selected: &Selected,
+    _checked: &Preflight,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET packages")?;
     let spec = sdk_spec(platform, selected)?;
-    let _ = preflight(project, &spec.version)?;
     validate_plan(plan, &spec.version)?;
     let sdk_obj = sdk_obj.canonicalize()?;
     // Fetch every nupkg (nuget.org flatcontainer only in v0). No upfront

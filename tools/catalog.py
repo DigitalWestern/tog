@@ -206,6 +206,21 @@ def asset_digests(release):
     return {a["name"]: a.get("digest") for a in release.get("assets", [])}
 
 
+def check_github_digest(report, what, recorded, digest, vouched_by):
+    """Compare `digest` with GitHub's own digest of the asset. GitHub
+    records none for assets uploaded before it began to, and then the run
+    says which source alone vouches for the row instead of passing over
+    the missing check in silence. `vouched_by` None: upstream publishes no
+    checksum of its own, so the row rests on its TLS download alone."""
+    if recorded is None and vouched_by is None:
+        report.note(f"{what}: GitHub records no digest and upstream publishes none, "
+                    "so the row is trusted on its TLS download alone")
+    elif recorded is None:
+        report.note(f"{what}: GitHub records no digest, so {vouched_by} is its only check")
+    else:
+        expect_equal(f"{what} GitHub digest", recorded, digest)
+
+
 def version_key(text):
     return tuple(int(p) for p in text.split("."))
 
@@ -658,11 +673,9 @@ def generate_python(existing, report, default_key):
             name = urllib.parse.unquote(a["url"].rsplit("/", 1)[1])
             if name not in digests[a["build"]]:
                 raise Failure(f"python: PBS {a['build']} release has no asset {name}")
-            # An asset GitHub recorded no digest for is still verified: every
-            # cpython row's digest is the one SHA256SUMS lists (above).
-            recorded = digests[a["build"]][name]
-            if recorded is not None:
-                expect_equal(f"python {name} GitHub digest", recorded, a["digest"])
+            # Every cpython row's digest is the one SHA256SUMS lists (above).
+            check_github_digest(report, f"python {name}", digests[a["build"]][name], a["digest"],
+                                "its SHA256SUMS")
     # uv: its own published .sha256, and GitHub's digest.
     uv_digests = {}
     for a in uv:
@@ -677,11 +690,7 @@ def generate_python(existing, report, default_key):
             uv_digests[tag] = asset_digests(github_release("astral-sh/uv", tag))
         if name not in uv_digests[tag]:
             raise Failure(f"uv {tag} release has no asset {name}")
-        # As for CPython: an asset GitHub recorded no digest for is still
-        # verified by its .sha256 (above).
-        recorded = uv_digests[tag][name]
-        if recorded is not None:
-            expect_equal(f"uv {name} GitHub digest", recorded, a["digest"])
+        check_github_digest(report, f"uv {name}", uv_digests[tag][name], a["digest"], "its .sha256")
     return out
 
 
@@ -762,7 +771,7 @@ def run_linux_bottle(path, tag, version):
     return True
 
 
-def ruby_release(tag, release_json, key=None, revision=None):
+def ruby_release(report, tag, release_json, key=None, revision=None):
     version = tag.split("_")[0]
     digests = asset_digests(release_json)
     rows = []
@@ -772,8 +781,7 @@ def ruby_release(tag, release_json, key=None, revision=None):
             return None, platform
         url = f"https://github.com/{PORTABLE}/releases/download/{tag}/{name}"
         digest = "sha256:" + download_digest(url, "sha256")
-        if digests[name] is not None:
-            expect_equal(f"ruby {name} GitHub digest", digests[name], digest)
+        check_github_digest(report, f"ruby {name}", digests[name], digest, None)
         check_bottle_layout(archive_path(url), tag)
         if platform == LINUX:
             run_linux_bottle(archive_path(url), tag, version)
@@ -789,7 +797,7 @@ def generate_ruby(existing, report):
         tag = rel["artifacts"][0]["build"]
         if tag not in releases:
             raise Failure(f"ruby: {rel['key']}: portable-ruby no longer publishes {tag}")
-        fresh, _ = ruby_release(tag, releases[tag], rel["key"], rel.get("revision"))
+        fresh, _ = ruby_release(report, tag, releases[tag], rel["key"], rel.get("revision"))
         check_row("ruby", rel["key"], rel, fresh)
         out[rel["key"]] = rel
     newest = {}
@@ -816,7 +824,7 @@ def generate_ruby(existing, report):
             key, revision = f"ruby-{tag}", max(rebuild, next_revision(shipped))
         else:
             key, revision = f"ruby-{version}", None
-        fresh, missing = ruby_release(tag, releases[tag], key, revision)
+        fresh, missing = ruby_release(report, tag, releases[tag], key, revision)
         if fresh is None:
             report.skip(key, f"portable-ruby {tag} has no {missing} bottle")
             continue
@@ -883,8 +891,7 @@ def generate_elixir(existing, report):
             continue
         side = fetch_text(f"https://github.com/{TOG_TOOLCHAINS}/releases/download/{r['tag_name']}/{name}.sha256").split()[0]
         digest = "sha256:" + side
-        if digests[name] is not None:
-            expect_equal(f"tog-toolchains {name} GitHub digest", digests[name], digest)
+        check_github_digest(report, f"tog-toolchains {name}", digests[name], digest, "its .sha256")
         linux[m.group(1)] = (r["tag_name"], name, digest)
     otps = sorted(set(darwin) & set(linux), key=version_key)
     majors_supported = sorted({int(v.split(".")[0]) for v in darwin}, reverse=True)[:3]
@@ -910,8 +917,7 @@ def generate_elixir(existing, report):
         published = fetch_text(url + ".sha256sum").split()[0]
         digest = "sha256:" + download_digest(url, "sha256")
         expect_equal(f"elixir {elixir} {name} .sha256sum", "sha256:" + published, digest)
-        if digests[name] is not None:
-            expect_equal(f"elixir {elixir} {name} GitHub digest", digests[name], digest)
+        check_github_digest(report, f"elixir {elixir} {name}", digests[name], digest, "its .sha256sum")
         return url, digest
 
     def installs_row(csv_text, tool, picked):

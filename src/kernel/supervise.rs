@@ -76,10 +76,9 @@ static SESSION_INT: AtomicU64 = AtomicU64::new(0);
 static SESSION_HUP: AtomicU64 = AtomicU64::new(0);
 static SESSION_QUIT: AtomicU64 = AtomicU64::new(0);
 static CHLD_RECEIVED: AtomicU32 = AtomicU32::new(0);
-/// The signal behind the last [`Interrupted`] error a session returned, or
-/// 0. A caller that wraps the error in a new message keeps its kind but
-/// drops the record, and `stop_signal` reads this to still tell an
-/// interrupt from the store's own "retry" use of the same kind.
+/// The signal that last stopped a session of this process (one command), or
+/// 0: a later clean session leaves it. A wrapped error drops its record, and
+/// `stop_signal` reads this to tell an interrupt from a store "retry".
 static STOPPED_BY: AtomicI32 = AtomicI32::new(0);
 /// The global self-pipe, created at the first install and never closed, so
 /// the handler never writes into a reused descriptor.
@@ -206,10 +205,18 @@ pub fn interrupted(error: &io::Error) -> Option<&Interrupted> {
     error.get_ref()?.downcast_ref::<Interrupted>()
 }
 
+/// The first terminating signal in `received`, recorded for `stop_signal`.
+fn record_stop(received: u32) -> Option<libc::c_int> {
+    let found = TERMINATING
+        .into_iter()
+        .find(|s| received & signal_bit(*s) != 0);
+    found.inspect(|signal| STOPPED_BY.store(*signal, Ordering::SeqCst))
+}
+
 /// The signal that asked tog to stop, when `error` is how a supervised call
 /// reported it: from the [`Interrupted`] record, or, once a caller wrapped
-/// the error and dropped the record, from the last interruption any session
-/// returned. `main` exits `128 + signal` on it, the shell's convention.
+/// the error and dropped the record, from the last interruption a session
+/// of this command saw. `main` exits `128 + signal`, the shell's convention.
 /// Any other error, including the store's own [`io::ErrorKind::Interrupted`]
 /// with no session interrupted, is `None`.
 pub fn stop_signal(error: &io::Error) -> Option<libc::c_int> {
@@ -920,18 +927,11 @@ impl Session {
     /// signal arrived, the interruption otherwise. A signal that arrives
     /// after a clean exit still counts, since it asked tog to stop too.
     fn conclude<T>(mut self, status: ExitStatus, value: T) -> io::Result<T> {
-        let received = self.finish();
-        match TERMINATING
-            .into_iter()
-            .find(|signal| received & signal_bit(*signal) != 0)
-        {
-            Some(signal) => {
-                STOPPED_BY.store(signal, Ordering::SeqCst);
-                Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    Interrupted { signal, status },
-                ))
-            }
+        match record_stop(self.finish()) {
+            Some(signal) => Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                Interrupted { signal, status },
+            )),
             None => Ok(value),
         }
     }
@@ -939,7 +939,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.finish();
+        let _ = record_stop(self.finish());
     }
 }
 
