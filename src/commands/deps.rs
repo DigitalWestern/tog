@@ -702,9 +702,9 @@ mod tests {
         let mut edit = edit_attribution().unwrap();
         policy::record_with(
             &policy::Policy::default(),
-            policy::SKIPPED_OPTIONAL,
+            policy::WEAK_INTEGRITY,
             "dependency-edit fixture",
-            "optional dependency was not requested",
+            "package carries only a weak digest",
         )
         .unwrap();
         let mut node = edit.nested("node").unwrap();
