@@ -1345,6 +1345,24 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
+    /// A go.work in a search-only (0111) parent is still found and refused:
+    /// the walk checks the name through the held ancestor (#480).
+    #[test]
+    fn a_go_work_in_a_search_only_parent_is_refused() {
+        let temp = TempDir::new();
+        let parent = temp.0.join("parent");
+        let module = parent.join("module");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("go.mod"), "module example.com/m\n").unwrap();
+        fs::write(parent.join("go.work"), "go 1.22\n").unwrap();
+        let _search_only = match crate::kernel::testutil::SearchOnly::new(&parent) {
+            Ok(held) => held,
+            Err(skip) => return eprintln!("{skip}"),
+        };
+        let error = reject_workspaces_with(&ProjectRoot::open(&module).unwrap(), None).unwrap_err();
+        assert!(error.to_string().contains("go.work found"), "{error}");
+    }
+
     fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
         fn visit(
             root: &Path,

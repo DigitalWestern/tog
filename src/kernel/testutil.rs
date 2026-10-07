@@ -20,6 +20,34 @@ pub(crate) fn tar_create() -> Command {
     command
 }
 
+/// `dir` at mode 0111 (search, no read) until dropped, for a test that a
+/// walk reaches names in a directory it cannot list. When this user lists
+/// it anyway (root, or `CAP_DAC_READ_SEARCH`) the test would prove nothing:
+/// the error is the line the test prints as it skips.
+pub(crate) struct SearchOnly(PathBuf);
+
+impl SearchOnly {
+    pub(crate) fn new(dir: &std::path::Path) -> Result<Self, String> {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let held = Self(dir.to_path_buf());
+        if std::fs::read_dir(dir).is_ok() {
+            return Err(format!(
+                "skipped: {} is still listable at mode 0111 (root or CAP_DAC_READ_SEARCH)",
+                dir.display()
+            ));
+        }
+        Ok(held)
+    }
+}
+
+impl Drop for SearchOnly {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// A Unix socket listening at `path`, however long `path` is. A socket
 /// address holds about 108 bytes, which a long `TMPDIR` exceeds. On Linux
 /// the socket is bound through the parent directory's `/proc/self/fd`

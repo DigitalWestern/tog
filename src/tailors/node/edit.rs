@@ -703,6 +703,30 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
+    /// An npm workspace root in a search-only (0111) directory still owns
+    /// its member's lock: its package.json is read by name (#480).
+    #[test]
+    fn an_npm_workspace_root_in_a_search_only_directory_is_found() {
+        let temp = TempDir::new();
+        let root = temp.0.join("workspace");
+        let member = root.join("packages/member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","private":true,"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"member"}"#).unwrap();
+        let _search_only = match crate::kernel::testutil::SearchOnly::new(&root) {
+            Ok(held) => held,
+            Err(skip) => return eprintln!("{skip}"),
+        };
+        match node_lock_for(&member).unwrap() {
+            NodeLock::NpmWorkspaceMember { root: found } => assert_eq!(found, root),
+            _ => panic!("the member's lock is not the workspace root's"),
+        }
+    }
+
     #[test]
     fn pnpm_package_manager_requires_an_exact_release_and_verifies_hash_syntax() {
         let package_json = Path::new("package.json");

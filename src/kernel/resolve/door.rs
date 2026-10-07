@@ -1552,6 +1552,36 @@ get() {
         drop(held);
     }
 
+    /// A detached door, which writes back without a transaction, reads and
+    /// writes the held project too: renamed and replaced before the run, the
+    /// tool sees the held inputs and the output lands in the held tree.
+    #[test]
+    fn a_detached_door_writes_to_the_held_project_after_a_replacement() {
+        let Some(relay) = relay("a_detached_door_writes_to_the_held_project_after_a_replacement")
+        else {
+            return;
+        };
+        let fx = fixture("door-detached-replaced");
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let moved = fx.project.with_file_name("moved");
+        fs::rename(&fx.project, &moved).unwrap();
+        fs::create_dir(&fx.project).unwrap();
+        fs::write(fx.project.join("package.json"), PACKAGE_JSON).unwrap();
+        fs::write(fx.project.join("deps.lock"), b"decoy\n").unwrap();
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "cat deps.lock > new.lock\n",
+            Policy::default(),
+            |confined| confined.target = Target::Detached,
+        );
+        outcome.result.unwrap();
+        assert_eq!(fs::read(moved.join("new.lock")).unwrap(), OLD_LOCK);
+        assert!(!fx.project.join("new.lock").exists());
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"decoy\n");
+        drop(held);
+    }
+
     /// A held project renamed with nothing put in its place still runs:
     /// its path no longer resolves, but the door never needed it to.
     #[test]
