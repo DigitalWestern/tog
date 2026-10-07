@@ -1640,6 +1640,120 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/kernel/testutil.rs", "detached_lease", 1),
 ];
 
+/// A call of one of `kernel::fetch`'s verified downloads or cache reads,
+/// which admit a cache entry by its digest alone (a call, not the `fn`
+/// that defines it). A call through a `use ... as` alias is not seen.
+fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bool {
+    const FETCHES: &[&str] = &[
+        "download_verified_held",
+        "download_verified_digest",
+        "download_verified_digest_held",
+        "download_toolchain_artifact_held",
+        // The cache-only reads and the proxy's streaming insert: a hit is
+        // admitted by digest the same way.
+        "cache_verified_held",
+        "cache_verified_digest_held",
+        "read_cache_verified_digest",
+        "cache_from_reader",
+    ];
+    FETCHES
+        .iter()
+        .any(|name| is_ident(token_at(tokens, i), name))
+        && is_punct(token_at(tokens, i + 1), '(')
+        && !(i > 0 && is_ident(token_at(tokens, i - 1), "fn"))
+}
+
+/// Every caller of a verified download, per function, grouped by where its
+/// expected digest comes from. A cache hit is admitted by digest alone,
+/// whichever ecosystem wrote the entry: the bytes are the ones the digest
+/// names, so the cache grants nothing the digest's source did not already
+/// grant, and the trust decision is that source (#476, and the rule on
+/// `fetch::download_verified_digest_held`). A new caller fails until it is
+/// listed under its source, or under a new group that says why that source
+/// is trusted.
+///
+/// The count is per function, so it sees a call added or removed, not one
+/// replaced: a listed function that drops its call and gains another, with
+/// a digest from somewhere else, keeps its count and passes. A function
+/// that changes where its digest comes from has to move groups by hand.
+const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
+    // A toolchain row: tog's catalog, or the project's toolchain lock
+    // pinning one of its rows. `download_toolchain_artifact_held` also
+    // authorizes the URL for the row's publisher, hit or miss.
+    ("src/kernel/provider/cpython.rs", "realize_runtime", 1),
+    ("src/kernel/provider/cpython.rs", "realize_uv", 1),
+    ("src/kernel/provider/rust.rs", "realize_runtime", 1),
+    ("src/kernel/provider/rust_extras.rs", "load_manifest", 1),
+    ("src/kernel/provider/rust_extras.rs", "realize_component", 1),
+    ("src/tailors/cargo/rustfmt.rs", "ensure_rustfmt", 1),
+    ("src/tailors/dotnet/mod.rs", "realize_runtime", 1),
+    ("src/tailors/elixir/mod.rs", "realize_runtime", 1),
+    ("src/tailors/go/mod.rs", "realize_runtime", 1),
+    ("src/tailors/node/mod.rs", "realize_runtime", 1),
+    ("src/tailors/ruby/mod.rs", "realize_runtime", 1),
+    // Compiled into tog: the native library table.
+    ("src/kernel/provider/nativelibs.rs", "realize_staged", 1),
+    // The publisher's own listing, read over TLS: rubygems.org's API (or
+    // the store record tog wrote after checking a download against it), and
+    // Electron's SHASUMS256.txt from its GitHub release (kept in the
+    // store). Never a lock's claim.
+    ("src/tailors/ruby/mod.rs", "verify_gem", 1),
+    ("src/kernel/provider/artifacts.rs", "provision", 1),
+    // The project's pin: its committed lock (Cargo.lock checksums, mix.lock
+    // outer checksums, package-lock integrity, tog's Python lock) or a
+    // `tog.toml` declared artifact. tog honors the pin as the user's choice
+    // of bytes, as cargo, npm and pip with hashes do. A pin the upstream URL
+    // would not serve fails on a cold cache and installs the pinned bytes
+    // on a warm one.
+    ("src/kernel/provider/crates.rs", "realize_vendor_inner", 1),
+    ("src/tailors/elixir/mod.rs", "realize_deps", 1),
+    ("src/tailors/node/realize.rs", "fetch_npm_tarballs", 1),
+    ("src/tailors/node/realize.rs", "fetch_plan_sources", 1),
+    ("src/tailors/node/realize.rs", "plant_declared_artifacts", 1),
+    (
+        "src/tailors/python/build.rs",
+        "build_sdist_wheel_at_depth",
+        2,
+    ),
+    (
+        "src/tailors/python/build.rs",
+        "plan_sdist_identity_input",
+        2,
+    ),
+    ("src/tailors/python/env.rs", "realize_artifacts", 1),
+    ("src/tailors/python/env.rs", "realize_env_at_depth", 1),
+    (
+        "src/tailors/python/sdist_view.rs",
+        "discard_failed_attempt",
+        1,
+    ),
+    // Cache reads of a pin's bytes: go's plan carries the sha256 of each
+    // module file tog itself inserted after checking it against go.sum's
+    // h1, and Corepack's check reads the pnpm tarball the node lock's
+    // integrity names before comparing it with `packageManager`'s hash.
+    ("src/tailors/go/mod.rs", "stage_modcache_skeleton", 1),
+    ("src/tailors/node/corepack.rs", "verify_corepack_hash", 1),
+    // The registry's claim, read through the resolution proxy: the digest
+    // a registry's metadata response (an npm packument's integrity, a
+    // crates.io index checksum) states for an artifact the tool then
+    // fetches. The proxy serves the claimed bytes only when they match, so
+    // the tool sees what the registry promised, over TLS, as it would
+    // without the proxy; a lock written from them then carries the same
+    // digest as its pin.
+    ("src/kernel/resolve/mirror.rs", "claimed_artifact", 1),
+];
+
+#[test]
+fn every_verified_download_names_its_digest_source() {
+    assert_eq!(
+        count_sites(&["src/kernel/fetch.rs"], verified_fetch_at),
+        expected_sites(DIGEST_SOURCES),
+        "a verified download is called from a site not in DIGEST_SOURCES; \
+         list it there with where its expected digest comes from (a cache \
+         hit is trusted by that source, not by who wrote the cache)"
+    );
+}
+
 /// A `Store` made without reading its format marker: the struct written
 /// out (`Store { root }`) or `Store::handle(`, under any `use` or `type`
 /// alias, and `Self { root }` / `Self::handle(` in a file with an
