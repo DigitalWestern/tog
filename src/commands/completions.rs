@@ -10,7 +10,7 @@ pub fn run(shell: cli::Shell) -> io::Result<i32> {
     let extensions: Vec<&str> = tailors::registry()
         .iter()
         .flat_map(|tailor| tailor.source_files())
-        .filter(|file| matches!(file.runner, FileRunner::Command(_)))
+        .filter(|file| !matches!(file.runner, FileRunner::Built(_)))
         .map(|file| file.extension)
         .collect();
     print!("{}", cli::completions(shell, &extensions));

@@ -166,7 +166,7 @@ pub(crate) fn missing_lock(project: &ProjectRoot, lock: &str) -> io::Error {
 }
 
 /// One source-file extension an ecosystem claims for `tog <file>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct SourceFile {
     /// Lowercase, without the dot: `py`, `mjs`.
     pub extension: &'static str,
@@ -174,11 +174,15 @@ pub struct SourceFile {
 }
 
 /// What `tog <file>` does with a file of one ecosystem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum FileRunner {
     /// The program, with its leading arguments, that runs the file inside
     /// the project's environment: `python`, `go run`.
     Command(&'static [&'static str]),
+    /// The program depends on the runtime the project selected: given its
+    /// primary version, the program, or why that runtime cannot run the
+    /// file. Node runs TypeScript only from 22.6.
+    ByVersion(fn(&str) -> Result<&'static [&'static str], String>),
     /// This ecosystem builds a project, never a lone file: why, and the
     /// verb that does it.
     Built(&'static str),
