@@ -968,8 +968,31 @@ fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Ve
 /// classifies entries with the view's own rules (`classify_dir`), so the
 /// two cannot disagree about what is dropped. Any read that fails is an
 /// error: an unreadable directory never passes for an empty one.
+///
+/// A debug build with the test stand-in for host development packages set
+/// (`test_host_dev_files`) folds that tree in the same way: what a build
+/// that saw it made is not what one that did not would reuse.
 pub(crate) fn host_build_inputs() -> io::Result<String> {
-    host_build_inputs_at(Path::new("/"))
+    let host = host_build_inputs_at(Path::new("/"))?;
+    match test_host_dev_files() {
+        None => Ok(host),
+        Some(dev) => with_dev_files(&host, &dev),
+    }
+}
+
+/// `host` with the tree at `dev` folded in, by the same stat-based walk.
+fn with_dev_files(host: &str, dev: &Path) -> io::Result<String> {
+    use sha2::Digest as _;
+    let mut digest = Fingerprint {
+        host_root: Path::new("/"),
+        digest: sha2::Sha256::new(),
+    };
+    digest.digest.update(b"tog-host-build-inputs/3+dev-files");
+    digest.field(host.as_bytes());
+    if digest.entry(dev, dev)? {
+        digest.tree(dev, dev)?;
+    }
+    Ok(hex::encode(digest.digest.finalize()))
 }
 
 fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
@@ -1180,6 +1203,23 @@ mod tests {
 
     fn temp_dir(test_name: &str) -> TempDir {
         TempDir::named(&format!("hostview-{test_name}"))
+    }
+
+    /// The stand-in for host development packages changes the host's
+    /// fingerprint, and a change inside it changes it again (#559).
+    #[test]
+    fn dev_files_are_part_of_the_host_build_inputs() {
+        let temp = temp_dir("dev-files");
+        let dev = temp.0.join("dev");
+        fs::create_dir_all(dev.join("usr/include")).unwrap();
+        fs::write(dev.join("usr/include/probe.h"), "int probe;\n").unwrap();
+        let host = "0".repeat(64);
+        let with = with_dev_files(&host, &dev).unwrap();
+        assert_ne!(with, host);
+        assert_eq!(with_dev_files(&host, &dev).unwrap(), with);
+        fs::write(dev.join("usr/include/probe.h"), "int probe, more;\n").unwrap();
+        assert_ne!(with_dev_files(&host, &dev).unwrap(), with);
+        assert_ne!(with_dev_files(&"1".repeat(64), &dev).unwrap(), with);
     }
 
     /// A fake host with one of each entry the `RuntimeOnly` rules decide

@@ -1073,9 +1073,10 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
     );
 
     // The next sync reaches the fallback object through the record, never
-    // by building again: with the `.gem` gone from the artifact cache, the
-    // network cut and the stand-in development package gone, a rebuild
-    // could not even start.
+    // by building again: with the `.gem` gone from the artifact cache and
+    // the network cut, a rebuild could not even start. The stand-in
+    // development package stays as it was, and named: it is part of the
+    // host's fingerprint, so the record is found only for the same host.
     let closure = |project: &Path| -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
             .unwrap()
@@ -1086,9 +1087,12 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
     tog::kernel::store::remove_tree(&cached)
         .or_else(|_| std::fs::remove_file(&cached))
         .unwrap();
-    tog::kernel::store::remove_tree(&dev).unwrap();
     let second = assert_ok(
-        tog_offline(&project, &temp.0, &["sync"]),
+        common::offline_command(&project, &temp.0, &store)
+            .env("TOG_TEST_HOST_DEV_FILES", &dev)
+            .arg("sync")
+            .output()
+            .expect("spawn tog without network"),
         "offline re-sync over the fallback object",
     );
     eprintln!("second sync: {second}");
