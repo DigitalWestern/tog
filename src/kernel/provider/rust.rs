@@ -59,8 +59,8 @@ pub const CHANNEL_MANIFEST_RECIPE: &str = "rust-channel-manifest/1";
 /// shipped release of the same version answers then, and the manifest is
 /// still held to every row of the lock before anything is read from it.
 pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<ArtifactSpec> {
-    let row = match selected.artifact(platform, CHANNEL_MANIFEST) {
-        Ok(row) => row,
+    let (row, source) = match selected.artifact(platform, CHANNEL_MANIFEST) {
+        Ok(row) => (row, selected.row_source()),
         Err(_) => {
             let version = selected.version("rustc")?;
             shipped_selection(version)
@@ -71,10 +71,11 @@ pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<A
                          provision the components, targets or profile rust-toolchain.toml asks \
                          for; upgrade tog"
                     ))
-                })?
+                })
+                .map(|row| (row, "this tog's shipped Rust catalog"))?
         }
     };
-    row.check("cargo", CHANNEL_MANIFEST_RECIPE, "sha256")?;
+    row.check_from("cargo", CHANNEL_MANIFEST_RECIPE, "sha256", source)?;
     Ok(row)
 }
 
@@ -264,7 +265,7 @@ pub fn runtime_rows(platform: Platform, selected: &Selected) -> io::Result<Vec<A
         // Checked as `cargo`, the name users know this ecosystem by; the
         // selection's own ecosystem is `rust`.
         let row = selected.artifact(platform, component)?;
-        row.check("cargo", RUST_RECIPE, "sha256")?;
+        row.check_from("cargo", RUST_RECIPE, "sha256", selected.row_source())?;
         rows.push(row);
     }
     Ok(rows)

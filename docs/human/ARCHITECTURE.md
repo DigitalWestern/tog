@@ -11,9 +11,10 @@ projects: Next.js 15 + vitest suites, vite apps (build and dev server),
 prisma, native addons compiled hermetically (better-sqlite3, sharp), FastAPI
 apps with native wheels. Cargo, Go, Ruby, Elixir, and .NET all landed
 2026-08-31 as wrap-hermetically tailors. Tailor cost, measured
-2026-10-05 (non-blank, non-comment lines under `src/tailors/<name>/`,
-excluding test modules): Node ~11.1k, Python ~10.0k, Elixir ~2.6k,
-Go ~2.1k, .NET ~1.9k, Ruby ~1.9k, Cargo ~1.7k. The first estimates
+2026-10-06 by one rule (every `.rs` file under `src/tailors/<name>/`, less
+blank lines, comment lines including doc comments, and `#[cfg(test)]`
+modules): Node ~11.7k, Python ~10.0k, Elixir ~2.7k, Go ~2.2k, Ruby ~2.0k,
+.NET ~1.9k, Cargo ~1.8k. The first estimates
 (~500-1000 lines each) were about 10x low for the two proven tailors:
 real projects needed lock importers, native builds and sandboxed scripts. pnpm v9/v6 and Yarn classic lockfile importers shipped
 2026-09-06 (`src/tailors/node/lock_import/`). Current version: tog 0.1.0.

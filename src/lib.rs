@@ -45,7 +45,7 @@ pub mod boundary {
     // tests/node_env_evidence.rs
     pub use crate::kernel::gc::collect;
     // tests/native_libs.rs
-    pub use crate::kernel::provider::nativelibs::{size_bytes, NativeLibSet};
+    pub use crate::kernel::provider::nativelibs::size_bytes;
     // tests/native_libs.rs, tests/sandbox_deny.rs
     pub use crate::kernel::sandbox::run_build_spec;
     // tests/sandbox_deny.rs
