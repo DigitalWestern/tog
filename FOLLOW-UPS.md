@@ -126,7 +126,6 @@ None open.
 
 
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
-- **#527: tests: gaps found in the review of #526.** Left: real uv and Bundler e2e runs after a swap, a Node `tog sync` under a search-only parent, and the sandbox.rs socket tests under a long TMPDIR (heavy-watched). One checklist.
 - **#555: fetch and cache hardening from the review of #532 to #545.** The poisoned-entry removal race, tests for `fetch_text_or_missing` and `download_unpinned`, `Interrupted` in `hash_reader`, the insert temporary and its mode. One checklist.
 - **#556: archive link and `read_member` follow-ups from #542 and #543.** `read_member` follows links without `validate`'s rules, two refusals missing from the docs, missing tests, stale comments. One checklist.
 - **#557: what wakes the heavy suite (#546, #547).** Zip extraction and git-source packing are unwatched, the `kernel/` exemption is wider than the gate, two label gaps. A CI-cost decision. One checklist.
