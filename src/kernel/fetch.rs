@@ -553,6 +553,13 @@ fn none_when_missing(fetched: io::Result<String>) -> io::Result<Option<String>> 
 /// refuses and removes `dest` rather than keep a truncated file.
 pub(crate) fn download_unpinned(url: &str, dest: &Path, max: u64) -> io::Result<()> {
     let (reader, _) = open_url(url, "download", None)?;
+    copy_unpinned(url, dest, max, reader)
+}
+
+/// The copy `download_unpinned` makes once `url` is open: at most `max`
+/// bytes of `reader` into `dest`, which is removed on a longer stream or a
+/// read error. Every message names `url` as `shown_url` shows it.
+fn copy_unpinned(url: &str, dest: &Path, max: u64, reader: Box<dyn Read>) -> io::Result<()> {
     let mut file = fs::File::create(dest)?;
     let copied = io::copy(&mut reader.take(max + 1), &mut file);
     drop(file);
@@ -796,7 +803,7 @@ pub fn download_verified_digest(
 /// artifact), or the registry's claim for an artifact read through the
 /// resolution proxy (`resolve::mirror`). The same rule covers the
 /// cache-only reads (`cache_verified_held`, `cache_verified_digest_held`,
-/// `read_cache_verified_digest`) and the proxy's `cache_from_reader`. Every
+/// `read_cache_verified_digest`) and the proxy's `cache_from_reader_any`. Every
 /// caller is listed under its source in `tests/architecture.rs`
 /// (`DIGEST_SOURCES`), and a new one fails there until it is; the count is
 /// per function, so a call replaced within a listed function is not seen.
@@ -2330,9 +2337,31 @@ mod integrity_tests {
         assert!(leftover_downloads(&store).is_empty());
     }
 
+    /// The proxy's `cache_from_reader_any` passes the artifact cap too
+    /// (#614): the same stream reaches the hash check, under either of two
+    /// candidate digests.
+    #[test]
+    fn a_proxied_download_is_capped_at_the_artifact_cap_not_the_release_cap() {
+        let (_scratch, store) = scratch_store("fetch-cap-proxy");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let candidates = [
+            Digest::sha256(&sha256_hex(b"hello")).unwrap(),
+            Digest::sha256(&sha256_hex(b"world")).unwrap(),
+        ];
+        let error = cache_from_reader_any(&store, activity, "https://x/big", &candidates, || {
+            Ok(Box::new(io::repeat(0).take(MAX_RELEASE_FILE + 1)) as Box<dyn Read>)
+        })
+        .map(drop)
+        .unwrap_err();
+        assert!(HashMismatch::of(&error).is_some(), "{error}");
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
     /// A hash mismatch names the URL without the credentials before its
     /// host or the signature in its query string (#348), from the cache
-    /// and from `download_file` alike.
+    /// and from `download_file` alike. So do an unpinned download's cap
+    /// and read-error refusals, and a text read's cap, read-error and
+    /// UTF-8 refusals (#614).
     #[test]
     fn a_hash_mismatch_does_not_print_credentials_or_a_signature() {
         let url = "https://user:token@x/hello?sig=secret";
@@ -2344,6 +2373,20 @@ mod integrity_tests {
         })
         .map(drop)
         .unwrap_err();
+        let unpinned = store.root.join("unpinned");
+        let unpinned_long = copy_unpinned(url, &unpinned, 4, Box::new(&b"hello"[..])).unwrap_err();
+        assert!(!unpinned.exists(), "a refused unpinned download is removed");
+        let unpinned_dropped = copy_unpinned(
+            url,
+            &unpinned,
+            1024,
+            Box::new(DroppedStream {
+                head: b"hel",
+                served: 0,
+            }),
+        )
+        .unwrap_err();
+        assert!(!unpinned.exists(), "a dropped unpinned download is removed");
         let dest = store.root.join("release");
         let release =
             stream_to_file(url, &dest, &digest, Box::new(&b"hellp"[..]), None, 1024).unwrap_err();
@@ -2360,7 +2403,32 @@ mod integrity_tests {
         )
         .unwrap_err();
         let text = read_text_capped(&b"abcde"[..], 4, url).unwrap_err();
-        for error in [cached, release, dropped, text] {
+        let text_dropped = read_text_capped(
+            DroppedStream {
+                head: b"",
+                served: 0,
+            },
+            4,
+            url,
+        )
+        .unwrap_err();
+        assert_eq!(text_dropped.kind(), io::ErrorKind::ConnectionReset);
+        let text_binary = read_text_capped(&[0xff, b'a'][..], 4, url).unwrap_err();
+        assert_eq!(text_binary.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            text_binary.to_string().contains("not UTF-8"),
+            "{text_binary}"
+        );
+        for error in [
+            cached,
+            unpinned_long,
+            unpinned_dropped,
+            release,
+            dropped,
+            text,
+            text_dropped,
+            text_binary,
+        ] {
             let shown = error.to_string();
             assert!(shown.contains("https://x/hello"), "{shown}");
             for secret in ["user", "token", "sig=", "secret"] {
