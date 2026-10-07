@@ -1608,6 +1608,9 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/kernel/store/mod.rs", "activity", 1),
     ("src/kernel/store/mod.rs", "try_activity_exclusive", 1),
     ("src/kernel/store/mod.rs", "try_activity_shared", 1),
+    // `existing` with a shared lease, for a reader that only locates the
+    // store and holds it while it reads (the local Rust tree cache, #434).
+    ("src/kernel/store/mod.rs", "existing_shared", 1),
     // The one primitive that does not validate the format marker.
     (
         "src/kernel/store/mod.rs",
