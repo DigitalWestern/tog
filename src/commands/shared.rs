@@ -200,32 +200,41 @@ pub(crate) fn selected_toolchain(
     // selection for its sources otherwise. A lock that cannot be read
     // refuses here: it must not fall through to the shipped default.
     if let Some(location) = project_for(cwd)? {
-        let root = ProjectRoot::open(&location.root)?;
-        // A registry tool of an ecosystem this project does not have (a
-        // Python tool in a Cargo project) is not the project's to pin: when
-        // the committed lock has no section for it, it runs on the shipped
-        // runtime. An ecosystem the project has keeps the lock's refusals,
-        // and with no lock the project's own sources decide, as below.
-        let lock_ecosystem = tailor.lock_ecosystem();
-        // Detected again through this root, so the ecosystems and the lock
-        // are those of one directory: a project put at the path since
-        // `project_for` looked cannot borrow the earlier answer.
-        let has_ecosystem = crate::tailors::detected_in(&root)?
-            .iter()
-            .any(|found| found.lock_ecosystem() == lock_ecosystem);
-        if !has_ecosystem && lock_names(&root, lock_ecosystem)? == Some(false) {
-            return runtime::shipped(&tailor.toolchain_catalog()?);
-        }
-        let resolved = comforter::toolchain::resolve(
-            &root,
-            platform,
-            ecosystem_inputs(&[tailor])?,
-            comforter::toolchain::Mode::ReadOnly,
-            false,
-        )?;
-        return resolved.get(tailor.lock_ecosystem()).cloned();
+        return selected_in_root(platform, &ProjectRoot::open(&location.root)?, tailor);
     }
     runtime::shipped(&tailor.toolchain_catalog()?)
+}
+
+/// [`selected_toolchain`] for the project held at `root`: everything is
+/// read through that one descriptor, never the path it was opened by.
+fn selected_in_root(
+    platform: Platform,
+    root: &ProjectRoot,
+    tailor: &'static dyn crate::tailors::Tailor,
+) -> io::Result<Selected> {
+    // A registry tool of an ecosystem this project does not have (a
+    // Python tool in a Cargo project) is not the project's to pin: when
+    // the committed lock has no section for it, it runs on the shipped
+    // runtime. An ecosystem the project has keeps the lock's refusals,
+    // and with no lock the project's own sources decide, as below.
+    let lock_ecosystem = tailor.lock_ecosystem();
+    // Detected again through this root, so the ecosystems and the lock
+    // are those of one directory: a project put at the path since
+    // `project_for` looked cannot borrow the earlier answer.
+    let has_ecosystem = crate::tailors::detected_in(root)?
+        .iter()
+        .any(|found| found.lock_ecosystem() == lock_ecosystem);
+    if !has_ecosystem && lock_names(root, lock_ecosystem)? == Some(false) {
+        return runtime::shipped(&tailor.toolchain_catalog()?);
+    }
+    let resolved = comforter::toolchain::resolve(
+        root,
+        platform,
+        ecosystem_inputs(&[tailor])?,
+        comforter::toolchain::Mode::ReadOnly,
+        false,
+    )?;
+    resolved.get(tailor.lock_ecosystem()).cloned()
 }
 
 /// Whether the project's committed toolchain lock has a section for
@@ -455,6 +464,27 @@ mod tests {
                 .contains("has no [toolchain.python] section"),
             "{error}"
         );
+
+        // The same answer from the held root after a Cargo-only project is
+        // put at its path: detection and the lock are both read through the
+        // one held directory (#487). Read by the path, the Cargo-only
+        // project would have sent the tool to the shipped runtime.
+        let held = ProjectRoot::open(&python).unwrap();
+        let moved = t.0.join("python-moved");
+        std::fs::rename(&python, &moved).unwrap();
+        std::fs::rename(&cargo, &python).unwrap();
+        let tailor = crate::tailors::by_id("python").unwrap();
+        let error = selected_in_root(platform, &held, tailor).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no [toolchain.python] section"),
+            "{error}"
+        );
+        let at_path = selected_toolchain(platform, &python, "python").unwrap();
+        assert_eq!(at_path.source, crate::kernel::toolchain::Source::Shipped);
+        std::fs::rename(&python, &cargo).unwrap();
+        std::fs::rename(&moved, &python).unwrap();
 
         // Mixed and locked for both: the lock decides.
         lock_for(&python, &["cargo", "python"]);

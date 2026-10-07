@@ -2310,6 +2310,29 @@ mod tests {
         }
     }
 
+    /// An SDK file in a search-only (0111) ancestor is still seen: the walk
+    /// checks it by name through the held ancestor (#480).
+    #[test]
+    fn preflight_sees_an_sdk_file_in_a_search_only_ancestor() {
+        let scratch = TempDir::named("dn-search-only");
+        let parent = scratch.0.join("parent");
+        let project = parent.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("project.csproj"), minimal_csproj()).unwrap();
+        fs::write(parent.join("Directory.Build.rsp"), "-p:X=1\n").unwrap();
+        let _search_only = match crate::kernel::testutil::SearchOnly::new(&parent) {
+            Ok(held) => held,
+            Err(skip) => return eprintln!("{skip}"),
+        };
+        let error = preflight(&ProjectRoot::open(&project).unwrap(), SDK_VERSION).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Directory.Build.rsp is not supported"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn preflight_rejects_unsafe_project_shapes() {
         let scratch = TempDir::named("dn-preflight");

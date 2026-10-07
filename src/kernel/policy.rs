@@ -511,6 +511,15 @@ pub fn load_with_sources(
     load_with_sources_from(project_dir, None, cli_strict)
 }
 
+// Test seam (#527): at each comparison with a project policy, the identity
+// of the machine policy descriptor still open then (`None`: none held). The
+// identity it compares is only unique while that file is held.
+#[cfg(test)]
+thread_local! {
+    static MACHINE_HELD_AT_COMPARE: std::cell::RefCell<Vec<Option<PathIdentity>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// `load_with_sources` with the project directory itself read through a
 /// descriptor the caller holds: its own `.tog/policy.toml` is the one of
 /// the directory being synced, whatever its path names by then, and its
@@ -553,7 +562,15 @@ pub(crate) fn load_with_sources_from(
     // Every ancestor's project policy applies (union only tightens), so a
     // workspace-root policy governs builds started in a member directory
     // without tog having to know each ecosystem's rooting rule.
-    let is_machine = |identity: &PathIdentity| machine_path.as_ref() == Some(identity);
+    let is_machine = |identity: &PathIdentity| {
+        #[cfg(test)]
+        MACHINE_HELD_AT_COMPARE.with(|seen| {
+            let held = _machine_held.as_ref();
+            seen.borrow_mut()
+                .push(held.and_then(|file| file_identity(file, Path::new("")).ok()));
+        });
+        machine_path.as_ref() == Some(identity)
+    };
     let Some(project) = project else {
         for dir in project_dir.ancestors() {
             let path = dir.join(".tog/policy.toml");
@@ -2193,6 +2210,51 @@ deny = ["git-dependency"]"#,
         assert_eq!(
             ours.iter().map(|source| source.origin).collect::<Vec<_>>(),
             vec![SourceOrigin::Machine, SourceOrigin::Project]
+        );
+    }
+
+    /// The machine file stays open across every comparison with a project
+    /// policy, at every ancestor of a held project (the branch sync takes),
+    /// so its inode cannot be handed to a project file created after the
+    /// machine one is deleted (#500). The descriptor held at each
+    /// comparison is the machine file itself, and an ancestor policy that
+    /// is that same file (a hard link) is recognized and read once.
+    #[test]
+    fn the_machine_policy_is_held_open_while_project_policies_are_compared() {
+        use std::os::unix::fs::MetadataExt as _;
+        let scratch = TempDir::named("policy-machine-held");
+        let root = scratch.0.clone();
+        let machine = root.join("machine.toml");
+        fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
+        let project = root.join("outer/project");
+        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(root.join("outer/.tog")).unwrap();
+        fs::hard_link(&machine, root.join("outer/.tog/policy.toml")).unwrap();
+        fs::write(
+            project.join(".tog/policy.toml"),
+            "deny = [\"weak-integrity\"]\n",
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
+        let _env = test_env_lock();
+        let _policy = EnvVarGuard::set("TOG_POLICY", machine.as_os_str());
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        MACHINE_HELD_AT_COMPARE.with(|seen| seen.borrow_mut().clear());
+        let (_, sources) = load_with_sources_from(&project, Some(&held), false).unwrap();
+        let seen = MACHINE_HELD_AT_COMPARE.with(|seen| std::mem::take(&mut *seen.borrow_mut()));
+        let metadata = fs::metadata(&machine).unwrap();
+        let identity = (metadata.dev(), metadata.ino());
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert!(seen.iter().all(|held| *held == Some(identity)), "{seen:?}");
+        let projects: Vec<_> = sources
+            .iter()
+            .filter(|source| source.origin == SourceOrigin::Project)
+            .filter_map(|source| source.path.clone())
+            .collect();
+        assert_eq!(projects.len(), 1, "{projects:?}");
+        assert!(
+            projects[0].ends_with("outer/project/.tog/policy.toml"),
+            "{projects:?}"
         );
     }
 
