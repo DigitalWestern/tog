@@ -192,6 +192,7 @@ fn pack_within(
     if project.input_entry(&base)? != Entry::Directory {
         return Err(err(format!("the file: package {dir} is not a directory")));
     }
+    let held = open_dir(project, &base)?;
     let mut walk = Walk {
         project,
         dir,
@@ -201,7 +202,7 @@ fn pack_within(
         bytes: 0,
         tarball: super::unpack::PackageTarball::new(out)?,
     };
-    walk.collect(&base, "", 0)?;
+    walk.collect(held, &base, "", 0)?;
     walk.tarball.finish()
 }
 
@@ -235,11 +236,22 @@ fn resolve_inside(project: &ProjectRoot, path: &Path) -> io::Result<Option<PathB
     }
 }
 
+/// The directory at the resolved project-relative `dir` (no symlink in it),
+/// opened with the strict walk from the project root: a component swapped
+/// for a symlink since it was resolved refuses rather than redirects.
+fn open_dir(project: &ProjectRoot, dir: &Path) -> io::Result<ProjectRoot> {
+    project
+        .subdir(dir)?
+        .ok_or_else(|| err(format!("{} vanished while packing", dir.display())))
+}
+
 /// The depth-first walk of a `file:` directory, writing each member as it
 /// is reached. A file is opened from the descriptor of the directory just
 /// listed (`openat`, no symlink followed, a regular file or nothing), never
 /// by its pathname: an entry swapped between the listing and the open
-/// fails the pack rather than substituting another file (#612). Writing
+/// fails the pack rather than substituting another file (#612). A
+/// directory is opened the same way, from its parent's descriptor, so a
+/// directory swapped for a symlink is never descended into. Writing
 /// as the walk goes keeps one directory descriptor open per level, not
 /// one per member.
 struct Walk<'a, W: Write> {
@@ -257,19 +269,21 @@ struct Walk<'a, W: Write> {
 }
 
 impl<W: Write> Walk<'_, W> {
-    /// Every member below `dir` (a resolved project-relative path, no
-    /// symlink in it), depth first in name order.
-    fn collect(&mut self, dir: &Path, prefix: &str, depth: usize) -> io::Result<()> {
+    /// Every member below `held`, the directory the project-relative `dir`
+    /// (for messages) named when it was opened, depth first in name order.
+    fn collect(
+        &mut self,
+        held: ProjectRoot,
+        dir: &Path,
+        prefix: &str,
+        depth: usize,
+    ) -> io::Result<()> {
         if depth > MAX_DEPTH {
             return Err(err(format!(
                 "{} nests deeper than {MAX_DEPTH} directories",
                 dir.display()
             )));
         }
-        let held = self
-            .project
-            .input_subdir(dir)?
-            .ok_or_else(|| err(format!("{} vanished while packing", dir.display())))?;
         use std::os::fd::AsRawFd;
         let identity =
             crate::kernel::store::stat_identity(&crate::kernel::store::fd_stat(held.as_raw_fd())?);
@@ -309,9 +323,13 @@ impl<W: Write> Walk<'_, W> {
                     let file = held.open_file(Path::new(&name))?;
                     self.file(&member, &path, file)?;
                 }
+                // Opened from the same descriptor, no symlink followed.
                 Entry::Directory => {
+                    let child = held
+                        .subdir(Path::new(&name))?
+                        .ok_or_else(|| err(format!("{} vanished while packing", path.display())))?;
                     self.tarball.dir(&format!("{member}/"))?;
-                    self.collect(&path, &format!("{prefix}{text}/"), depth + 1)?;
+                    self.collect(child, &path, &format!("{prefix}{text}/"), depth + 1)?;
                 }
                 Entry::Symlink => match resolve_inside(self.project, &path)? {
                     // A symlink to nothing names nothing to copy.
@@ -326,8 +344,9 @@ impl<W: Write> Walk<'_, W> {
                             self.file(&member, &target, file)?;
                         }
                         Entry::Directory => {
+                            let child = open_dir(self.project, &target)?;
                             self.tarball.dir(&format!("{member}/"))?;
-                            self.collect(&target, &format!("{prefix}{text}/"), depth + 1)?;
+                            self.collect(child, &target, &format!("{prefix}{text}/"), depth + 1)?;
                         }
                         // A resolved target cannot be a symlink, and one
                         // that vanished names nothing to copy.
@@ -504,6 +523,31 @@ mod tests {
             .unwrap();
             assert_eq!(bytes, want, "{member}");
         }
+    }
+
+    /// A directory is opened with the strict walk, so one swapped for a
+    /// symlink after the walk saw it (here, a resolved target whose parent
+    /// became a symlink to a directory outside the package) is refused, not
+    /// descended into (#612).
+    #[test]
+    fn a_directory_swapped_for_a_symlink_is_refused_not_walked() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let path = temp.0.join("project");
+        fs::create_dir_all(&path).unwrap();
+        package_dir(&path);
+        fs::create_dir_all(path.join("elsewhere/lib")).unwrap();
+        fs::write(path.join("elsewhere/lib/index.js"), "not the package\n").unwrap();
+        let project = ProjectRoot::open(&path).unwrap();
+        open_dir(&project, Path::new("vendor/local/lib")).unwrap();
+        fs::rename(path.join("vendor/local"), temp.0.join("aside")).unwrap();
+        std::os::unix::fs::symlink(path.join("elsewhere"), path.join("vendor/local")).unwrap();
+        let error = open_dir(&project, Path::new("vendor/local/lib")).unwrap_err();
+        assert!(
+            error.to_string().contains("not a real directory"),
+            "{error}"
+        );
+        let held = open_dir(&project, Path::new("vendor")).unwrap();
+        assert!(held.subdir(Path::new("local")).is_err());
     }
 
     /// The member names of the tarball `pack` writes for `dir`.
