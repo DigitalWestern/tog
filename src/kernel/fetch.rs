@@ -2357,6 +2357,36 @@ mod integrity_tests {
         assert!(leftover_downloads(&store).is_empty());
     }
 
+    /// An unpinned download stops reading one byte past its cap, so a
+    /// hostile stream cannot fill the disk before it is refused, and the
+    /// partial file is removed (#614).
+    #[test]
+    fn an_unpinned_download_stops_reading_past_its_cap() {
+        struct Counting(std::rc::Rc<std::cell::Cell<u64>>);
+        impl Read for Counting {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                buf.fill(7);
+                self.0.set(self.0.get() + buf.len() as u64);
+                Ok(buf.len())
+            }
+        }
+        let (_scratch, store) = scratch_store("fetch-unpinned-cap");
+        let dest = store.root.join("unpinned");
+        let read = std::rc::Rc::new(std::cell::Cell::new(0));
+        let reader = Box::new(Counting(read.clone()).take(1 << 20));
+        let error = copy_unpinned("https://x/big", &dest, 4096, reader).unwrap_err();
+        assert!(
+            error.to_string().contains("longer than 4096 bytes"),
+            "{error}"
+        );
+        assert!(
+            read.get() <= 4097,
+            "read {} bytes past a 4096-byte cap",
+            read.get()
+        );
+        assert!(!dest.exists(), "a refused unpinned download is removed");
+    }
+
     /// A hash mismatch names the URL without the credentials before its
     /// host or the signature in its query string (#348), from the cache
     /// and from `download_file` alike. So do an unpinned download's cap
