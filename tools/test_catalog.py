@@ -904,6 +904,50 @@ class Node(Base):
                          f"node 24.9.0: SHASUMS256.txt is signed by {self.stranger}, which is not a "
                          f"releaser pinned in {os.path.relpath(catalog.NODE_RELEASERS, catalog.REPO)}")
 
+    def test_shasums_signed_by_a_pinned_releasers_subkey_are_accepted(self):
+        # A releaser whose signing subkey made the signature: gpgv's VALIDSIG
+        # names the subkey first and the pinned primary key last.
+        primary = gen_key(self.gpg, "Subkey Releaser <subkey@example.invalid>")
+        subprocess.run(self.gpg + ["--quick-add-key", primary, "ed25519", "sign", "never"],
+                       check=True, capture_output=True)
+        listing = subprocess.run(self.gpg + ["--with-colons", "--list-keys", primary], check=True,
+                                 capture_output=True, text=True).stdout
+        fingerprints = [line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr:")]
+        subkey = fingerprints[-1]
+        self.assertNotEqual(subkey, primary)
+        self.net.bodies[self.KEYRING] = subprocess.run(
+            self.gpg + ["--export", primary], check=True, capture_output=True).stdout
+        with open(catalog.NODE_RELEASERS, "w") as f:
+            f.write(f"{primary}  # Subkey Releaser\n")
+        self.publish("24.9.0")
+        body = self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt"]
+        # The trailing `!` makes gpg sign with exactly this subkey.
+        sig = self.sign(body, subkey + "!")
+        self.net.bodies["https://nodejs.org/dist/v24.9.0/SHASUMS256.txt.sig"] = sig
+        # gpgv itself says who signed: VALIDSIG names the subkey as the
+        # signer and the pinned primary as the primary key, so the accept
+        # below is a subkey signature chaining to its primary.
+        paths = {}
+        for name, data in (("keyring", self.net.bodies[self.KEYRING]), ("body", body), ("sig", sig)):
+            paths[name] = os.path.join(self.scratch.name, f"subkey-{name}")
+            with open(paths[name], "wb") as f:
+                f.write(data)
+        status = subprocess.run(["gpgv", "--status-fd", "1", "--keyring", paths["keyring"],
+                                 paths["sig"], paths["body"]], check=True, capture_output=True,
+                                text=True).stdout
+        valid = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] VALIDSIG ")]
+        self.assertEqual(len(valid), 1, status)
+        self.assertEqual(valid[0][2], subkey, status)
+        self.assertEqual(valid[0][-1], primary, status)
+        out, _ = self.generate([])
+        self.assertEqual(out, {"node-24.9.0": self.expected("24.9.0")})
+        # The pin names the primary key only: the subkey alone is refused.
+        with open(catalog.NODE_RELEASERS, "w") as f:
+            f.write(f"{subkey}  # the subkey, not the releaser\n")
+        with self.assertRaises(catalog.Failure) as cm:
+            self.generate([])
+        self.assertIn(f"is signed by {primary}, which is not a releaser pinned", str(cm.exception))
+
     def test_the_pinned_releasers_file_must_name_fingerprints(self):
         for body in ("# nothing pinned\n", "abc  # not a fingerprint\n"):
             with self.subTest(body=body):

@@ -3173,7 +3173,11 @@ mod tests {
     }
 
     fn project_workspace_peer(project: &Path, env: &Path, plan: &NpmPlan) -> io::Result<()> {
-        let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        // An explicit permissive policy: TOG_STRICT=1 in the environment
+        // would otherwise refuse the clone exception these tests expect.
+        let mut attribution = crate::kernel::policy::Attribution::open("node")
+            .unwrap()
+            .with_policy(crate::kernel::policy::Policy::default());
         let lease = seal_placeholder_objects(&[env]);
         let result = project_node_env(
             &lease,
