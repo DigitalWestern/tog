@@ -31,7 +31,9 @@ pub use crate::commands::x::environment_name as x_environment_name;
 pub use crate::kernel::context::Context;
 
 use crate::cli;
-use crate::commands::shared::{package_script, project_dir, project_for, project_root};
+use crate::commands::shared::{
+    package_script, project_dir, project_for, project_root, selected_toolchain,
+};
 use crate::kernel::platform::Platform;
 use crate::kernel::ui;
 use crate::tailors::{self, FileRunner};
@@ -148,7 +150,7 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
         let known: Vec<String> = tailors::registry()
             .iter()
             .flat_map(|tailor| tailor.source_files())
-            .filter(|file| matches!(file.runner, FileRunner::Command(_)))
+            .filter(|file| !matches!(file.runner, FileRunner::Built(_)))
             .map(|file| format!(".{}", file.extension))
             .collect();
         let message = format!(
@@ -160,15 +162,12 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
             &message, None,
         ))));
     };
-    let program = match runner {
-        FileRunner::Command(program) => program,
-        FileRunner::Built(why) => {
-            let message = format!("'{name}': {why}");
-            return Ok(Some(Resolved::Usage(cli::render_usage_error(
-                &message, None,
-            ))));
-        }
-    };
+    if let FileRunner::Built(why) = runner {
+        let message = format!("'{name}': {why}");
+        return Ok(Some(Resolved::Usage(cli::render_usage_error(
+            &message, None,
+        ))));
+    }
     let id = tailor.id();
     let present = project_for(cwd)?.is_some_and(|location| location.detected.contains(&id));
     if !present {
@@ -182,6 +181,18 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
             ),
         ));
     }
+    let program = match runner {
+        FileRunner::Command(program) => program,
+        // The toolchain the sync before the run would use, read as `x`
+        // reads it: a lock it would refuse is refused here the same way.
+        FileRunner::ByVersion(pick) => {
+            let selected = selected_toolchain(Platform::host()?, cwd, id)?;
+            pick(&selected.primary_version()).map_err(|why| {
+                io::Error::new(io::ErrorKind::Unsupported, format!("'{name}': {why}"))
+            })?
+        }
+        FileRunner::Built(_) => unreachable!("refused above"),
+    };
     let mut command: Vec<String> = program.iter().map(|word| word.to_string()).collect();
     command.push(name.to_string());
     command.extend(args.iter().cloned());

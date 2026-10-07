@@ -5120,3 +5120,24 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     let stderr = text(&out.stderr);
     assert!(stderr.contains("no python project here"), "{stderr}");
 }
+
+/// A TypeScript file on a Node too old to strip types is refused before
+/// the sync, naming the version and the way to move it, never handed to a
+/// Node that would fail on the extension.
+#[test]
+fn a_typescript_file_on_a_node_too_old_for_it_is_refused_naming_the_version() {
+    let home = TempDir::boundary("cli-ts");
+    let project = TempDir::boundary("cli-ts-project");
+    std::fs::write(project.0.join("package.json"), r#"{"name": "p"}"#).unwrap();
+    std::fs::write(project.0.join(".node-version"), "22.4.0\n").unwrap();
+    std::fs::write(project.0.join("app.ts"), "const x: number = 1;\n").unwrap();
+    let out = tog(&project.0, &home.0, &["app.ts"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'app.ts': the project's Node is 22.4.0, which cannot run TypeScript"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("tog update --toolchain node"), "{stderr}");
+    assert!(!stderr.contains("syncing first"), "{stderr}");
+}
