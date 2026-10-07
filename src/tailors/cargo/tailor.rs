@@ -433,32 +433,11 @@ impl Formatter for Rustfmt {
             .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", cwd.display())))?;
         let (_, workspace) = inputs::locate_held_cargo_root(&invocation)?;
         let workspace_root = workspace.path().to_path_buf();
-        // cargo fmt runs in the workspace itself (writable, the user's home
-        // out of sight): a file there that is the signing key under another
-        // name (a hard link) would be read as a manifest or a config and
-        // quoted in cargo's parse error. The whole workspace is mounted,
-        // `target` included (a config can be a symlink to `../target/key`),
-        // so the whole of it is scanned. The formatter's output is relayed
-        // with the key's secret replaced as well (`supervise::Relay`).
-        crate::kernel::resolve::confine::refuse_key_links_under(
-            &workspace_root,
-            &crate::kernel::resolve::confine::signing_key_ids(),
-            &[],
+        fmt_preflight(
+            &invocation,
+            &workspace,
+            &crate::kernel::resolve::confine::signing_key_paths(),
         )?;
-        // The configuration cargo-fmt's cargo reads, from the invocation
-        // directory up to the workspace root (nothing above it is mounted):
-        // a file there (or one it includes) that is the key, or a symlink
-        // out of the workspace, is refused by name before anything runs.
-        {
-            use crate::kernel::provider::cargo_door;
-            let bound = cargo_door::Bound::new(&workspace_root)?;
-            for dir in invocation.path().ancestors() {
-                if !dir.starts_with(&workspace_root) {
-                    break;
-                }
-                cargo_door::config_files(dir, &bound)?;
-            }
-        }
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
@@ -483,6 +462,51 @@ impl Formatter for Rustfmt {
         )?;
         Ok(child_status_code(&status))
     }
+}
+
+/// What `tog fmt` refuses before anything runs, checked in the directories
+/// it holds, never at the paths they were opened at: a workspace renamed
+/// or replaced since is not what the sandbox mounts, so it is not what is
+/// checked either (#612).
+///
+/// cargo fmt runs in the workspace itself (writable, the user's home out
+/// of sight): a file there that is the signing key under another name (a
+/// hard link) would be read as a manifest or a config and quoted in
+/// cargo's parse error. The whole workspace is mounted, `target` included
+/// (a config can be a symlink to `../target/key`), so the whole of it is
+/// scanned, from the held descriptor. The formatter's output is relayed
+/// with the key's secret replaced as well (`supervise::Relay`).
+///
+/// Then the configuration cargo-fmt's cargo reads, from the invocation
+/// directory up to the workspace root (nothing above it is mounted): a
+/// file there (or one it includes) that is the key, or a symlink out of
+/// the workspace, is refused by name. These are read at the names the two
+/// held directories have now, each checked against its descriptor.
+fn fmt_preflight(
+    invocation: &ProjectRoot,
+    workspace: &ProjectRoot,
+    keys: &[PathBuf],
+) -> io::Result<()> {
+    use crate::kernel::provider::cargo_door;
+    use crate::kernel::resolve::confine;
+    confine::refuse_key_links_in(workspace, &confine::key_ids(keys), &[])?;
+    let workspace_now = workspace.current_name()?;
+    let invocation_now = invocation.current_name()?;
+    if !invocation_now.starts_with(&workspace_now) {
+        return Err(io::Error::other(format!(
+            "{} is no longer inside the workspace {}; run 'tog fmt' again",
+            invocation.path().display(),
+            workspace.path().display()
+        )));
+    }
+    let bound = cargo_door::Bound::with_keys(&workspace_now, keys)?;
+    for dir in invocation_now.ancestors() {
+        if !dir.starts_with(&workspace_now) {
+            break;
+        }
+        cargo_door::config_files(dir, &bound)?;
+    }
+    Ok(())
 }
 
 /// The files this ecosystem's toolchain version is read from, in its own
@@ -544,4 +568,82 @@ fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
         }
     }
     Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_preflight;
+    use crate::kernel::fsroot::ProjectRoot;
+    use crate::kernel::testutil::TempDir;
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    /// A workspace with a member, held open, then renamed away and a clean
+    /// copy put at its old path: what `fmt_preflight` checks must be the
+    /// held original, the one the sandbox mounts (#612).
+    fn held_then_replaced(temp: &TempDir) -> (ProjectRoot, ProjectRoot, PathBuf, PathBuf) {
+        let original = temp.0.join("ws");
+        fs::create_dir_all(original.join("member")).unwrap();
+        fs::write(original.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let invocation = ProjectRoot::open(&original.join("member")).unwrap();
+        let workspace = ProjectRoot::open(&original).unwrap();
+        let moved = temp.0.join("moved");
+        fs::rename(&original, &moved).unwrap();
+        fs::create_dir_all(original.join("member")).unwrap();
+        fs::write(original.join("Cargo.toml"), "[workspace]\n").unwrap();
+        (invocation, workspace, original, moved)
+    }
+
+    #[test]
+    fn fmt_checks_the_held_workspace_not_its_replacement() {
+        let temp = TempDir::named("fmt-preflight");
+        let key = temp.0.join("signing.key");
+        fs::write(&key, b"ed25519:secret").unwrap();
+        let keys = [key.clone()];
+
+        // The held original carries a hard link to the key; the
+        // replacement at the old path is clean.
+        let (invocation, workspace, original, moved) = held_then_replaced(&temp);
+        fs::create_dir_all(moved.join("target")).unwrap();
+        fs::hard_link(&key, moved.join("target/k")).unwrap();
+        let error = fmt_preflight(&invocation, &workspace, &keys).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(error.to_string().contains("is the signing key"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(&original.join("target/k").display().to_string()),
+            "{error}"
+        );
+        fs::remove_file(moved.join("target/k")).unwrap();
+
+        // A config in the held member that leads out of the workspace.
+        let outside = temp.0.join("outside.toml");
+        fs::write(&outside, "").unwrap();
+        fs::create_dir_all(moved.join("member/.cargo")).unwrap();
+        std::os::unix::fs::symlink(&outside, moved.join("member/.cargo/config.toml")).unwrap();
+        let error = fmt_preflight(&invocation, &workspace, &keys).unwrap_err();
+        assert!(error.to_string().contains("outside"), "{error}");
+        fs::remove_file(moved.join("member/.cargo/config.toml")).unwrap();
+
+        // The held tree is clean now, and what sits at the old path is not
+        // looked at: a key link there does not refuse the run.
+        fs::create_dir_all(original.join("target")).unwrap();
+        fs::hard_link(&key, original.join("target/k")).unwrap();
+        fmt_preflight(&invocation, &workspace, &keys).unwrap();
+    }
+
+    #[test]
+    fn fmt_refuses_an_invocation_moved_out_of_its_workspace() {
+        let temp = TempDir::named("fmt-preflight-out");
+        let (invocation, workspace, _, moved) = held_then_replaced(&temp);
+        fs::rename(moved.join("member"), temp.0.join("elsewhere")).unwrap();
+        let error = fmt_preflight(&invocation, &workspace, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("no longer inside the workspace"),
+            "{error}"
+        );
+        assert!(Path::new(&temp.0.join("elsewhere")).is_dir());
+    }
 }

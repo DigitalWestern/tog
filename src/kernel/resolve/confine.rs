@@ -574,19 +574,49 @@ pub fn refuse_key_links_under(
     keys: &[FileId],
     exclude: &[super::snapshot::PathGlob],
 ) -> io::Result<()> {
+    refuse_key_links_walk(root, root, keys, exclude)
+}
+
+/// [`refuse_key_links_under`] for a directory tog holds open, walked from
+/// its descriptor (`/proc/self/fd/<n>` on Linux) rather than its path: a
+/// tree renamed or replaced after tog opened it is not what is scanned,
+/// while the sandbox mounts the held one (#612). Messages name the path
+/// the root was opened at.
+pub fn refuse_key_links_in(
+    root: &crate::kernel::fsroot::ProjectRoot,
+    keys: &[FileId],
+    exclude: &[super::snapshot::PathGlob],
+) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let walk = {
+        use std::os::fd::AsRawFd as _;
+        PathBuf::from(format!("/proc/self/fd/{}", root.as_raw_fd()))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let walk = root.current_name()?;
+    refuse_key_links_walk(&walk, root.path(), keys, exclude)
+}
+
+/// The walk of both: below `walk`, with each entry named below `display`.
+fn refuse_key_links_walk(
+    walk: &Path,
+    display: &Path,
+    keys: &[FileId],
+    exclude: &[super::snapshot::PathGlob],
+) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     if keys.is_empty() {
         return Ok(());
     }
     let mut stack = vec![PathBuf::new()];
     while let Some(relative) = stack.pop() {
-        let entries = match fs::read_dir(root.join(&relative)) {
+        let entries = match fs::read_dir(walk.join(&relative)) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(io::Error::new(
                     error.kind(),
-                    format!("read {}: {error}", root.join(&relative).display()),
+                    format!("read {}: {error}", display.join(&relative).display()),
                 ))
             }
         };
@@ -605,7 +635,7 @@ pub fn refuse_key_links_under(
                     format!(
                         "{} is the signing key (the same file, by device and inode); move the \
                          key out of the project and point TOG_SIGNING_KEY at it",
-                        entry.path().display()
+                        display.join(&child).display()
                     ),
                 ));
             }
