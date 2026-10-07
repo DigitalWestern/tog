@@ -82,7 +82,8 @@ artifact is still checked against its pinned digest.
 The design extracts every locked artifact through the pre-materialization
 extractor (`src/kernel/archive.rs`): list and validate every entry first
 (no absolute names, `..` or special files; symlinks only when contained;
-hard links only to an earlier regular file kept after the strip), then extract with `TAR_OPTIONS` (and `UNZIPOPT` for unzip)
+hard links only to an earlier regular file kept after the strip, never to
+themselves, and never where the link or its target is written twice), then extract with `TAR_OPTIONS` (and `UNZIPOPT` for unzip)
 unset and tar told not to restore extended attributes, ACLs, file flags or
 AppleDouble metadata, since an object's identity covers names, bytes and
 the executable bit only. PAX values are bytes; only `path`, `linkpath` and

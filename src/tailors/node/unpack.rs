@@ -68,3 +68,42 @@ pub(super) fn extract_npm_package(
     )
     .map(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A registry tarball whose `package/sub/b` is a hard link to
+    /// `package/a` unpacks with both names on the same bytes, past the
+    /// `package/` root (#556; crates got the same check in #542).
+    #[test]
+    fn an_npm_tarball_with_a_contained_hard_link_unpacks_both_names() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = crate::kernel::testutil::TempDir::named("npm-hard-link");
+        let source = temp.0.join("source");
+        fs::create_dir_all(source.join("package/sub")).unwrap();
+        fs::write(source.join("package/a"), "shared bytes").unwrap();
+        fs::hard_link(source.join("package/a"), source.join("package/sub/b")).unwrap();
+        let tarball = temp.0.join("pkg.tgz");
+        let status = crate::kernel::testutil::tar_create()
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&source)
+            .arg("package")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let (_store_dir, _store, activity) =
+            crate::kernel::resolve::testing::scratch_store("npm-hard-link-store");
+        let dest = temp.0.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        extract_npm_package(&activity, Platform::host().unwrap(), &tarball, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("sub/b")).unwrap(), b"shared bytes");
+        let (a, b) = (
+            fs::metadata(dest.join("a")).unwrap(),
+            fs::metadata(dest.join("sub/b")).unwrap(),
+        );
+        assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+    }
+}

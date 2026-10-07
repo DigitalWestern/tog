@@ -2186,7 +2186,8 @@ fn commands_do_not_name_tailors_by_string() {
 
 /// Every tar process comes from one helper, `kernel::archive::tar_command`
 /// (the host's `/usr/bin/tar` with a scrubbed environment): extraction runs
-/// only through the validated extractor (or the single-member read), and
+/// only through the validated extractor (the single-member read,
+/// `read_member`, runs no tar at all), and
 /// packing (git sources) through its deterministic packer, so the user's
 /// `TAR_OPTIONS` cannot reshape what lands in an object. The scan holds
 /// the helper to that: tar is named in `tar_command` and nowhere else in
@@ -2232,8 +2233,8 @@ fn tar_runs_only_in_kernel_archive() {
     assert!(
         sites.is_empty(),
         "tar named outside kernel::archive::{HELPER} (route it through \
-         archive::extract_validated_with_activity, archive::read_member, or \
-         archive::pack_ustar_with_activity):\n  {}",
+         archive::extract_validated_with_activity or archive::pack_ustar_with_activity, \
+         or read one member in process with archive::read_member):\n  {}",
         sites.join("\n  ")
     );
 }
