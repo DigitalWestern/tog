@@ -111,6 +111,10 @@ pub(crate) enum Behavior {
         parts: Vec<Vec<u8>>,
         reply: Reply,
     },
+    /// Answer the first reply whose marker the request body holds, and 400
+    /// when none does: git protocol v2 sends `ls-refs` and `fetch` to one
+    /// URL.
+    ByBody(Vec<(Vec<u8>, Reply)>),
 }
 
 /// One request the server received.
@@ -194,7 +198,8 @@ impl FixtureUpstream {
 
     /// Serve every response `dir/index.json` lists, by path and query. Each
     /// body is checked against its listed sha256 first, so an edited fixture
-    /// fails here rather than as a confusing proxy result.
+    /// fails here rather than as a confusing proxy result. Rows for one
+    /// target that carry `request_has` are told apart by the request body.
     pub(crate) fn load_registry(&self, dir: &Path) {
         let index: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("index.json")).unwrap()).unwrap();
@@ -220,7 +225,21 @@ impl FixtureUpstream {
                 Some(query) => format!("{}?{query}", url.path()),
                 None => url.path().to_string(),
             };
-            self.set(&target, Behavior::Reply(reply));
+            let mut routes = self.routes.lock().unwrap();
+            let Some(marker) = row["request_has"].as_str() else {
+                if let Some(Behavior::ByBody(_)) = routes.get(&target) {
+                    panic!("{url} has rows with and without request_has");
+                }
+                routes.insert(target, Behavior::Reply(reply));
+                continue;
+            };
+            let entry = routes
+                .entry(target)
+                .or_insert_with(|| Behavior::ByBody(Vec::new()));
+            let Behavior::ByBody(replies) = entry else {
+                panic!("{url} has rows with and without request_has");
+            };
+            replies.push((marker.as_bytes().to_vec(), reply));
         }
     }
 
@@ -304,6 +323,12 @@ fn serve(
             Some(Behavior::Require { .. }) => {
                 Reply::new(400, b"the request body is not the expected negotiation")
             }
+            Some(Behavior::ByBody(replies)) => {
+                match replies.into_iter().find(|(marker, _)| holds(marker)) {
+                    Some((_, reply)) => reply,
+                    None => Reply::new(400, b"no fixture answers this request body"),
+                }
+            }
             Some(Behavior::Drop) => return,
             None => Reply::new(404, b"no such fixture"),
         };
@@ -345,5 +370,51 @@ fn conditional(request: &Headers, reply: Reply) -> Reply {
         }
     } else {
         reply
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rows for one URL must all carry `request_has` or none: a mixed
+    /// index panics whichever row comes first.
+    #[test]
+    fn mixed_rows_for_one_url_are_refused_in_either_order() {
+        let body_row = |marker: Option<&str>| {
+            let mut row = serde_json::json!({
+                "url": "https://example.test/x",
+                "status": 200,
+                "sha256": hex::encode(Sha256::digest(b"")),
+            });
+            if let Some(marker) = marker {
+                row["request_has"] = serde_json::Value::String(marker.to_string());
+            }
+            row
+        };
+        let ca = FixtureCa::new();
+        for rows in [
+            vec![body_row(None), body_row(Some("a"))],
+            vec![body_row(Some("a")), body_row(None)],
+        ] {
+            let dir = crate::kernel::testutil::TempDir::named("upstream-mixed-rows");
+            std::fs::write(
+                dir.0.join("index.json"),
+                serde_json::to_vec(&serde_json::Value::Array(rows)).unwrap(),
+            )
+            .unwrap();
+            let upstream = FixtureUpstream::start(&ca, &["example.test"]);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                upstream.load_registry(&dir.0)
+            }));
+            let message = match refused.unwrap_err().downcast::<String>() {
+                Ok(message) => *message,
+                Err(_) => String::new(),
+            };
+            assert!(
+                message.contains("rows with and without request_has"),
+                "{message}"
+            );
+        }
     }
 }

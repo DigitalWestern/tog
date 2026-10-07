@@ -1,0 +1,43 @@
+[
+ {
+  "method": "GET",
+  "url": "https://github.com/tog-fixtures/leaf/info/refs?service=git-upload-pack",
+  "status": 200,
+  "headers": {
+   "Content-Type": "application/x-git-upload-pack-advertisement"
+  },
+  "sha256": "8125e61f9fc14cc737365f72005030d15dfad9024a843554d3dcd3d45c2d825d",
+  "size": 171,
+  "file": "github.com/tog-fixtures/leaf/info/refs@service%3Dgit-upload-pack.body",
+  "census_label": "cargo-git-generated",
+  "commit": "d7cb160e541496c4db48210eab4114354bc40543"
+ },
+ {
+  "method": "POST",
+  "url": "https://github.com/tog-fixtures/leaf/git-upload-pack",
+  "status": 200,
+  "headers": {
+   "Content-Type": "application/x-git-upload-pack-result"
+  },
+  "sha256": "249ad7c4de8ee0ba6bc8d92ab0b381942846dc07af7a795ae4cbe308a654699e",
+  "size": 84,
+  "file": "github.com/tog-fixtures/leaf/git-upload-pack@ls-refs.body",
+  "census_label": "cargo-git-generated",
+  "commit": "d7cb160e541496c4db48210eab4114354bc40543",
+  "request_has": "command=ls-refs"
+ },
+ {
+  "method": "POST",
+  "url": "https://github.com/tog-fixtures/leaf/git-upload-pack",
+  "status": 200,
+  "headers": {
+   "Content-Type": "application/x-git-upload-pack-result"
+  },
+  "sha256": "db0b9a72b19eb9a34f5f4cedd5e43aa8ddf819e90a18d60f40eee5005ea83ccb",
+  "size": 407,
+  "file": "github.com/tog-fixtures/leaf/git-upload-pack@fetch.body",
+  "census_label": "cargo-git-generated",
+  "commit": "d7cb160e541496c4db48210eab4114354bc40543",
+  "request_has": "command=fetch"
+ }
+]
