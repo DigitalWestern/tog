@@ -118,13 +118,23 @@ impl Store {
         Ok(f)
     }
 
+    /// `meta/`, held from the store root without a symlink: a caller that
+    /// lists it and opens each record with [`open_object_meta_at`] reads
+    /// one directory's names and records even if `meta/` is renamed or
+    /// replaced meanwhile. `None` when `meta/` does not exist.
+    pub(crate) fn open_object_meta_dir(&self) -> io::Result<Option<fs::File>> {
+        let dir = self.open_namespace(&["meta"])?;
+        held_meta_failpoint();
+        Ok(dir)
+    }
+
     /// Open `meta/<id>.json` from held descriptors: the store root, then
     /// `meta/`, then the record, none of them through a symlink.
     pub(crate) fn open_object_meta(&self, id: &str) -> io::Result<MetaFile> {
         let Some(dir) = self.open_namespace(&["meta"])? else {
             return Ok(MetaFile::Missing);
         };
-        open_meta_file_at(dir.as_raw_fd(), format!("{id}.json").as_bytes())
+        open_object_meta_at(&dir, id)
     }
 
     /// Completeness check without sweeping (safe to call while holding the
@@ -551,6 +561,32 @@ fn publish_completion(
         "completion temporary names are occupied",
     ))
 }
+
+/// `<id>.json` under `dir`, a held `meta/` ([`Store::open_object_meta_dir`]),
+/// opened without following a symlink.
+pub(crate) fn open_object_meta_at(dir: &fs::File, id: &str) -> io::Result<MetaFile> {
+    open_meta_file_at(dir.as_raw_fd(), format!("{id}.json").as_bytes())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's hook right after a reader has taken its held `meta/`
+    /// descriptor, so `meta/` can be swapped before anything is listed.
+    pub(crate) static HELD_META_FAILPOINT: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn held_meta_failpoint() {
+    HELD_META_FAILPOINT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+pub(crate) fn held_meta_failpoint() {}
 
 #[cfg(test)]
 thread_local! {

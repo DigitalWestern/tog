@@ -147,7 +147,7 @@ None open.
 - **SRI alternatives (#508).** Preserve all strongest hash candidates through Node planning and verification. The consolidation preserves first-entry behavior on ties.
 - **Provider selection checks (#509).** Share recipe, runtime, and digest checks in the remaining CPython, Rust, and Rust-path providers.
 - **#524: tests: gaps found in the review of #459 to #496.** Left: the tar call-site scan (route every tar spawn through one helper, which touches heavy-watched files). One checklist.
-- **#525: review follow-ups from #474 to #492.** Small hardening items: one Elixir preflight, old project records, `STOPPED_BY`, links in an object's `bin/`, `meta/` listing, the silent digest skip (the read cap shipped with #502). One checklist.
+- **#525: review follow-ups from #474 to #492.** Left: links in an object's `bin/` that leave it (Python envs link into other store objects on purpose, so the publication check needs a design). One checklist.
 - **#527: tests: gaps found in the review of #526.** Machine policy inode reuse, ecosystems and lock from one root, real uv and Bundler after a swap, detached publication after a rename, the other ancestor walkers under a search-only directory. One checklist.
 - **#555: fetch and cache hardening from the review of #532 to #545.** The poisoned-entry removal race, tests for `fetch_text_or_missing` and `download_unpinned`, `Interrupted` in `hash_reader`, the insert temporary and its mode. One checklist.
 - **#556: archive link and `read_member` follow-ups from #542 and #543.** `read_member` follows links without `validate`'s rules, two refusals missing from the docs, missing tests, stale comments. One checklist.

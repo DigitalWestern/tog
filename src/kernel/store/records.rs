@@ -23,6 +23,9 @@ pub(crate) const RECORD_CAP: u64 = 1 << 20;
 /// [`Store::write_project_record`]: `tog gc --project` removes such a record
 /// once that directory is gone. `None` for a record about something
 /// immutable (a registry digest), or bytes that are no record at all.
+/// There is no older project record to migrate: project-keyed records
+/// and their `project` field arrived together (#287), so every one names
+/// its project.
 pub(crate) fn record_project(bytes: &[u8]) -> Option<PathBuf> {
     let record: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     record["project"].as_str().map(PathBuf::from)
