@@ -313,10 +313,16 @@ pub fn project_cargo_env(
 }
 
 /// Build a Cargo project in the network-denied sandbox.
+///
+/// The project is the directory `project` holds, named by the canonical
+/// path it was opened at: that spelling is what the sandbox resolves
+/// through the held descriptor (#497). Canonicalizing it again here would
+/// follow whatever sits at the path now, a symlink swapped in included,
+/// and bind that instead.
 pub fn build_sandboxed(
     platform: Platform,
     activity: &StoreActivity,
-    project_dir: &Path,
+    project: &ProjectRoot,
     rust_obj: &Path,
     vendor_obj: &Path,
     args: &[String],
@@ -324,10 +330,10 @@ pub fn build_sandboxed(
     reject_user_config(args)?;
     let store = Store::open()?;
     store.require_activity(activity, "cargo build")?;
-    let project_dir = project_dir.canonicalize()?;
+    let project_dir = project.path().to_path_buf();
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
-    let target = project_child_dir(&project_dir, "target")?;
+    let target = project_child_dir(project, "target")?;
     let cargo_bin = rust_obj.join("bin/cargo");
     if !cargo_bin.is_file() || !vendor_obj.is_dir() {
         return Err(err("cargo environment is incomplete; run `tog` first"));
@@ -394,21 +400,15 @@ pub fn build_sandboxed(
     })
 }
 
-/// `relative` under the project, created if missing, as a canonical path.
-/// It is created from the held project descriptor, which refuses a symlink
-/// at any component: a `target` symlink to a path outside the project is
-/// refused before anything is created there, not after.
-fn project_child_dir(project_dir: &Path, relative: &str) -> io::Result<PathBuf> {
-    ProjectRoot::open(project_dir)?.create_dir_all(Path::new(relative))?;
-    let path = project_dir.join(relative).canonicalize()?;
-    if !path.starts_with(project_dir) {
-        return Err(err(format!(
-            "Cargo path {} escapes project {}",
-            path.display(),
-            project_dir.display()
-        )));
-    }
-    Ok(path)
+/// `relative` under the project, created if missing, spelled under the
+/// project's held path. It is created from the held project descriptor,
+/// which refuses a symlink at any component: a `target` symlink to a path
+/// outside the project is refused before anything is created there, not
+/// after. The path is not canonicalized: that would resolve what sits at
+/// the project path now rather than the directory `project` holds (#497).
+fn project_child_dir(project: &ProjectRoot, relative: &str) -> io::Result<PathBuf> {
+    project.create_dir_all(Path::new(relative))?;
+    Ok(project.path().join(relative))
 }
 
 /// The scratch directory one `cargo build` runs in. Every caller of the
@@ -1602,17 +1602,18 @@ checksum = "{hash_b}"
         let outside = temp.0.join("outside");
         fs::create_dir_all(&project).unwrap();
         let project = project.canonicalize().unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
 
         // A plain directory is created and named canonically.
         assert_eq!(
-            project_child_dir(&project, "target").unwrap(),
+            project_child_dir(&held, "target").unwrap(),
             project.join("target")
         );
         fs::remove_dir(project.join("target")).unwrap();
 
         // A symlink to a missing path outside: refused, nothing created.
         std::os::unix::fs::symlink(outside.join("made"), project.join("target")).unwrap();
-        let error = project_child_dir(&project, "target").unwrap_err();
+        let error = project_child_dir(&held, "target").unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -1623,8 +1624,41 @@ checksum = "{hash_b}"
         fs::create_dir_all(&outside).unwrap();
         fs::remove_file(project.join("target")).unwrap();
         std::os::unix::fs::symlink(&outside, project.join("target")).unwrap();
-        assert!(project_child_dir(&project, "target").is_err());
+        assert!(project_child_dir(&held, "target").is_err());
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    }
+
+    /// The project path is never resolved again after the root was opened
+    /// (#497): with the project renamed away and a symlink to another
+    /// directory put at its path, `target` is created in the held
+    /// directory and named under the path the root was opened at, which
+    /// is the spelling the sandbox binds from the held descriptor. The
+    /// symlink's target gets nothing.
+    #[test]
+    fn project_child_dir_ignores_a_symlink_swapped_in_at_the_project() {
+        let temp = TempDir::named("cargo-child-dir-swap");
+        let project = temp.0.join("project");
+        let moved = temp.0.join("moved");
+        let other = temp.0.join("other");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let project = project.canonicalize().unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, &moved).unwrap();
+        std::os::unix::fs::symlink(&other, &project).unwrap();
+
+        assert_eq!(
+            project_child_dir(&held, "target").unwrap(),
+            project.join("target")
+        );
+        assert!(
+            moved.join("target").is_dir(),
+            "not created in the held tree"
+        );
+        assert!(
+            fs::read_dir(&other).unwrap().next().is_none(),
+            "created where the swapped-in symlink points"
+        );
     }
 
     #[test]
@@ -1728,11 +1762,13 @@ checksum = "{hash_b}"
     #[test]
     fn build_rejects_user_config_flag() {
         let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-build-flags");
+        let project = ProjectRoot::open(&temp.0).unwrap();
         for bad in ["--config", "--config=net.offline=false"] {
             let error = build_sandboxed(
                 Platform::Aarch64AppleDarwin,
                 &activity,
-                Path::new("/nonexistent"),
+                &project,
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 &[bad.to_string()],

@@ -30,7 +30,7 @@ use crate::kernel::store::{self, Store};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -931,9 +931,10 @@ pub fn confined_run(
     let sent = std::thread::spawn(move || fs::File::from(env_writer).write_all(&env));
     let mut command = sandbox::bwrap_command(bwrap)?;
     command.args(&args);
-    pass_fds(
+    // The relay's exec log at 3, the tool's environment at 4.
+    sandbox::pass_fds(
         &mut command,
-        [
+        vec![
             (writer.as_raw_fd(), relay::EXEC_LOG_FD),
             (env_reader.as_raw_fd(), relay::ENV_FD),
         ],
@@ -1338,37 +1339,6 @@ fn door_env(run: &ConfinedRun<'_>, scratch: &Path) -> io::Result<Vec<(OsString, 
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let (reader, writer) = std::io::pipe()?;
     Ok((OwnedFd::from(reader), OwnedFd::from(writer)))
-}
-
-/// Hand each `(source, target)` descriptor to bubblewrap at `target`
-/// (the relay's exec log at 3, the tool's environment at 4). This runs
-/// after `bwrap_command` marked every inherited descriptor close-on-exec,
-/// so the targets are the only ones that survive. Each source is first
-/// copied above the targets, so a source that happens to be numbered like
-/// another target is not overwritten before it is moved.
-fn pass_fds<const N: usize>(command: &mut std::process::Command, fds: [(RawFd, RawFd); N]) {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: the closure calls only fcntl/dup2/close, which are
-    // async-signal-safe, on an array copied into it before fork.
-    unsafe {
-        command.pre_exec(move || {
-            let mut high = [0; N];
-            for (slot, (source, _)) in high.iter_mut().zip(fds) {
-                *slot = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10);
-                if *slot < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            for (copy, (_, target)) in high.into_iter().zip(fds) {
-                // dup2 leaves the new descriptor without close-on-exec.
-                if libc::dup2(copy, target) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                libc::close(copy);
-            }
-            Ok(())
-        });
-    }
 }
 
 /// The exec log is small; a relay that writes more than this is broken.

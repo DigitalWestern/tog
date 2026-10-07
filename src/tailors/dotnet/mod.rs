@@ -1535,8 +1535,13 @@ fn validate_build_args(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-fn checked_output_dir(project_dir: &Path, fingerprint: &str) -> io::Result<PathBuf> {
-    let project_dir = project_dir.canonicalize()?;
+/// The output directory `bin/tog-<fingerprint>` under the project's held
+/// path, with `bin` created. Neither may be a symlink, and both must
+/// resolve under the held path: the path is not canonicalized first, so a
+/// symlink swapped in at the project path since tog opened it is refused
+/// as escaping the project rather than published into (#497).
+fn checked_output_dir(project: &ProjectRoot, fingerprint: &str) -> io::Result<PathBuf> {
+    let project_dir = project.path();
     let bin = project_dir.join("bin");
     if let Ok(md) = fs::symlink_metadata(&bin) {
         if md.file_type().is_symlink() {
@@ -1555,12 +1560,14 @@ fn checked_output_dir(project_dir: &Path, fingerprint: &str) -> io::Result<PathB
             return Err(err(format!("{} must be a directory", output.display())));
         }
     }
-    fs::create_dir_all(&bin)?;
+    // Created from the held descriptor, so nothing is made where a
+    // symlink at the project path or at `bin` points.
+    project.create_dir_all(Path::new("bin"))?;
     let canonical_bin = bin.canonicalize()?;
-    if !canonical_bin.starts_with(&project_dir) {
+    if !canonical_bin.starts_with(project_dir) {
         return Err(err(format!("{} escapes the project", bin.display())));
     }
-    if output.exists() && !output.canonicalize()?.starts_with(&project_dir) {
+    if output.exists() && !output.canonicalize()?.starts_with(project_dir) {
         return Err(err(format!("{} escapes the project", output.display())));
     }
     Ok(output)
@@ -1568,12 +1575,12 @@ fn checked_output_dir(project_dir: &Path, fingerprint: &str) -> io::Result<PathB
 
 fn publish_output(
     staged: &Path,
-    project_dir: &Path,
+    project: &ProjectRoot,
     platform: Platform,
     fingerprint: &str,
     activity: Option<&StoreActivity>,
 ) -> io::Result<PathBuf> {
-    let output = checked_output_dir(project_dir, fingerprint)?;
+    let output = checked_output_dir(project, fingerprint)?;
     let bin = output
         .parent()
         .ok_or_else(|| err("output directory has no bin parent"))?;
@@ -1762,7 +1769,7 @@ pub fn build_sandboxed(
     }
     let output = match publish_output(
         &output_scratch,
-        &project_dir,
+        project,
         platform,
         &sdk_fingerprint_of(&sdk_spec),
         Some(activity),
@@ -2739,12 +2746,27 @@ mod tests {
         let project = base.join("project");
         fs::create_dir(&project).unwrap();
         symlink(&outside, project.join("bin")).unwrap();
-        assert!(checked_output_dir(&project, "fp").is_err());
+        assert!(checked_output_dir(&ProjectRoot::open(&project).unwrap(), "fp").is_err());
 
         let project = base.join("project2");
         fs::create_dir_all(project.join("bin")).unwrap();
         symlink(&outside, project.join("bin/tog-fp")).unwrap();
-        assert!(checked_output_dir(&project, "fp").is_err());
+        assert!(checked_output_dir(&ProjectRoot::open(&project).unwrap(), "fp").is_err());
+
+        // The project renamed away and a symlink to another directory put
+        // at its path after the root was opened (#497): the output would
+        // land outside the held path, so it is refused, and the directory
+        // the symlink points at gets no `bin`.
+        let project = base.join("project3");
+        fs::create_dir_all(project.join("bin")).unwrap();
+        let project = project.canonicalize().unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
+        fs::rename(&project, base.join("project3-moved")).unwrap();
+        let swapped = base.join("swapped");
+        fs::create_dir(&swapped).unwrap();
+        symlink(&swapped, &project).unwrap();
+        assert!(checked_output_dir(&held, "fp").is_err());
+        assert!(fs::read_dir(&swapped).unwrap().next().is_none());
 
         let metadata = base.join(".nupkg.metadata");
         fs::write(&metadata, r#"{"source":"/tmp/feed","version":2}"#).unwrap();
@@ -2755,6 +2777,7 @@ mod tests {
 
         let publish_project = base.join("publish-project");
         fs::create_dir_all(publish_project.join("bin")).unwrap();
+        let publish_project = ProjectRoot::open(&publish_project).unwrap();
         let staged_old = base.join("staged-old");
         fs::create_dir(&staged_old).unwrap();
         fs::write(staged_old.join("artifact"), "old").unwrap();
