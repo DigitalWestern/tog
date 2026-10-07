@@ -806,9 +806,8 @@ pub(super) fn pnpm_nodes(
         // pnpm keeps npm's list when a package has several hashes.
         let integrity = resolution
             .and_then(|resolution| yaml_str(resolution.get("integrity")))
-            .map(|list| crate::kernel::digest::strongest_sri(list).unwrap_or(list))
-            .unwrap_or_default()
-            .to_string();
+            .map(|list| crate::kernel::digest::strongest_sri(list).unwrap_or(list.to_string()))
+            .unwrap_or_default();
         let external = source_error(&name, resolution);
         // A pinned git source is recorded as a git+ URL so the package builder
         // (which parses it back) realizes the commit.

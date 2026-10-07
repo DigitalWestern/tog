@@ -1649,12 +1649,14 @@ fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bo
         "download_verified_digest",
         "download_verified_digest_held",
         "download_toolchain_artifact_held",
+        "download_verified_any_held",
         // The cache-only reads and the proxy's streaming insert: a hit is
         // admitted by digest the same way.
         "cache_verified_held",
         "cache_verified_digest_held",
         "read_cache_verified_digest",
         "cache_from_reader",
+        "cache_from_reader_any",
     ];
     FETCHES
         .iter()
@@ -1707,8 +1709,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // on a warm one.
     ("src/kernel/provider/crates.rs", "realize_vendor_inner", 1),
     ("src/tailors/elixir/mod.rs", "realize_deps", 1),
-    ("src/tailors/node/realize.rs", "fetch_npm_tarballs", 1),
-    ("src/tailors/node/realize.rs", "fetch_plan_sources", 1),
+    ("src/tailors/node/classify.rs", "fetch_tarball", 1),
     ("src/tailors/node/realize.rs", "plant_declared_artifacts", 1),
     (
         "src/tailors/python/build.rs",
@@ -1731,7 +1732,10 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // module file tog itself inserted after checking it against go.sum's
     // h1, and Corepack's check reads the pnpm tarball the node lock's
     // integrity names before comparing it with `packageManager`'s hash.
+    // A persisted native classification is reused only for the lock
+    // integrity candidate whose tarball re-verifies in the cache.
     ("src/tailors/go/mod.rs", "stage_modcache_skeleton", 1),
+    ("src/tailors/node/classify.rs", "archive_is_cached", 1),
     ("src/tailors/node/corepack.rs", "verify_corepack_hash", 1),
     // The registry's claim, read through the resolution proxy: the digest
     // a registry's metadata response (an npm packument's integrity, a

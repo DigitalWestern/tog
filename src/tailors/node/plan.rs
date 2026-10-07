@@ -609,10 +609,13 @@ fn entry_integrity(
             "{path}: missing 'integrity' (regenerate the lockfile)"
         ))
     })?;
-    // npm writes a list when a package was published with several hashes.
-    let integrity = crate::kernel::digest::strongest_sri(integrity).unwrap_or(integrity);
-    let digest = Digest::from_sri(integrity)?; // validate early
-    if digest.algo() == "sha1" {
+    // npm writes a list when a package was published with several hashes:
+    // every hash of the strongest algorithm is kept, and the tarball may
+    // match any of them.
+    let integrity =
+        crate::kernel::digest::strongest_sri(integrity).unwrap_or_else(|| integrity.to_string());
+    let digests = crate::kernel::digest::sri_candidates(&integrity)?; // validate early
+    if digests[0].algo() == "sha1" {
         if let Err(policy_error) = record(
             crate::kernel::policy::WEAK_INTEGRITY,
             path,
@@ -623,7 +626,7 @@ fn entry_integrity(
             )));
         }
     }
-    Ok(integrity.to_string())
+    Ok(integrity)
 }
 
 fn npm_package_from_entry(
@@ -945,6 +948,34 @@ mod lock_shape_tests {
             .unwrap();
             assert_eq!(plan.packages[0].integrity, TEST_SRI);
         }
+    }
+
+    /// Two hashes of the strongest algorithm both plan, in one order
+    /// whatever the lock's, so the identity does not depend on it (#508).
+    #[test]
+    fn an_integrity_list_keeps_every_strongest_entry_in_one_order() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let other = format!("sha512-{}", crate::kernel::base64::encode(&[1; 64]));
+        let mut both = [TEST_SRI, other.as_str()];
+        both.sort_unstable();
+        for list in [
+            format!("{TEST_SRI} {SHA1_SRI} {other}"),
+            format!("{other} {TEST_SRI}"),
+        ] {
+            let plan = plan_npm(
+                Platform::X86_64UnknownLinuxGnu,
+                &entry("node_modules/a", "https://r/a.tgz", &list),
+            )
+            .unwrap();
+            assert_eq!(plan.packages[0].integrity, both.join(" "));
+        }
+        // A malformed entry of the strongest algorithm refuses the list.
+        let bad = format!("{TEST_SRI} sha512-!!!");
+        assert!(plan_npm(
+            Platform::X86_64UnknownLinuxGnu,
+            &entry("node_modules/a", "https://r/a.tgz", &bad),
+        )
+        .is_err());
     }
 
     #[test]

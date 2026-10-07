@@ -32,6 +32,7 @@ pub mod run_refusal;
 pub mod tailor;
 
 mod bins;
+mod classify;
 mod plan;
 mod project;
 mod realize;
@@ -39,14 +40,13 @@ mod script_view;
 mod unpack;
 
 use bins::*;
+use classify::*;
 pub use plan::*;
 pub use project::*;
 pub use realize::*;
 
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{
-    download_toolchain_artifact_held, download_verified_digest_held, download_verified_held, Digest,
-};
+use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;

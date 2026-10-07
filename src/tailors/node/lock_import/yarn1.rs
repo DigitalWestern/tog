@@ -201,9 +201,8 @@ fn yarn_integrity_with(
     if let Some(integrity) = integrity {
         let selected = crate::kernel::digest::strongest_sri(&integrity)
             .ok_or_else(|| err(format!("{path}: malformed Yarn integrity")))?;
-        integrity_policy_with(path, selected, record)?;
-        Digest::from_sri(selected)?;
-        return Ok(selected.to_string());
+        integrity_policy_with(path, &selected, record)?;
+        return Ok(selected);
     }
     let fragment = resolved
         .rsplit_once('#')
@@ -982,14 +981,21 @@ mod lock_shape_tests {
         );
     }
 
+    /// Two hashes of the strongest algorithm are both kept, in one order
+    /// whatever the lock's: the tarball may match either (#508).
     #[test]
-    fn yarn_keeps_the_first_digest_when_the_strongest_algorithm_is_tied() {
+    fn yarn_keeps_every_digest_of_the_strongest_algorithm() {
         let second = format!("sha512-{}", crate::kernel::base64::encode(&[1; 64]));
+        let mut both = [SRI, second.as_str()];
+        both.sort_unstable();
         for (first, next) in [(SRI, second.as_str()), (second.as_str(), SRI)] {
-            let selected =
-                yarn_integrity("https://r/a.tgz", Some(format!("{first} {next}")), "yarn:0")
-                    .unwrap();
-            assert_eq!(selected, first);
+            let selected = yarn_integrity(
+                "https://r/a.tgz",
+                Some(format!("{first} {SHA1_SRI} {next}")),
+                "yarn:0",
+            )
+            .unwrap();
+            assert_eq!(selected, both.join(" "));
         }
     }
 
