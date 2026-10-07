@@ -1316,13 +1316,27 @@ pub fn build_sandboxed(
                 ),
             )
         });
+    // Each output goes into the directory `project` holds, never by the
+    // project's pathname, so a project renamed or replaced during the build
+    // cannot redirect the binary (#612). Scratch lives in the store, which
+    // can be on another filesystem than the project: there the rename
+    // fails and the binary is published as a copy, also through the held
+    // descriptor and with the mode go gave it.
     let moved: io::Result<()> = result.and_then(|_| {
         for entry in fs::read_dir(&outdir)? {
             let entry = entry?;
-            let dest = project_dir.join(entry.file_name());
-            fs::rename(entry.path(), &dest)
-                .or_else(|_| fs::copy(entry.path(), &dest).map(|_| ()))?;
-            ui::note(&format!("built {}", dest.display()));
+            let name = PathBuf::from(entry.file_name());
+            match project.rename_in(&entry.path(), &name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let mode = fs::symlink_metadata(entry.path())?.permissions().mode() & 0o7777;
+                    let bytes = fs::read(entry.path())?;
+                    project.write_file_mode(&name, &bytes, mode as libc::mode_t)?;
+                }
+                Err(error) => return Err(error),
+            }
+            ui::note(&format!("built {}", project_dir.join(&name).display()));
         }
         Ok(())
     });
