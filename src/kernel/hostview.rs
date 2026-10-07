@@ -23,7 +23,8 @@
 //! (`Curation::Subtree`), so an explicit `-I` or `-L` into it finds no more
 //! than the default paths do (#331). The compiler's own directories (`gcc`,
 //! `clang`, and a versioned `llvm-<N>`'s `bin`) are bound whole; the rest of
-//! `llvm-<N>`, LLVM's own headers and archives, is curated like any tree.
+//! `llvm-<N>`, LLVM's own headers (its whole `include`) and archives, is
+//! curated like any tree.
 
 use crate::kernel::ldcache::MovedLibrary;
 use crate::kernel::sandbox::{host_layout_error, push_arg};
@@ -421,13 +422,13 @@ enum Placement {
 /// `RuntimeOnly` view. One rule for both, so a `-L` into a curated
 /// subdirectory finds no more than the default paths do.
 ///
-/// Dropped: `pkgconfig` and `cmake` directories, headers, static (`.a`),
-/// libtool (`.la`) and object (`.o`) files, and every `lib*.so` symlink or
-/// linker script a link step would find by `-l` (what a `-dev` package
-/// adds). A subdirectory is bound whole unless something under it is a
-/// development file (`holds_dev_files`), and curated in turn otherwise;
-/// the compiler's own directories (`gcc`, `clang`, a versioned
-/// `llvm-<N>/bin`) are always whole.
+/// Dropped: `pkgconfig`, `cmake` and `include` directories, headers,
+/// static (`.a`), libtool (`.la`) and object (`.o`) files, and every
+/// `lib*.so` symlink or linker script a link step would find by `-l`
+/// (what a `-dev` package adds). A subdirectory is bound whole unless
+/// something under it is a development file (`holds_dev_files`), and
+/// curated in turn otherwise; the compiler's own directories (`gcc`,
+/// `clang`, a versioned `llvm-<N>/bin`) are always whole.
 ///
 /// The two curations differ where a library directory and a subdirectory
 /// hold different things:
@@ -457,7 +458,7 @@ fn library_entry_placement(
             Placement::Drop
         }
     };
-    if name == "pkgconfig" || name == "cmake" || name == RUNTIME_SUBDIR {
+    if is_dev_dir(name) || name == RUNTIME_SUBDIR {
         return Placement::Drop;
     }
     if file_type.is_dir() {
@@ -500,6 +501,19 @@ fn library_entry_placement(
     Placement::Keep
 }
 
+/// Whether a library subdirectory's own subdirectory is development files
+/// whatever is in it: `pkgconfig`, `cmake`, and an `include` tree, whose
+/// files are headers by suffix or not (`llvm-<N>/include/llvm` holds
+/// `.def`, `.inc` and `.td` files beside its `.h` ones). An `include` of
+/// some other data drops too (Fedora's legacy `kbd` keymaps, which only
+/// `loadkeys` reads): a build has no use for it, and a rule by name
+/// misses no header a suffix list would. The compiler's own `include`,
+/// under `gcc` or `lib/clang`, is in a directory bound whole before this
+/// rule is reached.
+fn is_dev_dir(name: &str) -> bool {
+    matches!(name, "pkgconfig" | "cmake" | "include")
+}
+
 /// Whether `name` is a header file.
 fn is_header(name: &str) -> bool {
     HEADER_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
@@ -507,15 +521,15 @@ fn is_header(name: &str) -> bool {
 
 /// Whether a library subdirectory entry marks the subdirectory as holding
 /// a `-devel` package's files: a header, a static or libtool archive, a
-/// `pkgconfig` or `cmake` directory. Narrower than what curation then
-/// drops: a `lib*.so` symlink alone marks nothing, as plugin directories
+/// `pkgconfig`, `cmake` or `include` directory. Narrower than what
+/// curation then drops: a `lib*.so` symlink alone marks nothing, as plugin directories
 /// are full of them (`bfd-plugins/liblto_plugin.so`, which `ld` loads by
 /// that name, `sasl2`, `xtables`, `libibverbs`), and dropping them would
 /// break the programs that load them. A subdirectory whose only
 /// development file is such a symlink or linker script is bound whole.
 fn marks_dev_dir(name: &str, file_type: fs::FileType) -> bool {
     if file_type.is_dir() {
-        return name == "pkgconfig" || name == "cmake";
+        return is_dev_dir(name);
     }
     is_header(name) || name.ends_with(".a") || name.ends_with(".la")
 }
@@ -1238,9 +1252,10 @@ mod tests {
             "usr/lib64/cmake",
             "usr/lib64/gcc",
             "usr/lib64/llvm-14/lib/clang/14.0.0/include",
-            "usr/lib64/llvm-14/include/llvm",
+            "usr/lib64/llvm-14/include/llvm/IR",
             "usr/lib64/llvm-14/bin",
             "usr/lib64/python3/site-packages",
+            "usr/lib64/onlyinclude/include/sub",
             "usr/lib64/perl5/CORE",
             "usr/lib64/perl5/pkgconfig",
             "usr/share/pkgconfig",
@@ -1280,7 +1295,20 @@ mod tests {
             "usr/lib64/llvm-14/include/llvm/Config.h",
             b"/* llvm-14-dev */\n",
         );
+        // Ubuntu's llvm-<N>-dev also ships headers no suffix names, some
+        // in a directory with no `.h` in it (#617).
+        write(
+            "usr/lib64/llvm-14/include/llvm/IR/Instruction.def",
+            b"/* llvm-14-dev */\n",
+        );
         write("usr/lib64/llvm-14/lib/libLLVMCore.a", b"!<arch>\n");
+        // A subdirectory whose one development file is in an `include`,
+        // under no header suffix: the `include` alone curates it.
+        write("usr/lib64/onlyinclude/plugin.so", b"\x7fELF\x02\x01\x01");
+        write(
+            "usr/lib64/onlyinclude/include/sub/table.def",
+            b"/* -dev */\n",
+        );
         write("usr/lib64/python3/site-packages/mod.py", b"pass\n");
         write("usr/lib64/perl5/CORE/perl.h", b"/* perl-devel */\n");
         write("usr/lib64/perl5/CORE/libperl.so", b"\x7fELF\x02\x01\x01");
@@ -1421,8 +1449,23 @@ mod tests {
         // its headers and archives are gone (#559).
         assert!(!bound("/usr/lib64/llvm-14"), "{args:?}");
         for dropped in [
+            "/usr/lib64/llvm-14/include",
             "/usr/lib64/llvm-14/include/llvm/Config.h",
+            "/usr/lib64/llvm-14/include/llvm/IR",
+            "/usr/lib64/llvm-14/include/llvm/IR/Instruction.def",
             "/usr/lib64/llvm-14/lib/libLLVMCore.a",
+        ] {
+            assert!(!bound(dropped), "{dropped} bound: {args:?}");
+            assert!(!mirrored(dropped), "{dropped} mirrored");
+        }
+        assert!(!bound("/usr/lib64/onlyinclude"), "{args:?}");
+        assert!(linked(
+            "/usr/lib64/onlyinclude/plugin.so",
+            "/usr/lib64/onlyinclude/plugin.so"
+        ));
+        for dropped in [
+            "/usr/lib64/onlyinclude/include",
+            "/usr/lib64/onlyinclude/include/sub/table.def",
         ] {
             assert!(!bound(dropped), "{dropped} bound: {args:?}");
             assert!(!mirrored(dropped), "{dropped} mirrored");
