@@ -1968,8 +1968,10 @@ platforms:
    source builds before the permission check. There is no metadata
    pre-step. A build refusal names the project or distribution uv reported,
    and an allowed rerun records `resolution-build` before publishing.
-4. uv's caches are per run (see "Performance"), so a build cached earlier
-   cannot hide a build this run needed.
+4. uv's cache is private to each attempt. An allowed retry starts with
+   an empty uv cache, so the accepted run independently requests all its
+   metadata and artifacts and records their evidence and exceptions. The
+   proxy's verified persistent cache still avoids redundant downloads.
 
 The kind means "resolution needed source builds or metadata preparation,
 and that execution of build code was allowed".
@@ -3610,9 +3612,10 @@ uv rows onto the door:
   that check. This is the owner's correction from the #622 review on
   2026-10-09. If allowed, the rerun without `--no-build` carries that fact
   into the signed receipt.
-- **One cache per operation.** A store stage, bound read-write as a
-  cache root and named by `UV_CACHE_DIR`, shared by the probe, the
-  pre-step, and the run after them, removed when the operation ends.
+- **One cache per attempt.** A private store stage is bound read-write
+  and named by `UV_CACHE_DIR`. An allowed retry has a new empty uv cache
+  so evidence from a failed probe cannot disappear behind cache reuse.
+  Each cache is removed when its attempt ends.
 - **The compiled lock's header.** `uv pip compile` writes its own
   command line into the lock, which names the store interpreter (a path
   that differs per machine) and the probe's `--no-build`. Every compile

@@ -16,8 +16,8 @@
 //! interception, and recorded as `unattested-index`. The forced row adds
 //! `--python <store python>`, `--no-config`, `--no-python-downloads`, and
 //! `--keyring-provider disabled`. uv's cache is a directory tog creates for
-//! one door operation and removes after it, shared by the probe and the
-//! run after it, never by two operations.
+//! one attempt and removes after it. An allowed retry has a fresh cache,
+//! so its ledger covers the metadata and artifacts it actually consumed.
 //!
 //! **The `--no-build` probe.** Whether resolution ran a third-party build
 //! backend is established by construction, not guessed from traffic: every
@@ -247,8 +247,8 @@ pub(crate) fn build_needs(stderr: &str) -> Vec<BuildNeed> {
     needs
 }
 
-/// uv's cache for one door operation: a store stage, bound read-write into
-/// each of the operation's runs and removed when the operation ends.
+/// uv's cache for one attempt: a private store stage, bound read-write
+/// into that attempt and removed when it ends.
 struct UvCache {
     dir: PathBuf,
 }
@@ -427,7 +427,11 @@ fn probe_then_run(
         subject,
         detail,
     }];
-    attempt(door, run, python, cache, false, run.capture, facts)
+    // Failed probes may have warmed uv's metadata and artifact caches.
+    // Re-resolve with an empty cache so every contributing request and
+    // exception belongs to the session that signs the accepted outputs.
+    let retry_cache = UvCache::create(door.store(), door.lease())?;
+    attempt(door, run, python, &retry_cache, false, run.capture, facts)
 }
 
 /// One attempt of `run`, with or without `--no-build`.
@@ -697,6 +701,86 @@ mod tests {
 
     fn stderr(report: &DelegateReport) -> String {
         String::from_utf8_lossy(&report.stderr).into_owned()
+    }
+
+    /// A failed probe's private cache must not hide evidence in a later
+    /// accepted run. The stand-in fails if that cache is reused, and the
+    /// resulting receipt must carry permission for the metadata build.
+    #[test]
+    fn an_allowed_metadata_build_restarts_with_an_empty_cache_and_records_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = policy::attribution_test_lock();
+        let Some(relay) = relay("uv-fresh-retry") else {
+            return;
+        };
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        let harness = Harness::new("uv-fresh-retry");
+        let uv = Uv {
+            obj: harness
+                .store
+                .stage_with_activity(&harness.activity)
+                .unwrap(),
+            runtime: harness
+                .store
+                .stage_with_activity(&harness.activity)
+                .unwrap(),
+            version: "test".into(),
+        };
+        fs::create_dir_all(uv.runtime.join("bin")).unwrap();
+        fs::write(
+            uv.binary(),
+            r#"#!/bin/sh
+case " $* " in
+    *" --no-build "*)
+        echo warmed > "$UV_CACHE_DIR/probe-metadata"
+        echo 'error: Failed to build `local @ file:///project`' >&2
+        echo 'Building source distributions for `local` is disabled' >&2
+        exit 1
+        ;;
+esac
+test ! -e "$UV_CACHE_DIR/probe-metadata" || exit 61
+echo '# resolved in a fresh cache' > requirements.lock.txt
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(uv.binary(), fs::Permissions::from_mode(0o755)).unwrap();
+        let temp = TempDir::named("uv-retry-project");
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let spec =
+            crate::tailors::record_spec(&super::super::tailor::Python, &held, uv.tool(), &["lock"])
+                .unwrap();
+        let slot = RecordSlot::default();
+        let (report, recorded) = through_door(
+            &harness,
+            DoorKind::Edit,
+            UvRun {
+                uv: &uv,
+                lock_root: &temp.0,
+                cwd: None,
+                args: vec!["lock".into()],
+                index: Index::Project,
+                outputs: super::super::resolve::resolution_outputs(&held).unwrap(),
+                target: UvTarget::Project {
+                    record: Some(spec),
+                    slot: slot.clone(),
+                },
+                builds: Builds::Probe,
+                capture: true,
+                policy: Some(Policy::default()),
+            },
+        );
+        done();
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        assert!(recorded
+            .iter()
+            .any(|fact| fact.kind == policy::RESOLUTION_BUILD));
+        let (receipt, _) = slot.borrow_mut().take().unwrap();
+        assert!(receipt
+            .exceptions
+            .iter()
+            .any(|fact| fact.kind == policy::RESOLUTION_BUILD));
+        assert!(temp.0.join("requirements.lock.txt").is_file());
     }
 
     /// A missing requirements lock, compiled by the store uv through
