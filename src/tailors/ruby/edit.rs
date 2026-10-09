@@ -1,7 +1,10 @@
 //! `tog add` / `remove` / `update` for Ruby (`Tailor::edit_manifest`): the
-//! store Bundler edits the Gemfile and Gemfile.lock.
+//! store Bundler edits the Gemfile and Gemfile.lock, confined through the
+//! edit door, which publishes them with the signed resolution record.
 
-use crate::kernel::resolve::ResolutionDoor;
+use super::door::{run_ruby_checked, RubyPublish, RubyRun};
+use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::resolve::{record, ResolutionDoor};
 use crate::tailors::edit::{registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry};
 use std::io;
 
@@ -30,7 +33,7 @@ pub(crate) const REMOVE_GEMS: &str =
 /// would also install every gem they resolve into the host's gem paths
 /// (#211), so `add` skips the install and an update is `bundle lock
 /// --update`. tog realizes the gems from the lock afterwards.
-fn bundler_runs(verb: EditVerb, texts: &[String], dev: bool) -> Vec<Vec<&str>> {
+pub(super) fn bundler_runs(verb: EditVerb, texts: &[String], dev: bool) -> Vec<Vec<&str>> {
     match verb {
         EditVerb::Add => texts
             .iter()
@@ -73,21 +76,34 @@ pub(crate) fn edit_manifest(
     door: &mut ResolutionDoor<'_>,
 ) -> io::Result<EditOutcome> {
     let (project, texts, dev) = (edit.project, &edit.texts(), edit.dev);
-    let ruby_obj = super::realize_runtime(
-        door.store(),
-        door.lease(),
-        door.platform(),
-        &edit.host.toolchain(project, "ruby")?,
-    )?;
-    let scratch = door.store().stage_with_activity(door.lease())?;
-    let result = (|| -> io::Result<()> {
-        for args in bundler_runs(edit.verb, texts, dev) {
-            super::run_checked(door, &ruby_obj, project, &scratch, &args)?;
-        }
-        Ok(())
-    })();
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    result?;
+    let selected = edit.host.toolchain(project, "ruby")?;
+    let ruby_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
+    let root = ProjectRoot::open(project)?;
+    // Every run publishes the Gemfile and Gemfile.lock with a record of its
+    // own, so no state between two runs sits under an older record.
+    for args in bundler_runs(edit.verb, texts, dev) {
+        let spec = crate::tailors::record_spec(
+            &super::tailor::Ruby,
+            &root,
+            super::ruby_tool(&selected)?,
+            &args,
+        )?;
+        run_ruby_checked(
+            door,
+            RubyRun {
+                ruby_obj: &ruby_obj,
+                lock_root: project,
+                args: &args,
+                // Bundler's Gemfile editor needs no network; the lock runs do.
+                online: args[0] == "bundle",
+                frozen: false,
+                files: Vec::new(),
+                publish: RubyPublish::Project {
+                    receipt: Some(record::producer(spec, Default::default())),
+                },
+            },
+        )?;
+    }
     Ok(EditOutcome {
         files: vec!["Gemfile".to_string(), "Gemfile.lock".to_string()],
         sync_root: project.to_path_buf(),

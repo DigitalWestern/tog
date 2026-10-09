@@ -49,6 +49,27 @@ impl Tailor for Ruby {
         "ruby"
     }
 
+    /// The Gemfile and Gemfile.lock: what `bundle lock` and `bundle add`
+    /// write. Bundler reads no other resolution input tog can name: config
+    /// files are ignored (`BUNDLE_IGNORE_CONFIG=1`), a source other than
+    /// rubygems.org is refused at plan time, and what a Gemfile loads with
+    /// `eval_gemfile` is code tog cannot list.
+    fn resolution_outputs(&self, _project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        Ok(vec!["Gemfile".into(), "Gemfile.lock".into()])
+    }
+
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &crate::kernel::toolchain::Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let ruby_obj = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        ruby::attest_project(door, project, &ruby_obj, toolchain)
+    }
+
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
         Ok(project.is_input_file(Path::new("Gemfile")))
     }
@@ -86,7 +107,7 @@ impl Tailor for Ruby {
             return Ok(());
         }
         let ruby_obj = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        ruby::generate_lock(door, project, &ruby_obj)
+        ruby::generate_lock(door, project, &ruby_obj, toolchain)
     }
 
     fn plan(
@@ -99,7 +120,7 @@ impl Tailor for Ruby {
         let activity = &ctx.activity;
         ruby::require_lock(project)?;
         let ruby_obj = ruby::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = ruby::plan_ruby(door, project, &ruby_obj, toolchain)?;
+        let (plan, _, _) = ruby::plan_ruby(door, project, &ruby_obj, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 
@@ -116,12 +137,16 @@ impl Tailor for Ruby {
         let store = &ctx.store;
         ruby::require_lock(project)?;
         let ruby_obj = ruby::realize_runtime(store, activity, platform, toolchain)?;
-        let (plan, lock_sha256) = ruby::plan_ruby(
-            &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
-            project,
-            &ruby_obj,
-            toolchain,
-        )?;
+        let mut door =
+            ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?;
+        let (plan, lock_sha256, basis) = ruby::plan_ruby(&mut door, project, &ruby_obj, toolchain)?;
+        // The planner checks ran detached; their ledgers are evidence of
+        // this sync's planning, rooted here so GC keeps them.
+        let ledgers = door.take_kept_ledgers();
+        drop(door);
+        for objects in &ledgers {
+            crate::kernel::resolve::ledger::root(store, activity, project, objects)?;
+        }
         let gems = ruby::realize_gems(store, activity, platform, &plan, &ruby_obj, toolchain)?;
         ruby::project_ruby_env(
             activity,
@@ -130,7 +155,9 @@ impl Tailor for Ruby {
             &gems,
             &plan,
             &lock_sha256,
+            &basis,
             toolchain,
+            &ledgers,
             attribution,
         )?;
         ui::synced("gems", &gems);
