@@ -89,9 +89,10 @@ pub(super) fn helper(
 }
 
 /// `tog attest` for Ruby: `bundle lock` in the project, frozen, through
-/// `door`'s transaction with the record's producer. A Gemfile the lock no
-/// longer matches stops frozen Bundler; a lock it would rewrite anyway is
-/// caught by the kernel's byte-unchanged rule. The check publishes nothing,
+/// `door`'s transaction with the record's producer. `bundle lock` with
+/// `BUNDLE_FROZEN=true` still re-resolves a Gemfile the lock no longer
+/// matches and writes the new lock into the stage (measured), so the
+/// record's byte-unchanged rule is what refuses it. The check publishes nothing,
 /// not even the receipt: `tog attest` publishes every record only once
 /// every check passed.
 pub fn attest_project(
