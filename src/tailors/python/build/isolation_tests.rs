@@ -47,6 +47,19 @@ mod tests {
         }
     }
 
+    /// Exercise the same depth-aware path that project sync supplies with
+    /// its runtime plan, without exposing a production wrapper for tests.
+    fn build_with_runtime_plan(
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+        pkg: &LockedPackage,
+        selected: &crate::kernel::toolchain::Selected,
+        runtime_plan: &Plan,
+    ) -> std::io::Result<std::path::PathBuf> {
+        crate::tailors::install_kinds();
+        build::build_sdist_wheel_at_depth(door, pkg, selected, None, Some(runtime_plan), 0)
+            .map(|wheel| wheel.path)
+    }
+
     /// Keep the actual CLI relay in a test-only thread-local slot. Production
     /// always binds its own running executable and accepts no override.
     struct RelayGuard;
@@ -194,7 +207,7 @@ mod tests {
             "https://files.pythonhosted.org/packages/0b/8d/0f4af90999ca96cf8cb846eb5ae27c5ef5b390f9c090dd19e4fa76364c13/insightface-0.7.3.tar.gz",
             "f191f719612ebb37018f41936814500544cd0f86e6fcd676c023f354c668ddf7",
         );
-        let wheel = build::build_sdist_wheel_with_runtime_plan(
+        let wheel = build_with_runtime_plan(
             &mut crate::kernel::resolve::ResolutionDoor::open(
                 &store,
                 activity,
