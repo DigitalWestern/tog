@@ -419,8 +419,8 @@ fn refuse_foreign_header(project: &ProjectRoot, output: &str) -> io::Result<()> 
     }
     Err(io::Error::other(format!(
         "{output} in {} was not compiled by tog (its header names another command), so \
-         rerunning the compile would rewrite it and the check cannot pass; delete it, run \
-         `tog` to compile it again, commit the result, then attest",
+         rerunning the compile would rewrite it and the check cannot pass; run \
+         `tog update` to compile it again, commit the result, then attest",
         project.path().display()
     )))
 }

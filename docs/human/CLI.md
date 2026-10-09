@@ -1103,12 +1103,20 @@ PyPI wheel metadata sidecars are verified against the index's advertised
 digests before use. A missing digest records `weak-integrity`, which policy
 can deny. A mismatch always fails and is never cached.
 
+Python resolution runs uv with `--no-config`. Scalar uv settings from
+`uv.toml`, `[tool.uv]`, and `[tool.uv.pip]`, such as `resolution` and
+`prerelease`, currently use uv's defaults. Explicit dependency sources and
+indexes still apply through the proxy, with PyPI forced as the default.
+The door disables interpreter downloads and keyring programs and selects
+the store interpreter. Preserving safe resolver settings needs a reviewed
+allowlist so configuration cannot bypass these controls.
+
 Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
 lock the same `uv pip compile` tog ran to write it, which must leave it
 byte for byte the same: `requirements.lock.txt` from the requirements tog
 compiles it from, or `requirements.txt` from `requirements.in`. A
 compiled lock whose header names another command than `tog` (one written
-by uv or pip-tools directly) is refused: delete it and run `tog` to
+by uv or pip-tools directly) is refused: run `tog update` to
 compile it again. A project with no lock a tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
 file that includes one outside the project.
