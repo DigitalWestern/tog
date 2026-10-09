@@ -267,10 +267,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
   replacement after commit is undetected.
-- **Delegated planning runs in the resolution sandbox.** A Gemfile and a mix.exs are
-  code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler) and Elixir's (mix)
-  resolvers all run confined, reaching their registry only through tog's proxy. .NET's
-  restore does not yet (#207).
+- **Delegated planning runs in the resolution sandbox.** A Gemfile, a mix.exs and a
+  csproj are code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler), Elixir's
+  (mix) and .NET's (restore) resolvers all run confined, reaching their registry only
+  through tog's proxy.
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
@@ -558,9 +558,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   packages.config) fail closed.
 - **Build-capable dotnet verbs are refused at `tog run`**; everything compiling goes
   through `tog build dotnet`, which covers build only (no test/publish verbs). The guard
-  is advisory — `sh -c` can bypass it. **Restore-time MSBuild evaluation runs unsandboxed
-  during missing-lock generation** (delegated-planning trust; the project's MSBuild code runs
-  on the host). **Preflight is a fail-closed text scan, not an XML parse**:
+  is advisory — `sh -c` can bypass it. Missing-lock restore runs in the resolution
+  sandbox through tog's NuGet mirror, so the project's MSBuild code never runs on the host.
+  **Preflight is a fail-closed text scan, not an XML parse**:
   exotic-but-legitimate projects can be refused; nothing banned can hide (XML cannot
   entity-encode element names) — the build sandbox, not preflight, is the security boundary.
 - **Output publication has a microsecond non-atomic window**: a reader during the rename sees

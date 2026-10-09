@@ -3726,6 +3726,35 @@ the no-Unix-socket restore settings, and missing-lock restore confined,
 which closes the LIMITATIONS row "Restore-time MSBuild evaluation runs
 unsandboxed" (known gap 4). `attest` with `--locked-mode`.
 
+**PR 9 as built (Linux, 2026-10-09, #207).** Decisions made moving
+restore onto the door:
+
+- **The mirror.** `tailors/dotnet/registry.rs`: the service index, the
+  flat container (`<id>/index.json` and `<id>.<version>.nupkg`), and
+  NuGetAudit's index and data files, each on api.nuget.org. Registration
+  pages are refused (restore reads none). The service index keeps only
+  api.nuget.org's resources, moved to the route, without
+  `RepositorySignatures/*`, and the vulnerability index's `@id`s move to
+  the route too. No claims: the lock's `contentHash` is NuGet's to check.
+- **The config.** It names the session's address, so the wiring writes it
+  (`nuget.config` in the scratch, `allowInsecureConnections="true"`),
+  with NuGet's migration sentinel beside it. `HTTPS_PROXY` only, the
+  mirror host in `NO_PROXY`, `NUGET_CERT_REVOCATION_MODE=offline`.
+  `NUGET_PACKAGES`, `DOTNET_CLI_HOME` and the XDG homes are the scratch.
+  `obj` and `bin` are excluded from the snapshot.
+- **Doors.** A missing lock (`restore --use-lock-file`) publishes the lock
+  with its record. `tog attest` runs `restore --locked-mode` with
+  `require_unchanged`. Planning reads the lock alone, so a sync roots no
+  ledger.
+- **Resolution files.** Outputs: the project's one `.csproj` and
+  `packages.lock.json`. Inputs: `global.json`, `Directory.Build.props` and
+  `Directory.Build.targets` when present.
+- **Tests.** `tailors/dotnet/resolve.rs`
+  `dotnet_missing_lock_restore_through_nuget_mirror`, against the
+  recorded rows plus a served unsigned `Tog.Fixture` package and an empty
+  vulnerability base (the recording kept neither body): a missing lock,
+  an unchanged lock attested, a drifted csproj refused.
+
 **PR 10: remove `Legacy`.** Delete the mode. The company template denies
 `unconfined-resolution` and `unrecorded-resolution`, lists
 `resolution-build` and `stale-resolution` as deliberately not denied with
