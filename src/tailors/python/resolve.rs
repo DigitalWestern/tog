@@ -598,6 +598,22 @@ mod tests {
         assert!(has_external_includes(&held).unwrap());
     }
 
+    #[test]
+    fn the_resolution_basis_cannot_attest_a_replaced_planning_lock() {
+        let temp = TempDir::named("py-basis-race");
+        write(&temp.0, "uv.lock", "generation A");
+        let observed = ProjectRoot::open(&temp.0)
+            .unwrap()
+            .observing_inputs()
+            .unwrap();
+        observed.read_input(Path::new("uv.lock")).unwrap();
+        // Deterministically replace the input after consumption and before
+        // the producer builds its basis, rather than depending on timing.
+        write(&temp.0, "uv.lock", "generation B");
+        let error = resolution_basis(&observed).unwrap_err();
+        assert!(error.to_string().contains("changed while planning"));
+    }
+
     /// The header uv writes for `--custom-compile-command tog`, and one a
     /// direct run wrote.
     #[test]
