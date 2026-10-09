@@ -1078,7 +1078,7 @@ before any record is written. With `TOG_SIGNING_KEY` unset it warns and
 writes the record unsigned, which no sync will attest. It reads
 `tog-toolchain.toml` the way `--frozen` does and never writes it, and it
 refuses `--frozen` (exit 2). An ecosystem with no resolution door is
-refused by name. Today four have one. Go's check is `go mod download -json
+refused by name. Today six have one (.NET has none yet). Go's check is `go mod download -json
 all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
 workspace root, run in the sandbox through tog's resolution proxy (TLS
 interception to crates.io), so its fetches are in the record's ledger. Run
@@ -1102,6 +1102,13 @@ by uv or pip-tools directly) is refused: delete it and run `tog` to
 compile it again. A project with no lock a tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
 file that includes one outside the project.
+Ruby's is `bundle lock` with `BUNDLE_FROZEN=true`, which must leave the
+Gemfile and Gemfile.lock byte for byte the same. Bundler reaches
+rubygems.org only through the session's RubyGems mirror
+(`BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/`), so the lock keeps naming
+rubygems.org. Elixir's is `mix deps.get --check-locked`, with Hex pointed
+at the session's mirror of repo.hex.pm (`HEX_MIRROR`). Both run confined,
+like the others, and their fetches are in the record's ledger.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.
