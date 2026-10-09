@@ -1093,6 +1093,13 @@ the pnpm `packageManager` pins for a `pnpm-lock.yaml`, each confined the
 same way, at the lock root: from a pnpm workspace member it is refused,
 naming the root. A `yarn.lock` has no check, since yarn is not a pinned
 tool, and a `file:` dependency outside the project is refused by name.
+Python resolution first runs uv with `--no-build`. If source builds or
+metadata preparation are needed, including the project's own backend,
+`resolution-build` permission is required before any backend runs. A denial
+names the package and publishes nothing. An allowed rerun records the
+exception in its signed resolution receipt. The project's own metadata is
+not exempt because its backend can request third-party source builds.
+
 Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
 lock the same `uv pip compile` tog ran to write it, which must leave it
 byte for byte the same: `requirements.lock.txt` from the requirements tog

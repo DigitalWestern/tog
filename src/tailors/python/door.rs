@@ -23,11 +23,10 @@
 //! backend is established by construction, not guessed from traffic: every
 //! uv door first runs with `--no-build`, where no third-party code can
 //! run. If that succeeds, its outputs are the result. If uv refuses because
-//! a distribution must be built, the names it gives decide: the project's
-//! own code (a path under the lock root) has its metadata built first,
-//! with its build backend from wheels only, and the probe runs again; a
-//! third party's build is `resolution-build`, refused when policy denies
-//! it and otherwise recorded, and the run is repeated without `--no-build`.
+//! a distribution needs a source build or metadata preparation, every build
+//! (including the project's own backend) requires `resolution-build`
+//! permission before it runs. Allowed builds are recorded and the run is
+//! repeated without `--no-build`.
 
 use super::registry;
 use crate::kernel::activity::StoreActivity;
@@ -248,59 +247,16 @@ pub(crate) fn build_needs(stderr: &str) -> Vec<BuildNeed> {
     needs
 }
 
-/// The directory of a build need under `lock_root`: the project's own code
-/// (a workspace member, the root project, a path dependency inside the
-/// project), whose build is not a third party's.
-fn own_directory(need: &BuildNeed, lock_root: &Path) -> Option<PathBuf> {
-    let url = url::Url::parse(need.url.as_deref()?).ok()?;
-    if url.scheme() != "file" {
-        return None;
-    }
-    let path = url.to_file_path().ok()?;
-    let real = std::fs::canonicalize(&path).ok()?;
-    let root = std::fs::canonicalize(lock_root).ok()?;
-    real.starts_with(&root).then_some(real)
-}
-
-/// The project names a `pyproject.toml`'s `build-system.requires` lists,
-/// or setuptools when there is none (PEP 517's default backend).
-fn build_requirement_names(dir: &Path) -> Vec<String> {
-    let text = std::fs::read_to_string(dir.join("pyproject.toml")).unwrap_or_default();
-    let names: Vec<String> = text
-        .parse::<toml::Table>()
-        .ok()
-        .and_then(|table| {
-            table
-                .get("build-system")?
-                .get("requires")?
-                .as_array()
-                .cloned()
-        })
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|value| value.as_str())
-        .filter_map(super::edit::requirement_name)
-        .collect();
-    if names.is_empty() {
-        vec!["setuptools".to_string()]
-    } else {
-        names
-    }
-}
-
 /// uv's cache for one door operation: a store stage, bound read-write into
 /// each of the operation's runs and removed when the operation ends.
 struct UvCache {
     dir: PathBuf,
-    /// The pre-step inputs written so far.
-    count: std::cell::Cell<usize>,
 }
 
 impl UvCache {
     fn create(store: &Store, activity: &StoreActivity) -> io::Result<UvCache> {
         Ok(UvCache {
             dir: store.stage_with_activity(activity)?,
-            count: std::cell::Cell::new(0),
         })
     }
 }
@@ -439,56 +395,25 @@ fn probe_then_run(
     python: &Path,
     cache: &UvCache,
 ) -> io::Result<DelegateReport> {
-    let mut built_own: Vec<PathBuf> = Vec::new();
-    let mut third_party: Vec<String> = Vec::new();
-    loop {
-        let probe = attempt(door, run, python, cache, true, true, Vec::new())?;
-        if probe.status.success() {
-            if !run.capture {
-                let _ = ui::narration().write_all(&probe.stderr);
-                let _ = io::stdout().write_all(&probe.stdout);
-            }
-            return Ok(probe);
+    let probe = attempt(door, run, python, cache, true, true, Vec::new())?;
+    if probe.status.success() {
+        if !run.capture {
+            let _ = ui::narration().write_all(&probe.stderr);
+            let _ = io::stdout().write_all(&probe.stdout);
         }
-        let stderr = String::from_utf8_lossy(&probe.stderr).into_owned();
-        let needs = build_needs(&stderr);
-        if needs.is_empty() {
-            return Ok(probe);
-        }
-        let mut progressed = false;
-        for need in &needs {
-            match own_directory(need, run.lock_root) {
-                Some(dir) if !built_own.contains(&dir) => {
-                    // The project's own code: its metadata, built with its
-                    // backend from wheels only. A backend that is itself
-                    // sdist-only is a third party's build.
-                    match own_metadata(door, run, python, cache, &dir)? {
-                        None => {}
-                        Some(requires) => third_party.extend(requires),
-                    }
-                    built_own.push(dir);
-                    progressed = true;
-                }
-                Some(_) => {}
-                None => third_party.push(need.name.clone()),
-            }
-        }
-        if progressed && third_party.is_empty() {
-            continue;
-        }
-        if third_party.is_empty() {
-            // Only the project's own builds, already prepared: the probe
-            // still needs them, so uv's own words are the answer.
-            return Ok(probe);
-        }
-        break;
+        return Ok(probe);
     }
-    third_party.sort();
-    third_party.dedup();
-    let subject = third_party.join(", ");
-    let detail = "resolving needed to build these source distributions, or the project's own \
-                  build backend could not come from wheels alone (their build code runs, \
-                  confined); uv's --no-build probe could not finish without them"
+    let needs = build_needs(&String::from_utf8_lossy(&probe.stderr));
+    if needs.is_empty() {
+        return Ok(probe);
+    }
+    let mut names: Vec<_> = needs.into_iter().map(|need| need.name).collect();
+    names.sort();
+    names.dedup();
+    let subject = names.join(", ");
+    let detail = "resolution needs source builds or metadata preparation, including the \
+                  project's own backend and its dynamic build requirements; uv's --no-build \
+                  probe could not finish without executing build code (confined)"
         .to_string();
     let policy = run.policy.clone().unwrap_or_else(policy::effective);
     if policy::denied(&policy, policy::RESOLUTION_BUILD) {
@@ -503,59 +428,6 @@ fn probe_then_run(
         detail,
     }];
     attempt(door, run, python, cache, false, run.capture, facts)
-}
-
-/// Build the metadata of the project's own distribution at `dir` into the
-/// operation's cache, its build backend from wheels only, so the probe that
-/// follows reuses it. `Some(requirements)` when the backend could not come
-/// from wheels: those requirements are a third party's build.
-fn own_metadata(
-    door: &mut ResolutionDoor<'_>,
-    run: &UvRun<'_>,
-    python: &Path,
-    cache: &UvCache,
-    dir: &Path,
-) -> io::Result<Option<Vec<String>>> {
-    // `uv pip compile` takes its requirements from a file: one naming the
-    // directory editable, written in the operation's cache (bound into the
-    // run read-write), never in the project. The snapshot is at the
-    // project's own path, so the path names it there.
-    let requires = build_requirement_names(dir);
-    let input = cache.dir.join(format!("own-{}.in", cache.count.get()));
-    cache.count.set(cache.count.get() + 1);
-    std::fs::write(&input, format!("-e {}\n", dir.display()))?;
-    let args: Vec<OsString> = vec![
-        "pip".into(),
-        "compile".into(),
-        "--quiet".into(),
-        "--no-deps".into(),
-        "--only-binary".into(),
-        requires.join(",").into(),
-        Index::PipCompile.flag().into(),
-        registry::INDEX_URL.into(),
-        input.into_os_string(),
-    ];
-    let (spec, confined) = confined(
-        run.uv,
-        python,
-        &cache.dir,
-        Attempt {
-            lock_root: run.lock_root,
-            cwd: None,
-            args,
-            publish: Publish::Detached {
-                outputs: Vec::new(),
-            },
-            capture: true,
-            facts: Vec::new(),
-        },
-    )?;
-    spec.trace();
-    let report = door.run_confined(spec, confined)?;
-    if report.status.success() {
-        return Ok(None);
-    }
-    Ok(Some(requires))
 }
 
 /// One attempt of `run`, with or without `--no-build`.
@@ -677,51 +549,6 @@ mod tests {
         // A name given twice is one need, keeping the url either form gave.
         let both = format!("{member}hint: Wheels are required for `dyn` because building from source is disabled\n");
         assert_eq!(build_needs(&both).len(), 1);
-    }
-
-    #[test]
-    fn own_code_is_a_file_url_under_the_lock_root() {
-        let temp = crate::kernel::testutil::TempDir::named("uv-own");
-        let root = temp.0.join("proj");
-        std::fs::create_dir_all(root.join("member")).unwrap();
-        std::fs::create_dir_all(temp.0.join("elsewhere")).unwrap();
-        let need = |url: String| BuildNeed {
-            name: "x".into(),
-            url: Some(url),
-        };
-        let member = url::Url::from_file_path(root.join("member")).unwrap();
-        assert_eq!(
-            own_directory(&need(member.to_string()), &root),
-            Some(root.join("member").canonicalize().unwrap())
-        );
-        let outside = url::Url::from_file_path(temp.0.join("elsewhere")).unwrap();
-        assert_eq!(own_directory(&need(outside.to_string()), &root), None);
-        assert_eq!(
-            own_directory(&need("https://example.test/x.tar.gz".into()), &root),
-            None
-        );
-        assert_eq!(
-            own_directory(
-                &BuildNeed {
-                    name: "x".into(),
-                    url: None
-                },
-                &root
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn build_requirements_default_to_setuptools() {
-        let temp = crate::kernel::testutil::TempDir::named("uv-build-reqs");
-        assert_eq!(build_requirement_names(&temp.0), ["setuptools"]);
-        std::fs::write(
-            temp.0.join("pyproject.toml"),
-            "[build-system]\nrequires = [\"hatchling>=1\", \"hatch-vcs\"]\nbuild-backend = \"hatchling.build\"\n",
-        )
-        .unwrap();
-        assert_eq!(build_requirement_names(&temp.0), ["hatchling", "hatch-vcs"]);
     }
 
     /// The index and the build flag go before `--`, so the operands stay
@@ -1003,19 +830,13 @@ mod tests {
         assert!(!dir.join("requirements.lock.txt").exists());
     }
 
-    /// The project's own build is not a third party's: a project whose
-    /// version is dynamic (hatchling reads it from the source) fails the
-    /// probe on itself, and the door builds its metadata in a pre-step with
-    /// the backend from wheels only. Here that pre-step cannot finish (the
-    /// editable build also asks for `editables`, which the recorded rows do
-    /// not hold), so the door treats the backend's requirements as the
-    /// third-party build: denied, the refusal names `hatchling`, never the
-    /// project itself.
+    /// A local project's dynamic metadata is permission-gated before any
+    /// backend runs, including its dynamic/transitive build dependencies.
     #[test]
     #[ignore = "realizes the store uv and CPython over the network"]
-    fn the_projects_own_build_goes_through_the_metadata_pre_step() {
+    fn the_projects_own_metadata_is_refused_before_running_a_backend() {
         let _serial = policy::attribution_test_lock();
-        let label = "the_projects_own_build_goes_through_the_metadata_pre_step";
+        let label = "the_projects_own_metadata_is_refused_before_running_a_backend";
         let Some(harness) = uv_harness(label) else {
             return;
         };
@@ -1056,12 +877,14 @@ mod tests {
         );
         done();
         let error = report.unwrap_err().to_string();
-        assert!(error.contains("resolution-build: hatchling:"), "{error}");
-        assert!(!error.contains("spike"), "{error}");
+        assert!(error.contains("resolution-build: spike:"), "{error}");
         assert!(recorded.is_empty(), "{recorded:?}");
         assert!(!dir.join("uv.lock").exists());
-        // The pre-step's input went into the operation's cache, which is
-        // gone: nothing was written into the project.
+        assert!(
+            harness.upstream.seen().is_empty(),
+            "a backend dependency was fetched"
+        );
+        // No metadata pre-step or build was allowed to run.
         let mut names: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())

@@ -1961,22 +1961,18 @@ platforms:
    `Failed to build `<name> @ <url>`` followed by
    `Building source distributions for `<name>` is disabled`. The door
    parses the name out of either form.
-3. The project's own build (a workspace member with dynamic metadata) is
-   the project's code, not a third party's. PR 0 refuted the planned
-   exemption: `--no-build-package <member>` forbids that member's build
-   too (same error). The probe instead builds the members' metadata
-   first, in the run's own cache:
-   `uv pip compile --no-deps --only-binary <names in the member's build-system.requires> -e <member>`
-   (the build backend itself must come as a wheel, so only the project's
-   own code runs), then `uv lock --no-build` reuses the cached metadata
-   and passes (measured). A member whose build requirements are
-   themselves sdist-only fails that pre-step, and the door treats it as a
-   `resolution-build` naming that requirement.
+3. **Owner correction, 2026-10-09, review of #622:** every metadata
+   preparation, including the project's own backend, requires
+   `resolution-build` permission. The earlier editable pre-step exemption
+   allowed dynamic and transitive build requirements to run third-party
+   source builds before the permission check. There is no metadata
+   pre-step. A build refusal names the project or distribution uv reported,
+   and an allowed rerun records `resolution-build` before publishing.
 4. uv's caches are per run (see "Performance"), so a build cached earlier
    cannot hide a build this run needed.
 
-The kind therefore means exactly "resolution could not complete without
-building a third-party source distribution, and the build was allowed".
+The kind means "resolution needed source builds or metadata preparation,
+and that execution of build code was allowed".
 On Linux the rerun's exec log is compared with the probe, and a build
 recorded without any interpreter exec from a uv build environment (or the
 reverse) is written to diagnostics for investigation. That is a
@@ -3609,17 +3605,11 @@ uv rows onto the door:
   failure that names no build need is the answer. uv 0.12.7 wraps a long
   message onto several lines behind box drawing, so the parser joins
   them before reading the names. A need whose url is a `file://` path
-  under the lock root is the project's own code: a pre-step compiles
-  `-e <dir>` (from a one-line input in the operation's cache, since
-  `uv pip compile` takes requirements from a file) with `--no-deps
-  --only-binary <build-system.requires names>`, and the probe runs
-  again. A non-editable pre-step does not help: `uv lock` reuses only the
-  editable metadata (measured). A pre-step that fails names the build
-  requirements as the third-party build. Anything else is
-  `resolution-build`: refused through `policy::refusal` when denied,
-  otherwise passed to the run without `--no-build` as a fact
-  (`ConfinedSpec::facts`, new), which the door records with the session's
-  facts and carries in the receipt.
+  is subject to the same `resolution-build` permission check, including
+  the project's own backend. No editable metadata pre-step runs before
+  that check. This is the owner's correction from the #622 review on
+  2026-10-09. If allowed, the rerun without `--no-build` carries that fact
+  into the signed receipt.
 - **One cache per operation.** A store stage, bound read-write as a
   cache root and named by `UV_CACHE_DIR`, shared by the probe, the
   pre-step, and the run after them, removed when the operation ends.
@@ -3656,12 +3646,10 @@ uv rows onto the door:
 - **Tests.** In `tailors/python/door.rs` against the recorded PyPI rows:
   `uv_compile_through_interception_publishes_the_lock_with_its_record`,
   `a_third_party_build_is_refused_when_denied` (docopt, sdist only), and
-  `the_projects_own_build_goes_through_the_metadata_pre_step` (a dynamic
-  hatchling version: the refusal names `hatchling`, never the project).
-  The recorded rows hold neither `editables` (which an editable hatchling
-  build asks for) nor a replayable git exchange (git makes two
-  `git-upload-pack` POSTs and one was recorded), so the pre-step's
-  success path and an allowed third-party build have no offline test.
+  `the_projects_own_metadata_is_refused_before_running_a_backend`
+  (a dynamic hatchling version is refused naming the project before its
+  backend runs). An allowed third-party build still needs additional
+  recorded upstream rows for an offline replay.
   The stub-uv tests in `tailors/python/inputs.rs` now read what the stub
   saw from the lock it writes, the one file a confined run may change.
 
