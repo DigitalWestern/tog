@@ -11,9 +11,12 @@
 //! deps projection is a writable clonefile copy, recorded unattested.
 
 mod check_locked;
+mod door;
 pub mod edit;
 mod hextar;
 pub mod objects;
+pub(crate) mod registry;
+mod resolve;
 pub mod tailor;
 mod tool;
 mod unpack;
@@ -24,7 +27,6 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -33,7 +35,7 @@ use crate::kernel::toolchain::ArtifactRow;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
-use check_locked::{check_locked_inputs, check_locked_passed, record_check_locked};
+pub use resolve::{attest_project, generate_lock, plan_elixir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -41,8 +43,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-pub(crate) use tool::run_checked;
-use tool::{run_hexmark, run_mix};
+use tool::run_hexmark;
 
 // Linux relocation recipe revision: an identity input of the Linux toolchain
 // object and of the Linux BEAM fingerprint. Bump it whenever the Install
@@ -1210,143 +1211,6 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
     }
 }
 
-/// `prepare`: mix.lock, resolved by the store mix (planner scratch,
-/// network, unsandboxed) when there is none. The one place the Elixir
-/// tailor writes project inputs.
-pub fn generate_lock(
-    door: &mut ResolutionDoor<'_>,
-    project: &ProjectRoot,
-    beam_obj: &Path,
-) -> io::Result<()> {
-    if !project.is_input_file(Path::new("mix.exs")) {
-        return Err(err("mix.exs not found"));
-    }
-    ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
-    let scratch = door.store().stage_with_activity(door.lease())?;
-    let out = run_mix(
-        door,
-        beam_obj,
-        project.path(),
-        &scratch,
-        false,
-        &["mix", "deps.get"],
-    )?;
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    if !out.status.success() {
-        return Err(err(format!(
-            "store mix deps.get failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-/// Plan: AST-parse mix.lock under the pinned toolchain (lock-only, no
-/// eval). The project is read through the held descriptor; mix itself
-/// still runs in `project.path()`.
-pub fn plan_elixir(
-    door: &mut ResolutionDoor<'_>,
-    project: &ProjectRoot,
-    beam_obj: &Path,
-    selected: &Selected,
-) -> io::Result<(ElixirPlan, String)> {
-    let (store, activity) = (door.store(), door.lease());
-    if !project.is_input_file(Path::new("mix.exs")) {
-        return Err(err("mix.exs not found"));
-    }
-    require_lock(project)?;
-    let project_dir = project.path();
-    let lock = read_mix_lock(project)?;
-    let inputs = check_locked_inputs(project, beam_obj, &lock)?;
-    let unchanged = match &inputs {
-        Some(inputs) => check_locked_passed(store, project, inputs)?,
-        None => false,
-    };
-    if unchanged {
-        ui::trace("mix.exs and mix.lock unchanged since their last passing check");
-    } else {
-        // Consistency gate: exit status only (this evaluates mix.exs —
-        // delegated trust, never artifact authority). Network-permitted
-        // (plan-phase doctrine): --check-locked needs the hex registry; a
-        // persistent planner HEX_HOME keeps it warm.
-        let planner_home = store.root.join("planner-hexhome");
-        fs::create_dir_all(&planner_home)?;
-        let out = run_mix(
-            door,
-            beam_obj,
-            project_dir,
-            &planner_home,
-            false,
-            &["mix", "deps.get", "--check-locked"],
-        )?;
-        if !out.status.success() {
-            return Err(err(format!(
-                "mix.exs and mix.lock are out of sync; run `tog run mix \
-                 deps.get` and retry\n{}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        // Recorded only when the inputs still hash the same after the
-        // check, so the record names the bytes the check actually read.
-        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?;
-        if let (Some(before), Some(after)) = (&inputs, &after) {
-            if before == after {
-                record_check_locked(store, activity, project, before);
-            }
-        }
-    }
-    let scratch = store.stage_with_activity(activity)?;
-    let helper = scratch.join("helper.exs");
-    fs::write(&helper, HELPER)?;
-    // The helper parses a copy of the bytes read through the held
-    // descriptor, so what it parses is exactly what is hashed below.
-    let lock_copy = scratch.join("mix.lock");
-    fs::write(&lock_copy, &lock)?;
-    let out = run_mix(
-        door,
-        beam_obj,
-        project_dir,
-        &scratch,
-        true,
-        &[
-            "elixir",
-            helper
-                .to_str()
-                .ok_or_else(|| err("helper path not UTF-8"))?,
-            "lock",
-            lock_copy.to_str().ok_or_else(|| err("path not UTF-8"))?,
-        ],
-    )?;
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    if !out.status.success() {
-        return Err(err(format!(
-            "mix.lock analysis failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    #[derive(Deserialize)]
-    struct HelperOut {
-        entries: Vec<HexDep>,
-    }
-    let parsed: HelperOut =
-        serde_json::from_slice(&out.stdout).map_err(|e| err(format!("helper output: {e}")))?;
-    let mut deps = parsed.entries;
-    deps.sort_by(|a, b| a.app.cmp(&b.app));
-    let plan = ElixirPlan {
-        // The toolchain this plan was made under is the selected one, so
-        // the plan records the selection's versions, never the shipped pins.
-        otp_version: selected.version("otp")?.to_string(),
-        elixir_version: selected.version("elixir")?.to_string(),
-        deps,
-    };
-    validate_plan(&plan)?;
-    let now = read_mix_lock(project)?;
-    if now != lock {
-        return Err(err("mix.lock changed while planning; re-run 'tog'"));
-    }
-    Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
-}
-
 /// Realize the immutable deps-source object (kind "hex-deps"): every
 /// tarball dual-checksum-verified by tog (outer = sha256 of the .tar,
 /// inner = sha256(VERSION ++ metadata.config ++ contents.tar.gz)).
@@ -1449,8 +1313,10 @@ pub fn project_elixir_env(
     deps_obj: &Path,
     plan: &ElixirPlan,
     lock_sha256: &str,
+    resolution_basis: &crate::comforter::join::Digests,
     fresh: bool,
     selected: &Selected,
+    ledgers: &[crate::kernel::resolve::ledger::LedgerObjects],
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<PathBuf> {
     let spec = beam_spec(platform, selected)?;
@@ -1466,6 +1332,15 @@ pub fn project_elixir_env(
     refs.object_path(&store, activity, &beam_obj)?;
     refs.object_path(&store, activity, &deps_obj)?;
     refs.forest(&store, activity, &proj_dir)?;
+    // The planner doors' ledgers, kept as long as this closure is and
+    // named in the body so a root rebuilt from the closure keeps them.
+    let mut ledger_refs = Vec::new();
+    for objects in ledgers {
+        for id in [&objects.ledger, &objects.diagnostics] {
+            refs.object_id(&store, activity, id)?;
+            ledger_refs.push(crate::comforter::object_ref(&store.object_path(id))?);
+        }
+    }
     // Protect the dependency projection before cloning or publishing it.
     crate::comforter::persist_root_for_refs_with_project_lock(
         project,
@@ -1489,18 +1364,22 @@ pub fn project_elixir_env(
         crate::comforter::clone_tree_with_activity(activity, &deps_obj, &tmp, platform)?;
         fs::rename(&tmp, &proj_dir)?;
     }
+    let mut body = closure_body(
+        &beam_obj,
+        &deps_obj,
+        &proj_dir,
+        plan,
+        lock_sha256,
+        &spec,
+        selected,
+    )?;
+    body["resolution_ledgers"] = ledger_refs.into();
+    body[crate::comforter::join::BASIS_FIELD] =
+        crate::comforter::join::basis_value(resolution_basis);
     crate::comforter::write_closure_with_project_lock(
         project,
         "elixir",
-        closure_body(
-            &beam_obj,
-            &deps_obj,
-            &proj_dir,
-            plan,
-            lock_sha256,
-            &spec,
-            selected,
-        )?,
+        body,
         &store,
         activity,
         refs,
@@ -2672,8 +2551,10 @@ exit 0
             &store.object_path(&deps_id),
             &plan,
             &"c".repeat(64),
+            &Default::default(),
             false,
             &shipped_selection().unwrap(),
+            &[],
             &mut attribution,
         )
         .unwrap();

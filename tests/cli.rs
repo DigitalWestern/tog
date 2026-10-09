@@ -5003,16 +5003,12 @@ fn project_files_hard_linked_to_the_signing_key_never_echo_it() {
 fn attest_refuses_an_ecosystem_without_a_resolution_door() {
     let home = TempDir::boundary("cli-attest-unsupported");
     let project = TempDir::boundary("cli-attest-unsupported-project");
-    std::fs::write(
-        project.0.join("Gemfile"),
-        "source \"https://rubygems.org\"\n",
-    )
-    .unwrap();
-    let out = tog(&project.0, &home.0, &["attest", "ruby"]);
+    std::fs::write(project.0.join("app.csproj"), "<Project/>").unwrap();
+    let out = tog(&project.0, &home.0, &["attest", "dotnet"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("tog attest does not support ruby"),
+        stderr.contains("tog attest does not support dotnet"),
         "{stderr}"
     );
     let out = tog(&project.0, &home.0, &["attest"]);

@@ -1,6 +1,7 @@
 //! `tog add` / `remove` / `update` for Elixir (`Tailor::edit_manifest`).
 //! Mix has no command that edits mix.exs, so add and remove refuse with the
-//! exact line to write; update runs the store mix's `deps.update`.
+//! exact line to write; update runs the store mix's `deps.update` through
+//! the edit door, which publishes mix.lock with its signed record.
 
 use crate::kernel::resolve::ResolutionDoor;
 use crate::tailors::edit::{
@@ -55,21 +56,16 @@ pub(crate) fn edit_manifest(
                 .join(", ")
         ))),
         EditVerb::Update => {
-            let beam = super::realize_runtime(
-                door.store(),
-                door.lease(),
-                door.platform(),
-                &edit.host.toolchain(project, "elixir")?,
-            )?;
-            let scratch = door.store().stage_with_activity(door.lease())?;
+            let selected = edit.host.toolchain(project, "elixir")?;
+            let beam =
+                super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
             let mut args = vec!["mix", "deps.update"];
             if texts.is_empty() {
                 args.push("--all");
             }
             args.extend(texts.iter().map(String::as_str));
-            let result = super::run_checked(door, &beam, project, &scratch, false, &args);
-            let _ = crate::kernel::store::remove_tree(&scratch);
-            result?;
+            let root = crate::kernel::fsroot::ProjectRoot::open(project)?;
+            super::resolve::update(door, &root, &beam, &selected, &args)?;
             Ok(EditOutcome {
                 files: vec!["mix.lock".to_string()],
                 sync_root: project.to_path_buf(),
