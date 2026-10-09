@@ -130,11 +130,12 @@ the program's status through. Which files tog reads per ecosystem:
   | 3 | refused by rule: a policy denial, a store tog will not open, a project path swapped under it, `pip install` inside `tog run` | change the policy or the input; rerunning changes nothing |
   | 4 | stale: a committed lock no longer matches its inputs, or is missing where `--frozen` or a strict policy never writes one | update the lock and commit it |
   | 5 | unsupported here: a pin no catalog has, a runtime too old for the file, no isolation on this machine | change the pin or the machine |
+  | 6 | network: offline, DNS, a refused or reset connection, a timeout, a download that broke off, or a server status a retry can change (408, 429, 5xx) | run it again; a 404 or a 403 is an answer and exits 1 |
   | 128 + n | stopped by signal n (130 for Ctrl-C) | |
 
   Under `--json` the failure object carries the same class as a key:
   `{"error": "...", "class": "refused"}` (`refused`, `stale`,
-  `unsupported`), beside `fix` when there is one. `audit` keeps its own
+  `unsupported`, `network`), beside `fix` when there is one. `audit` keeps its own
   verdict codes: 1 for a gate that denies, 2 for a misconfigured one.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
   and every subprocess command line — the bug-report mode. An error is never

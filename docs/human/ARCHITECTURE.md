@@ -1047,8 +1047,8 @@ These keep the layout organized. The first is enforced by
    and an `io::ErrorKind` cannot tell a policy refusal from a corrupt file.
    A refusal by rule, a stale or missing committed lock, and an unsupported
    request are built with `kernel::error` (`refused`, `stale`, or the
-   `Unsupported` kind), which `main` turns into exit statuses 3, 4 and 5
-   (`docs/human/CLI.md`). Adding words to an error goes through
+   `Unsupported` kind), and a network failure by `fetch`, which `main`
+   turns into exit statuses 3, 4, 5 and 6 (`docs/human/CLI.md`). Adding words to an error goes through
    `error::context`, which keeps the class;
    `io::Error::new(e.kind(), format!(..))` keeps only the text.
 
@@ -1097,7 +1097,7 @@ and build inputs tailors share, so no tailor reaches into another):
     dirhash.rs      Go module dirhash verification
     gitsrc.rs       git sources realized by commit
     policy.rs       permissive/strict exception policy and the [signing] trust chain
-    error.rs        failure classes (refused, stale, unsupported) and their exit statuses
+    error.rs        failure classes (refused, stale, unsupported, network) and their exit statuses
     signing.rs      Ed25519 closure signing: key files, canonical bytes, verify
     gc/             store garbage collection: read.rs snapshot, plan.rs
                     validate + plan, sweep.rs execute, drop.rs --drop-object,

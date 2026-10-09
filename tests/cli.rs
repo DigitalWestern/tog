@@ -5194,12 +5194,12 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     );
     assert!(!stderr.contains("is a python file"), "{stderr}");
     // Outside any project the file takes the lone-file road too, on the
-    // shipped runtime: with the network cut, realizing it refuses, and
-    // nothing ran on the host's `python`.
+    // shipped runtime: with the network cut, realizing it fails as a
+    // network failure (exit 6), and nothing ran on the host's `python`.
     let empty = TempDir::boundary("cli-file-empty");
     std::fs::write(empty.0.join("app.py"), "print('host python ran')\n").unwrap();
     let out = tog_offline(&empty.0, &home.0, &["-v", "app.py"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains(

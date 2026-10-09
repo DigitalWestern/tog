@@ -6,6 +6,7 @@
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 pub use crate::kernel::digest::Digest;
+use crate::kernel::error;
 use crate::kernel::store::{self, Store};
 use crate::kernel::toolchain::SourcePolicy;
 use sha1::Sha1;
@@ -384,12 +385,38 @@ fn network_cause(error: &ureq::Error) -> String {
     }
 }
 
+///
+/// A transport failure (offline, DNS, a refused or reset connection, a
+/// timeout) is the `Network` failure class, exit 6: running it again may
+/// work. A status keeps its code for [`http_status`], and only a status a
+/// retry can change (408, 429, 5xx) is `Network`, by [`retry_may_help`].
 fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
     let message = format!("{verb} {}: {}", shown_url(url), network_cause(&error));
     match error {
         ureq::Error::Status(code, _) => io::Error::other(StatusFailure { code, message }),
-        ureq::Error::Transport(_) => io::Error::other(message),
+        ureq::Error::Transport(_) => {
+            error::new(error::Class::Network, io::ErrorKind::Other, message)
+        }
     }
+}
+
+/// A response body that broke off while it was read: a `Network` failure,
+/// since a retry may finish it. A local file's read error (a `file://`
+/// URL) is an ordinary one.
+fn read_failure(url: &str, e: io::Error) -> io::Error {
+    let message = format!("read {}: {e}", shown_url(url));
+    if url.starts_with("file:") {
+        io::Error::new(e.kind(), message)
+    } else {
+        error::new(error::Class::Network, e.kind(), message)
+    }
+}
+
+/// Whether `error` is a server status a later retry can change: a timeout
+/// (408), a rate limit (429), or a server error (5xx). A 404 or a 403 is
+/// an answer and stays an ordinary failure.
+pub(crate) fn retry_may_help(error: &io::Error) -> bool {
+    http_status(error).is_some_and(|code| code == 408 || code == 429 || code >= 500)
 }
 
 /// A request the server answered with an error status. It prints as the
@@ -510,7 +537,7 @@ fn read_text_capped(reader: impl Read, max: u64, url: &str) -> io::Result<String
     reader
         .take(max + 1)
         .read_to_end(&mut body)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))))?;
+        .map_err(|e| read_failure(url, e))?;
     if body.len() as u64 > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -569,7 +596,7 @@ fn copy_unpinned(url: &str, dest: &Path, max: u64, reader: Box<dyn Read>) -> io:
             "download {}: longer than {max} bytes; refusing",
             shown_url(url)
         )),
-        Err(e) => io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))),
+        Err(e) => read_failure(url, e),
     };
     let _ = fs::remove_file(dest);
     Err(refusal)
@@ -634,12 +661,7 @@ fn stream_to_file(
         let n = match reader.read(&mut buf) {
             Ok(0) => break Ok(()),
             Ok(n) => n,
-            Err(e) => {
-                break Err(io::Error::new(
-                    e.kind(),
-                    format!("read {}: {e}", shown_url(url)),
-                ))
-            }
+            Err(e) => break Err(read_failure(url, e)),
         };
         total += n as u64;
         progress.advance(n as u64);
@@ -1110,15 +1132,22 @@ pub(crate) fn cache_from_reader_any(
     candidates: &[Digest],
     open: impl FnOnce() -> io::Result<Box<dyn Read>>,
 ) -> io::Result<(CacheLease, Digest)> {
-    cache_or_download_narrated(
-        store,
-        activity,
-        url,
-        candidates,
-        false,
-        MAX_ARTIFACT,
-        || open().map(|reader| (reader, None)),
-    )
+    cache_from_reader_within(store, activity, url, candidates, MAX_ARTIFACT, open)
+}
+
+/// `cache_from_reader_any` with its stream cap as a parameter, so a test
+/// can feed the proxy's path a stream past a cap without several GiB.
+fn cache_from_reader_within(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    candidates: &[Digest],
+    max: u64,
+    open: impl FnOnce() -> io::Result<Box<dyn Read>>,
+) -> io::Result<(CacheLease, Digest)> {
+    cache_or_download_narrated(store, activity, url, candidates, false, max, || {
+        open().map(|reader| (reader, None))
+    })
 }
 
 /// A verified cache entry for `digest`, fetched through `open` only when
@@ -2355,6 +2384,54 @@ mod integrity_tests {
         .unwrap_err();
         assert!(HashMismatch::of(&error).is_some(), "{error}");
         assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// The proxy's path refuses a stream past its cap and leaves nothing
+    /// behind, as the pinned path does (#620). The cap is 1 KiB here,
+    /// `MAX_ARTIFACT` in `cache_from_reader_any`.
+    #[test]
+    fn a_proxied_download_past_its_cap_is_refused() {
+        let (_scratch, store) = scratch_store("fetch-cap-proxy-refused");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let candidates = [Digest::sha256(&sha256_hex(b"hello")).unwrap()];
+        let error =
+            cache_from_reader_within(&store, activity, "https://x/big", &candidates, 1024, || {
+                Ok(Box::new(io::repeat(0).take(1025)) as Box<dyn Read>)
+            })
+            .map(drop)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the 1024-byte artifact cap"),
+            "{error}"
+        );
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// A transport failure and a status a retry can change are the
+    /// `Network` class (exit 6); a 404 is an answer, not a network
+    /// failure, and a broken-off body is `Network` unless it was a local
+    /// file (#258).
+    #[test]
+    fn network_failures_are_the_network_class() {
+        use crate::kernel::error::{class_of, Class};
+        // Nothing listens on port 1 of the loopback address.
+        let refused = fetch_text("https://127.0.0.1:1/x").unwrap_err();
+        assert_eq!(class_of(&refused), Some(Class::Network), "{refused}");
+        for code in [408, 429, 500, 503] {
+            assert_eq!(class_of(&status_failure(code)), Some(Class::Network));
+        }
+        for code in [403, 404] {
+            let answer = status_failure(code);
+            assert_eq!(class_of(&answer), None);
+            assert_eq!(http_status(&answer), Some(code));
+        }
+        let reset = || io::Error::from(io::ErrorKind::ConnectionReset);
+        let remote = read_failure("https://x/a", reset());
+        assert_eq!(class_of(&remote), Some(Class::Network));
+        assert_eq!(remote.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(class_of(&read_failure("file:///a", reset())), None);
     }
 
     /// An unpinned download stops reading one byte past its cap, so a

@@ -39,7 +39,7 @@ None open.
   - #615 design questions: SRI candidate choice, cargo's symlinked members, the ecosystem-arm check in `kernel/provider`, the `hard_link_target` doc.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
   - #619 held project root: `tog fmt` reads cargo config by path.
-  - #620 test gaps: the hook for tailors other than Ruby, the `sandbox_deny` header, a CPython test in `tests/cli.rs`, the proxy reader's upper cap.
+  - #620 test gaps: the hook for tailors other than Ruby, the `sandbox_deny` header, a CPython test in `tests/cli.rs`.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **Action leftovers (#427).** Left: the first tag that carries
@@ -52,7 +52,7 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 (closed) holds the overall verdict. What
   is left, one issue and one PR each, in order:
-  - #258: failure classes. `kernel::error` carries Refused, Stale and Unsupported to exit statuses 3 to 5 (a signal is already `128 + n`). Left: the Network class, whose one source is `fetch::network_error` (a heavy-suite file, so it goes in a pull request that touches `src/kernel/fetch*` anyway), and moving the `io::Error::new(e.kind(), format!(..))` re-wraps to `error::context` as each is touched.
+  - #258: failure classes. `kernel::error` carries Refused, Stale, Unsupported and Network to exit statuses 3 to 6 (a signal is already `128 + n`). Left: moving the `io::Error::new(e.kind(), format!(..))` re-wraps to `error::context` as each is touched.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
