@@ -41,9 +41,10 @@ fn path_gem(project: &Path, directory: &str, name: &str, native: bool) {
 #[ignore]
 fn removing_one_gem_does_not_build_the_native_gem_left_behind() {
     let temp = TempDir::new("ruby-edit-no-install");
-    let project = &temp.0;
-    let home = project.join("home");
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    let home = temp.0.join("home");
+    let store = temp.0.join("store");
+    std::fs::create_dir(project).unwrap();
     std::fs::create_dir(&home).unwrap();
     path_gem(project, "native", "native-sentinel", true);
     path_gem(project, "removable", "rainbow", false);

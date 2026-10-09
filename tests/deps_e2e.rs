@@ -1332,8 +1332,9 @@ fn go_add_update_remove_roundtrip() {
 #[ignore]
 fn ruby_add_update_remove_roundtrip() {
     let temp = scratch("ruby");
-    let project = &temp.0;
-    let store = project.join("store");
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
 
     assert_ok(
