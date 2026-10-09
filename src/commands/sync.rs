@@ -159,7 +159,8 @@ pub(crate) fn run_in_mode(
     // The one descriptor this whole sync reads and writes the project
     // through, from preflight to the last closure.
     let project = ProjectRoot::open(&dir)?;
-    let (present, mut toolchain) = preflight(platform, &project, mode.clone(), Scope::All)?;
+    let (present, mut toolchain, _settings) =
+        preflight(platform, &project, mode.clone(), Scope::All)?;
     // Opening the store can wait on another process's lease. If the
     // directory was renamed or replaced meanwhile, the pathname no longer
     // names the project preflight checked: refuse now rather than at
@@ -222,7 +223,8 @@ pub(crate) fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io
         resolve::transaction::recover_project(&ctx.store, &ctx.activity, dir)?;
     }
     let project = ProjectRoot::open(dir)?;
-    let (present, mut toolchain) = preflight(ctx.platform, &project, mode.clone(), Scope::All)?;
+    let (present, mut toolchain, _settings) =
+        preflight(ctx.platform, &project, mode.clone(), Scope::All)?;
     sync_preflighted(ctx, &project, &present, &mut toolchain, fresh, &mode)
 }
 
@@ -330,7 +332,8 @@ fn run_in_only(ctx: &Context, dir: &Path, frozen: bool, only: &str) -> io::Resul
     let mode = if frozen { Mode::Frozen } else { Mode::Writable };
     let scope = Scope::Only(only);
     let project = ProjectRoot::open(dir)?;
-    let (present, mut toolchain) = preflight(ctx.platform, &project, mode.clone(), scope)?;
+    let (present, mut toolchain, _settings) =
+        preflight(ctx.platform, &project, mode.clone(), scope)?;
     let scoped = scope_to(&present, scope);
     sync_preflighted(ctx, &project, &scoped, &mut toolchain, false, &mode)
 }
@@ -362,17 +365,32 @@ fn stale_reason(row: &crate::commands::inspect::EcosystemStatus) -> String {
     format!("{} {}{detail}", row.ecosystem, row.word().replace('-', " "))
 }
 
+/// What one sync loaded for itself before anything else: its policy and
+/// its signing key, each in force while the sync holds this.
+struct Settings {
+    _policy: policy::PolicyScope,
+    _signing: crate::comforter::SigningScope,
+}
+
 fn preflight(
     platform: Platform,
     project: &ProjectRoot,
     mode: Mode,
     scope: Scope<'_>,
-) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain)> {
-    policy::init_in(project)?;
+) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain, Settings)> {
+    let policy = policy::init_in(project)?;
     // A configured signing key that cannot be loaded fails here, before the
     // store is opened or any closure is written.
-    crate::comforter::init_signing()?;
-    preflight_sync(platform, project, mode, scope)
+    let signing = crate::comforter::init_signing()?;
+    let (present, toolchain) = preflight_sync(platform, project, mode, scope)?;
+    Ok((
+        present,
+        toolchain,
+        Settings {
+            _policy: policy,
+            _signing: signing,
+        },
+    ))
 }
 
 /// Run the preflighted tailors through `project`, the descriptor preflight

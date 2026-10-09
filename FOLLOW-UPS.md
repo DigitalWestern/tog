@@ -52,7 +52,6 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 (closed) holds the overall verdict. What
   is left, one issue and one PR each, in order:
-  - #257 design: move process-global state (policy, signing key, input guard, kinds) into Context. The input guard now keeps one snapshot per sync, so two projects in one process no longer clear each other's. Left: carry the policy frames, the signing key, the guard and the installed kinds in `Context`, designed with #57's per-operation sessions.
   - #258 design: an error type that separates refusals, staleness, network and bugs. The `detected()` bug is fixed. Left is the `TogError` classes (Refused, Stale, Unsupported, Network, Interrupted) with distinct exit codes, starting with `fsroot::refusal`.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:

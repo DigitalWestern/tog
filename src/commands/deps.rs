@@ -483,9 +483,9 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
     let cwd = project_dir();
     // Dependency edits ensure pinned tools before the ordinary sync. Load
     // the policy chain first: a cached toolchain object read before it
-    // would fix the process policy without the policy files, and their
-    // deny entries would not apply to the edit or the sync after it.
-    policy::init(&cwd)?;
+    // would be judged by the default policy, without the files' deny
+    // entries. The sync after the edit loads its own.
+    let _policy = policy::init(&cwd)?;
     // An interrupted resolution publication is undone before the edit
     // reads the manifest or the lock it left half-written.
     if crate::kernel::resolve::transaction::has_pending_journal(&cwd) {

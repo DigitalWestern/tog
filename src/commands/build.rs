@@ -66,7 +66,7 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
     // `sync::ensure_current_for`).
     crate::commands::sync::ensure_current_for(ctx, &cwd, Some(tailor.id()), frozen)?;
     let root = tailor.build_root(&cwd)?;
-    policy::init(&root)?;
+    let _policy = policy::init(&root)?;
     // The build itself honors the lock the sync above left and never
     // writes one.
     let held = ProjectRoot::open(&root)?;

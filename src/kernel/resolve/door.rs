@@ -133,7 +133,7 @@ pub struct ConfinedSpec<'a> {
     /// `None` is the process's proxy.
     pub proxy: Option<&'a Proxy>,
     pub permitted: Permitted,
-    /// `None` is the process policy.
+    /// `None` is the policy in force.
     pub policy: Option<Policy>,
     /// Exceptions the call site established before this run (uv's
     /// `--no-build` probe: `resolution-build`), recorded with the session's
@@ -143,7 +143,7 @@ pub struct ConfinedSpec<'a> {
 
 impl<'a> ConfinedSpec<'a> {
     /// A project run with no receipt, online, through the process proxy,
-    /// to the compiled registry set, under the process policy.
+    /// to the compiled registry set, under the policy in force.
     pub fn new(ecosystem: &'a str, tool: &'a str, why: &'a str) -> Self {
         Self {
             ecosystem,

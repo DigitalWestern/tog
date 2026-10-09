@@ -24,26 +24,51 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// The closure-signing key for this invocation: `Some(None)` once preflight
-/// found no `TOG_SIGNING_KEY`, `Some(Some(key))` once it loaded one,
-/// `None` before preflight ran. Every closure a command writes is signed
-/// with this one key or none: there is no per-write choice.
-static SIGNING_KEY: std::sync::Mutex<Option<Option<std::sync::Arc<SigningKey>>>> =
-    std::sync::Mutex::new(None);
+type Key = Option<std::sync::Arc<SigningKey>>;
 
-/// Load the closure-signing key named by `TOG_SIGNING_KEY`, once, before
-/// any store is opened or closure written. An unset variable means every
-/// closure is written unsigned. A set variable, including an empty one,
-/// must name a loadable key file (regular, mode 0600, one `ed25519:<64
-/// hex>` line) or the command fails here; it never downgrades to unsigned.
-/// Repeated calls keep the first result.
-pub fn init_signing() -> io::Result<()> {
-    let mut slot = SIGNING_KEY
+/// The closure-signing keys of the operations in progress, innermost last:
+/// `None` where an operation found no `TOG_SIGNING_KEY`. Each entry is
+/// owned by one [`SigningScope`]. Every closure an operation writes is
+/// signed with its one key or none: there is no per-write choice.
+static SCOPES: std::sync::Mutex<Vec<(u64, Key)>> = std::sync::Mutex::new(Vec::new());
+static NEXT_SCOPE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn with_scopes<R>(f: impl FnOnce(&mut Vec<(u64, Key)>) -> R) -> R {
+    f(&mut SCOPES
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if slot.is_some() {
-        return Ok(());
+        .unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
+/// The signing key one operation loaded, in force until this is dropped.
+/// Dropping it removes only its own entry.
+#[must_use = "the signing key is in force only while its scope is held"]
+#[derive(Debug)]
+pub struct SigningScope {
+    id: u64,
+}
+
+impl SigningScope {
+    fn install(key: Key) -> Self {
+        let id = NEXT_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        with_scopes(|scopes| scopes.push((id, key)));
+        Self { id }
     }
+}
+
+impl Drop for SigningScope {
+    fn drop(&mut self) {
+        with_scopes(|scopes| scopes.retain(|(id, _)| *id != self.id));
+    }
+}
+
+/// Load the closure-signing key named by `TOG_SIGNING_KEY` for one
+/// operation, before any store is opened or closure written, and keep it
+/// in force while the returned scope is held. An unset variable means
+/// every closure is written unsigned. A set variable, including an empty
+/// one, must name a loadable key file (regular, mode 0600, one
+/// `ed25519:<64 hex>` line) or the command fails here; it never downgrades
+/// to unsigned.
+pub fn init_signing() -> io::Result<SigningScope> {
     let key = match std::env::var_os("TOG_SIGNING_KEY") {
         None => None,
         Some(path) => Some(std::sync::Arc::new(
@@ -55,30 +80,23 @@ pub fn init_signing() -> io::Result<()> {
             })?,
         )),
     };
-    *slot = Some(key);
-    Ok(())
+    Ok(SigningScope::install(key))
 }
 
-/// The loaded signing key, or `None` when none is configured (or preflight
-/// never ran, in which case closures are written unsigned and `tog
-/// audit` reports them outdated).
-pub fn signing_key() -> Option<std::sync::Arc<SigningKey>> {
-    SIGNING_KEY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-        .flatten()
+/// The innermost operation's signing key, or `None` when it has none (or
+/// no operation loaded one, in which case closures are written unsigned
+/// and `tog audit` reports them outdated).
+pub fn signing_key() -> Key {
+    with_scopes(|scopes| scopes.last().and_then(|(_, key)| key.clone()))
 }
 
-/// Replace the process signing key. The one test that sets a key holds
-/// `attribution_test_lock` across the set, the write, and the reset; every
-/// other closure-writing test holds it too, so none can observe the test
-/// key.
+/// Put `key` in force for a test until the scope drops. The one test that
+/// sets a key holds `attribution_test_lock` across the set, the write, and
+/// the drop; every other closure-writing test holds it too, so none can
+/// observe the test key.
 #[cfg(test)]
-pub(crate) fn set_signing_key_for_test(key: Option<std::sync::Arc<SigningKey>>) {
-    *SIGNING_KEY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key);
+pub(crate) fn signing_key_for_test(key: Key) -> SigningScope {
+    SigningScope::install(key)
 }
 
 /// Explicit references protected by one project closure.  The references are
@@ -1596,6 +1614,27 @@ mod tests {
     }
 
     #[test]
+    fn each_signing_scope_is_in_force_only_while_held() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::named("signing-scopes");
+        fs::create_dir_all(&temp.0).unwrap();
+        let key_path = temp.0.join("signing.key");
+        crate::kernel::signing::generate(&key_path).unwrap();
+        let key = std::sync::Arc::new(SigningKey::load(&key_path).unwrap());
+        assert!(signing_key().is_none());
+        let signed = signing_key_for_test(Some(key.clone()));
+        assert!(signing_key().is_some_and(|loaded| std::sync::Arc::ptr_eq(&loaded, &key)));
+        // An operation without a key writes unsigned while it runs, even
+        // inside one that has a key.
+        let unsigned = signing_key_for_test(None);
+        assert!(signing_key().is_none());
+        drop(signed);
+        assert!(signing_key().is_none());
+        drop(unsigned);
+        assert!(signing_key().is_none());
+    }
+
+    #[test]
     fn write_closure_signs_with_the_configured_key() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let temp = TempDir::named("closure-signed");
@@ -1605,14 +1644,14 @@ mod tests {
         let key_path = project.join("signing.key");
         let public = crate::kernel::signing::generate(&key_path).unwrap();
         let key = std::sync::Arc::new(SigningKey::load(&key_path).unwrap());
-        set_signing_key_for_test(Some(key));
+        let signing = signing_key_for_test(Some(key));
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         crate::kernel::policy::record("weak-integrity", "dev", "sha1 accepted").unwrap();
         crate::kernel::policy::skip_optional("docs", "extra, not requested", Some("sphinx"))
             .unwrap();
         crate::kernel::policy::skip_optional("docs", "extra, not requested", Some("furo")).unwrap();
         let written = publish_test_closure(project, "python", &store, &mut attribution);
-        set_signing_key_for_test(None);
+        drop(signing);
         written.unwrap();
         attribution.finish(true).unwrap();
         let closure: serde_json::Value =

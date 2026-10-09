@@ -14,7 +14,7 @@ pub fn run(ctx: &Context, frozen: bool) -> io::Result<()> {
     let dir = ctx.project_dir();
     // One descriptor for the whole plan, as sync holds one.
     let root = ProjectRoot::open(&dir)?;
-    policy::init_in(&root)?;
+    let _policy = policy::init_in(&root)?;
     let present = tailors::detected_in(&root)?;
     // Planning reads the lock and writes nothing: no lock is created here,
     // and a project that has none plans against the shipped selection.

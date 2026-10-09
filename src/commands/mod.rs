@@ -344,9 +344,9 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
     {
         return toolchain::run(platform, update, no_sync).map(|_| 0);
     }
-    if writes_closures(&command) {
-        crate::comforter::init_signing()?;
-    }
+    let _signing = writes_closures(&command)
+        .then(crate::comforter::init_signing)
+        .transpose()?;
     let ctx = Context::open(platform)?;
     match command {
         // `json` is not read here: plan's output is JSON either way, and

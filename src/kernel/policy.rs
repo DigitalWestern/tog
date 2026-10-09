@@ -14,7 +14,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A requirement was skipped because it is project-local or a direct reference.
 pub const REQUIREMENT_SKIPPED: &str = "requirement-skipped";
@@ -254,7 +254,16 @@ pub struct Signing {
     pub trusted: KeySet,
 }
 
-static POLICY: OnceLock<Policy> = OnceLock::new();
+/// The policies of the operations in progress, innermost last. Each entry
+/// is owned by one [`PolicyScope`]: an operation installs its own policy
+/// and dropping the scope puts back whatever was in force before, so two
+/// operations in one process never share a first-loaded policy.
+static SCOPES: Mutex<Vec<(u64, Arc<Policy>)>> = Mutex::new(Vec::new());
+static NEXT_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn with_scopes<R>(f: impl FnOnce(&mut Vec<(u64, Arc<Policy>)>) -> R) -> R {
+    f(&mut SCOPES.lock().unwrap_or_else(|error| error.into_inner()))
+}
 
 #[derive(Debug)]
 struct Frame {
@@ -687,7 +696,7 @@ fn apply_requested_strictness(
 static REQUESTED_STRICT: OnceLock<bool> = OnceLock::new();
 
 /// Record `--strict` for every policy load in this process. The first call
-/// wins, like `POLICY`: the dispatcher calls it once, before any verb, and
+/// wins: the dispatcher calls it once, before any verb, and
 /// nothing else should, because a second answer would mean two loads in
 /// one process could disagree about the flag.
 pub fn request_strict(strict: bool) {
@@ -698,31 +707,48 @@ fn requested_strict() -> bool {
     REQUESTED_STRICT.get().copied().unwrap_or(false)
 }
 
-/// Initialize the process policy from the chain above `project_dir` and the
-/// recorded `--strict`. Repeated calls keep the first loaded policy.
-pub fn init(project_dir: &Path) -> io::Result<()> {
-    if POLICY.get().is_none() {
-        install(load(project_dir, requested_strict())?);
+/// The policy one operation loaded, in force from `init` until this is
+/// dropped. The operation holds it for as long as it runs (a verb binds it
+/// for its whole body). Dropping it removes its own entry wherever it sits,
+/// so an out-of-order drop cannot remove another operation's policy.
+#[must_use = "the policy is in force only while its scope is held"]
+#[derive(Debug)]
+pub struct PolicyScope {
+    id: u64,
+}
+
+impl PolicyScope {
+    /// Put `policy` in force until the scope is dropped, and say under
+    /// `-v` when it is strict and why, since a strict run refuses things
+    /// an ordinary one allows.
+    pub fn install(policy: Policy) -> Self {
+        if let Some(line) = strict_trace(&policy) {
+            crate::kernel::ui::trace(&line);
+        }
+        let id = NEXT_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
+        with_scopes(|scopes| scopes.push((id, Arc::new(policy))));
+        Self { id }
     }
-    Ok(())
+}
+
+impl Drop for PolicyScope {
+    fn drop(&mut self) {
+        with_scopes(|scopes| scopes.retain(|(id, _)| *id != self.id));
+    }
+}
+
+/// Load the policy chain above `project_dir` with the recorded `--strict`
+/// and put it in force for as long as the returned scope is held.
+pub fn init(project_dir: &Path) -> io::Result<PolicyScope> {
+    Ok(PolicyScope::install(load(project_dir, requested_strict())?))
 }
 
 /// `init` for a project held open as a descriptor (sync): the project's own
 /// policy is read through it.
-pub fn init_in(project: &ProjectRoot) -> io::Result<()> {
-    if POLICY.get().is_none() {
-        install(load_with_sources_from(project.path(), Some(project), requested_strict())?.0);
-    }
-    Ok(())
-}
-
-/// Make `policy` the process policy and say under `-v` when it is strict
-/// and why, since a strict run refuses things an ordinary one allows.
-fn install(policy: Policy) {
-    if let Some(line) = strict_trace(&policy) {
-        crate::kernel::ui::trace(&line);
-    }
-    let _ = POLICY.set(policy);
+pub fn init_in(project: &ProjectRoot) -> io::Result<PolicyScope> {
+    Ok(PolicyScope::install(
+        load_with_sources_from(project.path(), Some(project), requested_strict())?.0,
+    ))
 }
 
 /// The `-v` line for a strict policy, naming what made it strict; `None`
@@ -739,23 +765,23 @@ fn strict_trace(policy: &Policy) -> Option<String> {
     })
 }
 
-/// The process policy. Without an `init` it falls back to the default
-/// policy plus the requested strictness, so an early read cannot drop
-/// `--strict` or `TOG_STRICT=1`. The fallback still misses the policy
-/// files, and it is kept for the rest of the process, so a verb must
-/// `init` before anything reads the policy.
-fn current() -> &'static Policy {
-    POLICY.get_or_init(|| {
-        let mut policy = Policy::default();
-        apply_requested_strictness(&mut policy, &mut Vec::new(), requested_strict());
-        policy
-    })
+/// The policy in force: the innermost operation's. Outside every scope it
+/// is the default policy plus the requested strictness, built afresh on
+/// each read, so an early read cannot drop `--strict` or `TOG_STRICT=1`
+/// and cannot pin a policy that misses the files for a later operation.
+fn current() -> Arc<Policy> {
+    if let Some((_, policy)) = with_scopes(|scopes| scopes.last().cloned()) {
+        return policy;
+    }
+    let mut policy = Policy::default();
+    apply_requested_strictness(&mut policy, &mut Vec::new(), requested_strict());
+    Arc::new(policy)
 }
 
-/// A copy of the process policy, for a component that holds its own (a
+/// A copy of the policy in force, for a component that holds its own (a
 /// resolution proxy session reads it from other threads).
 pub fn effective() -> Policy {
-    current().clone()
+    Policy::clone(&current())
 }
 
 /// Is the policy chain in force strict? Strictness refuses every exception
@@ -858,7 +884,7 @@ pub fn record_with_fix(
 }
 
 pub fn record(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
-    record_with(current(), kind, subject, detail)
+    record_with(&current(), kind, subject, detail)
 }
 
 /// Note that the optional group `group` was not requested, into the
@@ -935,9 +961,9 @@ pub struct Attribution {
     id: u64,
     ecosystem: String,
     active: bool,
-    // The policy `record` judges by; `None` is the process policy. Only a
-    // test sets one (`with_policy`): production always records under the
-    // process policy.
+    // The policy `record` judges by; `None` is the policy in force. Only
+    // a test sets one (`with_policy`): production always records under the
+    // policy in force.
     #[cfg(test)]
     policy: Option<Policy>,
 }
@@ -979,11 +1005,11 @@ impl Attribution {
         })
     }
 
-    /// This frame with `policy` in place of the process policy for what
+    /// This frame with `policy` in place of the policy in force for what
     /// is recorded through [`Attribution::record`]: a caller (a test) that
     /// must not depend on `TOG_STRICT` in the environment. Test-only, so
     /// no production path can record under a policy other than the
-    /// process one.
+    /// one in force.
     #[cfg(test)]
     pub fn with_policy(mut self, policy: Policy) -> Self {
         self.policy = Some(policy);
@@ -997,7 +1023,7 @@ impl Attribution {
         if let Some(policy) = &self.policy {
             return record_with(policy, kind, subject, detail);
         }
-        record_with(current(), kind, subject, detail)
+        record_with(&current(), kind, subject, detail)
     }
 
     /// Open a child realization owned by this token's thread. Records while
@@ -1265,7 +1291,7 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
     }
     let denied_kinds: Vec<&str> = exceptions
         .iter()
-        .filter(|e| denied(current(), &e.kind))
+        .filter(|e| denied(&current(), &e.kind))
         .map(|e| e.kind.as_str())
         .collect();
     if denied_kinds.is_empty() {
@@ -2261,6 +2287,34 @@ deny = ["git-dependency"]"#,
     /// The fallback in `current` builds its policy with the same helper the
     /// loaders end on, so with no policy file in reach it must equal what
     /// `load` returns for the same flag and variable.
+    #[test]
+    fn each_policy_scope_is_in_force_only_while_held() {
+        let _env = test_env_lock();
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _attribution = attribution_test_lock();
+        let denying = |kind: &str| Policy {
+            deny: BTreeSet::from([kind.to_string()]),
+            ..Policy::default()
+        };
+        // An early read sees the default and pins nothing.
+        assert!(!denied(&current(), WEAK_INTEGRITY));
+        let outer = PolicyScope::install(denying(WEAK_INTEGRITY));
+        assert!(denied(&current(), WEAK_INTEGRITY));
+        let inner = PolicyScope::install(denying(GIT_DEPENDENCY));
+        assert!(denied(&current(), GIT_DEPENDENCY));
+        assert!(!denied(&current(), WEAK_INTEGRITY));
+        // Dropping out of order removes only the dropped scope's policy.
+        drop(outer);
+        assert!(denied(&current(), GIT_DEPENDENCY));
+        drop(inner);
+        assert!(!denied(&current(), WEAK_INTEGRITY));
+        assert!(!denied(&current(), GIT_DEPENDENCY));
+        // A second operation loads its own policy, never the first one's.
+        let second = PolicyScope::install(denying(WEAK_INTEGRITY));
+        assert!(denied(&current(), WEAK_INTEGRITY));
+        drop(second);
+    }
+
     #[test]
     fn requested_strictness_on_the_default_policy_matches_a_load() {
         let scratch = TempDir::named("policy-requested");

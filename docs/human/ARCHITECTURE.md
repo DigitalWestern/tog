@@ -682,7 +682,11 @@ Sync records recoverable verification gaps in each closure and continues;
 `.tog/policy.toml` denies named kinds (`install-script-failed`,
 `git-dependency`, ...). User and project policies are unioned; deny entries
 are only added. `TOG_STRICT=1` or `tog --strict` denies every
-exception. Object-affecting exceptions are written into store metadata and
+exception. Each command loads the chain once and holds it as a
+`policy::PolicyScope` while it runs: a second operation in the same process
+loads its own, dropping a scope restores the one before it, and a read
+outside every scope sees the default policy plus the requested strictness,
+never a policy pinned by whichever command read first. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
@@ -690,7 +694,8 @@ closures already record against the policy chain plus an optional
 outdated closure, and touches neither the store nor the network.
 
 Closure records are signed. With `TOG_SIGNING_KEY` set, `sync`
-and the other closure writers load an Ed25519 key once at preflight and the one closure writer
+and the other closure writers load an Ed25519 key once at preflight, held for that
+operation only (`comforter::SigningScope`), and the one closure writer
 (`comforter::write_closure_inner`) signs every envelope it publishes over the
 canonical bytes of the whole record (`src/kernel/signing.rs`: the parsed
 value minus its top-level `signature`, serialized compact with keys in byte
