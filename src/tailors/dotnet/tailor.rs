@@ -43,6 +43,9 @@ fn realize_and_project(
     };
     let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
     let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain, &checked)?;
+    // The resolution files this plan was built from, so the resolution
+    // join binds a record to this generation of the csproj and its lock.
+    let basis = super::resolve::resolution_basis(project)?;
     let packages =
         dotnet::realize_packages(store, activity, platform, &plan, &sdk, toolchain, &checked)?;
     dotnet::project_dotnet_env(
@@ -52,6 +55,7 @@ fn realize_and_project(
         &packages,
         &plan,
         &lock_sha256,
+        &basis,
         toolchain,
         attribution,
     )?;
@@ -82,6 +86,29 @@ impl Tailor for Dotnet {
 
     fn id(&self) -> &'static str {
         "dotnet"
+    }
+
+    /// The csproj and packages.lock.json: what restore resolves from and
+    /// writes.
+    fn resolution_outputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        super::resolve::resolution_outputs(project)
+    }
+
+    /// `global.json` and the `Directory.Build` files MSBuild imports.
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        super::resolve::resolution_inputs(project)
+    }
+
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let sdk = dotnet::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        dotnet::attest_project(door, project, &sdk, toolchain)
     }
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
