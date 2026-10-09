@@ -256,9 +256,11 @@ fi
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
 (cd "$WORK/p" && "$TOG" sync)
-# The fixture ships its package-lock.json, so no sync resolved it and the
-# first sync records unrecorded-resolution, which the company policy
-# audited in 13 denies. attest gives the lock a signed resolution record
+# The fixture's requirements.txt is unhashed, so the sync compiles
+# requirements.lock.txt through the door with a signed record. Its
+# package-lock.json is shipped, so no sync resolved it and the first sync
+# records unrecorded-resolution, which the company policy audited in 13
+# denies. attest gives the lock a signed resolution record
 # (npm's own lock check in the verification door, the lock left byte for
 # byte; it needs the toolchain lock the first sync wrote), as a repository
 # that adopts tog would, and the next sync carries no exception.
