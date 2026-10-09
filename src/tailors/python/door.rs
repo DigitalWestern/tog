@@ -395,7 +395,20 @@ fn probe_then_run(
     python: &Path,
     cache: &UvCache,
 ) -> io::Result<DelegateReport> {
-    let probe = attempt(door, run, python, cache, true, true, Vec::new())?;
+    // Metadata prepared before uv still contributed to this resolution.
+    // Include its provenance on both the probe and a fresh-cache retry.
+    let mut prepared: Vec<Fact> = door
+        .attribution()
+        .recorded()
+        .into_iter()
+        .filter(|fact| fact.kind == policy::RESOLUTION_BUILD && fact.subject == "setup.py")
+        .map(|fact| Fact {
+            kind: policy::RESOLUTION_BUILD,
+            subject: fact.subject,
+            detail: fact.detail,
+        })
+        .collect();
+    let probe = attempt(door, run, python, cache, true, true, prepared.clone())?;
     if probe.status.success() {
         if !run.capture {
             let _ = ui::narration().write_all(&probe.stderr);
@@ -422,16 +435,24 @@ fn probe_then_run(
             policy::refusal(&policy, policy::RESOLUTION_BUILD, &subject, &detail),
         ));
     }
-    let facts = vec![Fact {
+    prepared.push(Fact {
         kind: policy::RESOLUTION_BUILD,
         subject,
         detail,
-    }];
+    });
     // Failed probes may have warmed uv's metadata and artifact caches.
     // Re-resolve with an empty cache so every contributing request and
     // exception belongs to the session that signs the accepted outputs.
     let retry_cache = UvCache::create(door.store(), door.lease())?;
-    attempt(door, run, python, &retry_cache, false, run.capture, facts)
+    attempt(
+        door,
+        run,
+        python,
+        &retry_cache,
+        false,
+        run.capture,
+        prepared,
+    )
 }
 
 /// One attempt of `run`, with or without `--no-build`.
@@ -750,9 +771,24 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
             crate::tailors::record_spec(&super::super::tailor::Python, &held, uv.tool(), &["lock"])
                 .unwrap();
         let slot = RecordSlot::default();
-        let (report, recorded) = through_door(
-            &harness,
+        let mut attribution = Attribution::open("python").unwrap();
+        attribution
+            .record(
+                policy::RESOLUTION_BUILD,
+                "setup.py",
+                "cached setup metadata",
+            )
+            .unwrap();
+        let mut door = ResolutionDoor::open(
+            &harness.store,
+            &harness.activity,
+            Platform::host().unwrap(),
             DoorKind::Edit,
+            &mut attribution,
+        )
+        .unwrap();
+        let report = run_uv(
+            &mut door,
             UvRun {
                 uv: &uv,
                 lock_root: &temp.0,
@@ -769,6 +805,9 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
                 policy: Some(Policy::default()),
             },
         );
+        drop(door);
+        let recorded = attribution.recorded();
+        attribution.discard();
         done();
         let report = report.unwrap();
         assert!(report.status.success(), "{}", stderr(&report));
@@ -780,6 +819,10 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
             .exceptions
             .iter()
             .any(|fact| fact.kind == policy::RESOLUTION_BUILD));
+        assert!(receipt
+            .exceptions
+            .iter()
+            .any(|fact| fact.kind == policy::RESOLUTION_BUILD && fact.subject == "setup.py"));
         assert!(temp.0.join("requirements.lock.txt").is_file());
     }
 
