@@ -3748,6 +3748,27 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
             "plan": {"python_version": "3.12.14", "packages": []},
             "inputs": [{"path": "requirements.txt", "sha256": requirements}],
             "toolchain": {"bundle_id": bundle_id},
+            // Python resolves through the door (#205): a closure over a
+            // requirements file carries the joined resolution record.
+            "resolution": {
+                "schema": "resolution/1",
+                "ecosystem": "python",
+                "door": "edit",
+                "tool": {"name": "uv", "version": "0.9.0"},
+                "command": ["add", "six"],
+                "outputs": {"requirements.txt": requirements},
+                "inputs": {},
+                "ledger": {
+                    "object": format!("{}-python-1", "2".repeat(40)),
+                    "portable_sha256": "3".repeat(64),
+                    "endpoints": ["pypi.org"],
+                    "entries": 1,
+                    "refused": 0,
+                },
+                "isolation": "confined",
+                "exceptions": [],
+                "signature": {"alg": "ed25519", "key": "4".repeat(64), "sig": "5".repeat(128)},
+            },
             "exceptions": [{
                 "kind": kind,
                 "subject": "left-pad",
@@ -4679,12 +4700,14 @@ fn audit_is_an_offline_admission_gate_over_recorded_exceptions() {
     // A closure named for one ecosystem but claiming another is refused.
     let mismatch = TempDir::boundary("cli-audit-mismatch");
     let path = synced_python_closure_with_exception(&home.0, &mismatch.0, "git-dependency");
+    // The envelope's own field sits at the top level (two spaces in), not
+    // the joined resolution record's.
     let body = std::fs::read_to_string(&path).unwrap().replacen(
-        "\"ecosystem\": \"python\"",
-        "\"ecosystem\": \"node\"",
+        "\n  \"ecosystem\": \"python\"",
+        "\n  \"ecosystem\": \"node\"",
         1,
     );
-    assert!(body.contains("\"ecosystem\": \"node\""), "{body}");
+    assert!(body.contains("\n  \"ecosystem\": \"node\""), "{body}");
     std::fs::write(&path, body).unwrap();
     let out = tog(&mismatch.0, &home.0, &["audit"]);
     assert_eq!(out.status.code(), Some(1));

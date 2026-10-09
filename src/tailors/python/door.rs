@@ -40,6 +40,7 @@ use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
+use crate::kernel::ui;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -444,7 +445,7 @@ fn probe_then_run(
         let probe = attempt(door, run, python, cache, true, true, Vec::new())?;
         if probe.status.success() {
             if !run.capture {
-                let _ = io::stderr().write_all(&probe.stderr);
+                let _ = ui::narration().write_all(&probe.stderr);
                 let _ = io::stdout().write_all(&probe.stdout);
             }
             return Ok(probe);

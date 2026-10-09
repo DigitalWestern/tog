@@ -1233,6 +1233,8 @@ mod tests {
     }
 
     /// The body `python_project`'s closure needs to be current.
+    /// Python has a resolution door, so a current closure carries the
+    /// joined record that covers `requirements.txt`.
     fn python_body(dir: &Path) -> Value {
         json!({
             "env_object": dir.join("env-object"),
@@ -1242,6 +1244,7 @@ mod tests {
                 "path": "requirements.txt",
                 "sha256": inspect::sha256_file(&dir.join("requirements.txt")).unwrap(),
             }],
+            "resolution": resolution(dir, &[]),
         })
     }
 
@@ -3173,8 +3176,9 @@ mod tests {
 
     /// A closure of an ecosystem the join covers, written before the join
     /// existed, carries neither a record nor `unrecorded-resolution`: that
-    /// is missing evidence, not attestation. Either one clears it, and an
-    /// ecosystem the join does not cover never needs one.
+    /// is missing evidence, not attestation. Either one clears it, and a
+    /// project with none of an ecosystem's resolution files never needs
+    /// one.
     #[test]
     fn a_joined_ecosystem_closure_without_resolution_evidence_is_outdated() {
         let temp = TempDir::named("audit-no-evidence");

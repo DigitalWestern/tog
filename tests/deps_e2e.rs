@@ -195,8 +195,12 @@ fn closure_exceptions(path: &Path) -> Vec<serde_json::Value> {
 #[ignore]
 fn python_requirements_add_update_remove_roundtrip() {
     let temp = scratch("python-requirements");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: uv runs
+    // confined, and the door refuses a project that contains the signing
+    // key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(project.join("requirements.txt"), "idna==3.10\n").unwrap();
 
     assert_ok(
@@ -259,8 +263,12 @@ fn python_requirements_add_update_remove_roundtrip() {
 #[ignore]
 fn python_constraints_beside_the_generated_input_resolve_with_real_uv() {
     let temp = scratch("python-constraints");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: uv runs
+    // confined, and the door refuses a project that contains the signing
+    // key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(
         project.join("requirements.txt"),
         "six\n-c constraints.txt\n",
@@ -282,8 +290,12 @@ fn python_constraints_beside_the_generated_input_resolve_with_real_uv() {
 #[ignore]
 fn python_uv_add_update_remove_roundtrip() {
     let temp = scratch("python-uv");
-    let project = &temp.0;
-    let store = project.join("store");
+    // The project is its own directory beside home and the store: uv runs
+    // confined, and the door refuses a project that contains the signing
+    // key under home.
+    let project = &temp.0.join("project");
+    std::fs::create_dir_all(project).unwrap();
+    let store = temp.0.join("store");
     std::fs::write(
         project.join("pyproject.toml"),
         "[project]\nname = \"deps-e2e\"\nversion = \"0.1.0\"\ndependencies = []\n",
