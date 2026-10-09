@@ -155,7 +155,7 @@ fn unsupported(id: &str, verb: &str) -> io::Error {
 /// that promise being kept: nothing is generated, and the message names
 /// the file and the way out.
 pub(crate) fn missing_lock(project: &ProjectRoot, lock: &str) -> io::Error {
-    io::Error::new(
+    crate::kernel::error::stale(
         io::ErrorKind::NotFound,
         format!(
             "{} is missing and --frozen never creates it; run `tog` once without \

@@ -396,7 +396,7 @@ fn frozen_plan_never_generates_a_lock() {
     .unwrap();
     let out = tog(&project.0, &project.0, &["--frozen", "plan"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("package-lock.json is missing and --frozen never creates it"),
         "{stderr}"
@@ -987,7 +987,7 @@ fn run_and_env_sync_a_project_before_reading_it() {
     for cwd in [&project.0, &nested] {
         for args in [&["run", "python", "--version"][..], &["env"]] {
             let out = tog(cwd, &home.0, args);
-            assert_eq!(out.status.code(), Some(1), "{args:?} in {}", cwd.display());
+            assert_eq!(out.status.code(), Some(5), "{args:?} in {}", cwd.display());
             let stderr = text(&out.stderr);
             assert!(
                 stderr.contains("tog: syncing first: python not synced"),
@@ -1221,7 +1221,7 @@ fn pip_activate_and_npm_install_are_refused_with_the_tog_verb() {
     ];
     for (args, expected) in cases {
         let out = tog(&project.0, &home.0, args);
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(out.status.code(), Some(3), "{args:?}");
         let stderr = text(&out.stderr);
         assert!(stderr.contains(expected), "{args:?}: {stderr}");
         assert!(
@@ -1283,14 +1283,14 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     // A never-synced project is synced before the script runs. The
     // second manifest pins a CPython no catalog has, so that sync refuses
     // offline, before anything is fetched; the point here is only that
-    // `run` was reached and syncs, a runtime error (1), not a usage error (2).
+    // `run` was reached and syncs, an unsupported pin (5), not a usage error (2).
     std::fs::write(
         project.0.join("pyproject.toml"),
         "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\nrequires-python = \"==0.0.1\"\n",
     )
     .unwrap();
     let out = tog(&project.0, &home.0, &["dev", "--port", "3000"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(stderr.contains("syncing first: "), "{stderr}");
     assert!(stderr.contains("node not synced"), "{stderr}");
@@ -1300,7 +1300,7 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     let src = project.0.join("src");
     std::fs::create_dir_all(&src).unwrap();
     let out = tog(&src, &home.0, &["dev", "--port", "3000"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(stderr.contains("syncing first: "), "{stderr}");
     assert!(stderr.contains("no pinned CPython"), "{stderr}");
@@ -1309,7 +1309,7 @@ fn unknown_first_word_runs_a_package_json_script_or_errors() {
     for args in [&[][..], &["sync"]] {
         let out = tog(&src, &home.0, args);
         let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert_eq!(out.status.code(), Some(5), "{args:?}: {stderr}");
         assert!(stderr.contains("no pinned CPython"), "{args:?}: {stderr}");
     }
     // A built-in verb always wins over a same-named script. `build` syncs
@@ -1405,7 +1405,7 @@ fn build_refuses_an_unrelated_stale_lock_section_and_keeps_the_lock() {
 
     std::fs::write(project.0.join(".python-version"), "3.13\n").unwrap();
     let out = tog(&project.0, &home.0, &["build", "cargo"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(stderr.contains("syncing first: cargo"), "{stderr}");
     assert!(
@@ -1717,7 +1717,7 @@ fn dependency_verbs_offline_paths() {
     )
     .unwrap();
     let out = tog(&setup.0, &home.0, &["add", "requests"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(5));
     assert!(
         text(&out.stderr).contains("install_requires"),
         "{}",
@@ -1738,7 +1738,7 @@ fn dependency_verbs_offline_paths() {
     let poetry = TempDir::boundary("cli-deps-poetry");
     std::fs::write(poetry.0.join("pyproject.toml"), "[tool.poetry]\nname='p'\n").unwrap();
     let out = tog(&poetry.0, &home.0, &["update"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(5));
     assert!(
         text(&out.stderr).contains("poetry update"),
         "{}",
@@ -1747,7 +1747,7 @@ fn dependency_verbs_offline_paths() {
     let dotnet = TempDir::boundary("cli-deps-dotnet");
     std::fs::write(dotnet.0.join("app.csproj"), "<Project/>").unwrap();
     let out = tog(&dotnet.0, &home.0, &["add", "Newtonsoft.Json"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(5));
     assert!(
         text(&out.stderr).contains("dotnet add package Newtonsoft.Json"),
         "{}",
@@ -2021,7 +2021,7 @@ fn a_store_from_before_the_marker_is_refused_and_the_fix_is_named() {
     ] {
         let out = tog(&home.0, &home.0, args);
         let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
         assert!(
             stderr.contains("has no format marker"),
             "{args:?}: {stderr}"
@@ -2076,12 +2076,14 @@ fn a_store_from_before_the_marker_is_refused_and_the_fix_is_named() {
     assert!(row.contains("run 'tog gc --reset'"), "{row}");
 
     // A command asked for JSON fails in JSON, the fix a key of its own.
+    // A refusal exits 3 and says so under `class`.
     let out = tog(&home.0, &home.0, &["plan", "--json"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(text(&out.stdout).is_empty(), "{}", text(&out.stdout));
     let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
         .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
     assert_eq!(failure["fix"], "tog gc --reset");
+    assert_eq!(failure["class"], "refused");
     let error = failure["error"].as_str().unwrap();
     assert!(error.contains("has no format marker"), "{error}");
     assert!(!error.contains("--reset"), "{error}");
@@ -2127,7 +2129,7 @@ fn an_unknown_or_newer_format_marker_is_refused() {
         for args in [&["gc", "--dry-run"][..], &["store", "roots"]] {
             let out = tog(&home.0, &home.0, args);
             let stderr = text(&out.stderr);
-            assert_eq!(out.status.code(), Some(1), "{marker:?} {args:?}: {stderr}");
+            assert_eq!(out.status.code(), Some(3), "{marker:?} {args:?}: {stderr}");
             assert!(stderr.contains(expected), "{marker:?} {args:?}: {stderr}");
             assert!(
                 stderr.ends_with(&format!("tog:     fix: {fix}\n")),
@@ -2171,7 +2173,7 @@ fn an_unreadable_format_marker_leaves_every_way_out_working() {
     for args in [&["gc", "--dry-run"][..], &["store", "roots"]] {
         let out = tog(&home.0, &home.0, args);
         let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
         assert!(
             stderr.contains("a format marker this tog cannot read"),
             "{args:?}: {stderr}"
@@ -2257,7 +2259,7 @@ fn gc_reset_dry_run_lists_what_it_would_remove_and_writes_nothing() {
     assert!(store.join("roots").join("a".repeat(40)).is_file());
     assert!(!store.join("format").exists(), "a dry run wrote the marker");
     let out = tog(&home.0, &home.0, &["gc", "--dry-run"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(text(&out.stderr).contains("has no format marker"));
 }
 
@@ -2804,7 +2806,7 @@ fn cached_x_rechecks_object_exceptions_under_project_policy() {
         &home.0,
         &["x", "--py", "--from", "fake", "ruff"],
     );
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr).contains(
             "cached object 31c924c96f4ad8da436dead232ac5041626c3fe0-test-env carries exception"
@@ -3344,7 +3346,7 @@ fn the_fix_for_a_relatively_selected_store_resets_that_store_from_anywhere() {
         &["-C", "project", "store", "roots"],
     );
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("has no format marker"), "{stderr}");
     let fix = stderr
         .lines()
@@ -5103,7 +5105,7 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     let home = TempDir::boundary("cli-file");
     let project = TempDir::boundary("cli-file-project");
     // The manifest pins a CPython no catalog has, so the sync `run` starts
-    // first refuses offline: proof that the file reached `run` (exit 1),
+    // first refuses offline: proof that the file reached `run` (exit 5),
     // not a usage error (2), without fetching anything.
     std::fs::write(
         project.0.join("pyproject.toml"),
@@ -5112,7 +5114,7 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     .unwrap();
     std::fs::write(project.0.join("app.py"), "print('hi')\n").unwrap();
     let out = tog(&project.0, &home.0, &["-v", "app.py", "--port", "3000"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("'app.py' is a python file: running 'python app.py --port 3000'"),
@@ -5124,7 +5126,7 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     std::fs::create_dir_all(project.0.join("scripts")).unwrap();
     std::fs::write(project.0.join("scripts/TOOL.PY"), "").unwrap();
     let out = tog(&project.0, &home.0, &["-v", "scripts/TOOL.PY"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("'scripts/TOOL.PY' is a python file"),
@@ -5184,7 +5186,7 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     )
     .unwrap();
     let out = tog(&project.0, &home.0, &["-v", "app.py"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("'app.py' is a package.json script: running it"),
@@ -5225,7 +5227,7 @@ fn a_typescript_file_on_a_node_too_old_for_it_is_refused_naming_the_version() {
     std::fs::write(project.0.join(".node-version"), "22.4.0\n").unwrap();
     std::fs::write(project.0.join("app.ts"), "const x: number = 1;\n").unwrap();
     let out = tog(&project.0, &home.0, &["app.ts"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("'app.ts': the project's Node is 22.4.0, which cannot run TypeScript"),
@@ -5238,7 +5240,7 @@ fn a_typescript_file_on_a_node_too_old_for_it_is_refused_naming_the_version() {
     std::fs::remove_file(project.0.join("package.json")).unwrap();
     std::fs::write(project.0.join("go.mod"), "module m\n\ngo 1.22\n").unwrap();
     let out = tog(&project.0, &home.0, &["-v", "app.ts"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("running it on the node runtime alone"),

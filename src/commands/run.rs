@@ -107,7 +107,10 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     // Before the environment is even looked up: these fail the same way in
     // every project, and the explanation is the point.
     if let Some(refusal) = refused_command(cmd) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, refusal));
+        return Err(crate::kernel::error::refused(
+            io::ErrorKind::InvalidInput,
+            refusal,
+        ));
     }
     // Walk up from cwd to the nearest projected root, so `tog run`
     // works from workspace subdirectories like npm run does.

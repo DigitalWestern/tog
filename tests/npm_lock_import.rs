@@ -860,7 +860,7 @@ fn plan_refuses_a_lock_that_disagrees_with_package_json() {
         let project = fixture_with_added_dependency(name, manifest);
         let out = tog(project.path(), home.path(), &["plan"]);
         let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{name}: {stderr}");
+        assert_eq!(out.status.code(), Some(4), "{name}: {stderr}");
         assert!(
             stderr.contains(&format!("{manifest} dependencies disagree with {lock}")),
             "{name}: {stderr}"
@@ -897,7 +897,7 @@ fn plan_refuses_an_npm_lock_that_disagrees_with_a_workspace_member() {
     .unwrap();
     let out = tog(dir, home.path(), &["plan"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("packages/lib/package.json dependencies disagree with package-lock.json"),
         "{stderr}"
@@ -1063,7 +1063,7 @@ fn every_pnpm_reader_takes_the_project_document_of_a_two_document_lock() {
     let stale = fixture_with_added_dependency("proj-pnpm-prelude", "package.json");
     let out = tog(stale.path(), home.path(), &["plan"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("package.json dependencies disagree with pnpm-lock.yaml"),
         "{stderr}"

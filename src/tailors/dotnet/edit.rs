@@ -3,7 +3,7 @@
 //! add package` restores, so the user runs the edit with their own SDK.
 
 use crate::tailors::edit::{
-    other, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
+    by_hand, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
 };
 use std::io;
 
@@ -39,7 +39,7 @@ pub(crate) fn claims_package_name(name: &str) -> bool {
 /// `Tailor::edit_manifest` for .NET: the refusal naming the commands to run.
 pub(crate) fn edit_manifest(edit: &ManifestEdit<'_>) -> io::Result<EditOutcome> {
     let names = edit.texts().join(" ");
-    Err(other(match edit.verb {
+    Err(by_hand(match edit.verb {
         EditVerb::Add => format!(
             "tog never evaluates MSBuild outside the sandbox, and 'dotnet add package' restores: run 'dotnet add package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'tog'"
         ),

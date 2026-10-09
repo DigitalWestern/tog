@@ -196,7 +196,12 @@ pub fn choose_tier(
         ". This build of tog has no isolation helper (tog-isolate), so enable one of the \
          above and run the command again (`tog doctor --isolation` shows each)",
     );
-    Err(io::Error::new(io::ErrorKind::Unsupported, message))
+    // An engine is here and the policy turned it down: a refusal. No
+    // engine at all: something this machine does not support.
+    Err(match unfenced {
+        Some(_) => crate::kernel::error::refused(io::ErrorKind::Unsupported, message),
+        None => io::Error::new(io::ErrorKind::Unsupported, message),
+    })
 }
 
 // ---------------------------------------------------------------------------

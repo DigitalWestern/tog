@@ -1149,7 +1149,7 @@ impl ProjectRoot {
 }
 
 fn refusal(message: String) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+    crate::kernel::error::refused(io::ErrorKind::InvalidData, message)
 }
 
 /// Split a project-relative path into its parent components and its file

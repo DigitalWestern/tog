@@ -5,7 +5,7 @@
 
 use crate::kernel::resolve::ResolutionDoor;
 use crate::tailors::edit::{
-    other, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
+    by_hand, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
 };
 use std::io;
 
@@ -43,11 +43,11 @@ pub(crate) fn edit_manifest(
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            Err(other(format!(
+            Err(by_hand(format!(
                 "there is no 'mix add': put {lines} in the deps list of mix.exs, then 'tog' (it runs mix deps.get and re-locks)"
             )))
         }
-        EditVerb::Remove => Err(other(format!(
+        EditVerb::Remove => Err(by_hand(format!(
             "there is no 'mix remove': delete {} from the deps list of mix.exs, then 'tog'",
             texts
                 .iter()

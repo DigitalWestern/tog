@@ -102,7 +102,7 @@ fn read_manifests(project: &ProjectRoot, workspaces: &[String]) -> io::Result<Ve
 
 /// The refusal for a manifest whose `field` disagrees with the lock.
 pub(crate) fn stale(manifest: &str, field: &str, format: &LockFormat) -> io::Error {
-    io::Error::new(
+    crate::kernel::error::stale(
         io::ErrorKind::InvalidData,
         format!(
             "{manifest} {field} disagree with {}; regenerate the lock ({})",
@@ -113,7 +113,7 @@ pub(crate) fn stale(manifest: &str, field: &str, format: &LockFormat) -> io::Err
 
 /// The refusal for a manifest the lock was generated from that is gone.
 fn missing(manifest: &str, format: &LockFormat) -> io::Error {
-    io::Error::new(
+    crate::kernel::error::stale(
         io::ErrorKind::InvalidData,
         format!(
             "{manifest} is missing but {} lists it; regenerate the lock ({})",
@@ -196,7 +196,7 @@ pub fn pnpm_members(lock: &str, members: &[String]) -> io::Result<()> {
         .iter()
         .find(|member| !record.importers.contains_key(*member))
     {
-        Some(member) => Err(io::Error::new(
+        Some(member) => Err(crate::kernel::error::stale(
             io::ErrorKind::InvalidData,
             format!(
                 "{} is a pnpm workspace member but {} has no importer for it; regenerate the lock ({})",

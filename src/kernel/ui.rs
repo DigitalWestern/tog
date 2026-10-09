@@ -214,9 +214,19 @@ pub fn error_with_fix(message: &str, fix: &str) {
     ));
 }
 
-/// `error_with_fix` for a `--json` command: the command is a second key.
-pub fn error_json_with_fix(message: &str, fix: &str) {
-    let object = serde_json::json!({ "error": message, "fix": fix });
+/// A command's failure for `--json` (`error_with_fix`'s counterpart):
+/// `error`, then `fix` when there is one
+/// command that is the way out, and `class` when the failure has one
+/// (`kernel::error::Class::name`), so a script can branch on it without
+/// reading the message.
+pub fn failure_json(message: &str, fix: Option<&str>, class: Option<&str>) {
+    let mut object = serde_json::json!({ "error": message });
+    if let Some(fix) = fix {
+        object["fix"] = fix.into();
+    }
+    if let Some(class) = class {
+        object["class"] = class.into();
+    }
     write_error_channel(&format!("{object}\n"));
 }
 

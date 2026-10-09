@@ -56,10 +56,17 @@ fn main() {
     };
     // A store this tog refuses to open fails with the reason and, on its
     // own line, the one command that is the way out.
-    let report_failure = |error: &std::io::Error| match tog::kernel::store::refusal_fix(error) {
-        Some(fix) if json => ui::error_json_with_fix(&error.to_string(), fix),
-        Some(fix) => ui::error_with_fix(&error.to_string(), fix),
-        None => report(&error.to_string()),
+    // Under `--json` the failure's class rides along as its own key.
+    let report_failure = |error: &std::io::Error| {
+        let fix = tog::kernel::store::refusal_fix(error);
+        if json {
+            let class = tog::kernel::error::class_of(error).map(|class| class.name());
+            return ui::failure_json(&error.to_string(), fix, class);
+        }
+        match fix {
+            Some(fix) => ui::error_with_fix(&error.to_string(), fix),
+            None => report(&error.to_string()),
+        }
     };
     if let Err(error) = ui::init(options.quiet, options.verbose, options.no_color) {
         report(&format!("cannot set up output: {error}"));
@@ -112,10 +119,12 @@ fn main() {
 
 /// The exit code for a command that failed with `error`: `128 + signal` when
 /// a signal asked tog to stop (130 for Ctrl-C), the shell's convention and
-/// what `tog run` already passes on from its child, and 1 otherwise.
+/// what `tog run` already passes on from its child; the class's own status
+/// for a classified failure (`kernel::error::Class::exit_code`); and 1
+/// otherwise.
 fn failure_code(error: &std::io::Error) -> i32 {
-    match tog::kernel::supervise::stop_signal(error) {
-        Some(signal) => 128 + signal,
-        None => cli::EXIT_FAILURE,
+    if let Some(signal) = tog::kernel::supervise::stop_signal(error) {
+        return 128 + signal;
     }
+    tog::kernel::error::class_of(error).map_or(cli::EXIT_FAILURE, |class| class.exit_code())
 }

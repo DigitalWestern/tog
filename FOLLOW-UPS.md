@@ -52,7 +52,7 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 (closed) holds the overall verdict. What
   is left, one issue and one PR each, in order:
-  - #258 design: an error type that separates refusals, staleness, network and bugs. The `detected()` bug is fixed. Left is the `TogError` classes (Refused, Stale, Unsupported, Network, Interrupted) with distinct exit codes, starting with `fsroot::refusal`.
+  - #258: failure classes. `kernel::error` carries Refused, Stale and Unsupported to exit statuses 3 to 5 (a signal is already `128 + n`). Left: the Network class, whose one source is `fetch::network_error` (a heavy-suite file, so it goes in a pull request that touches `src/kernel/fetch*` anyway), and moving the `io::Error::new(e.kind(), format!(..))` re-wraps to `error::context` as each is touched.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.

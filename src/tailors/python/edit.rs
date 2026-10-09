@@ -10,7 +10,7 @@ use super::{pypi, resolve};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::tailors::edit::{
-    other, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
+    by_hand, other, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -108,7 +108,7 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
     let names = &edit.names();
     let shape = python_shape(project)?;
     match shape {
-        PyShape::Poetry => Err(other(match verb {
+        PyShape::Poetry => Err(by_hand(match verb {
             EditVerb::Add => format!(
                 "this is a Poetry project and Poetry is not a pinned tool: add {} under [tool.poetry.dependencies] in pyproject.toml (or run 'poetry add {}'), then 'tog'",
                 python_line(texts),
@@ -121,7 +121,7 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
             ),
             EditVerb::Update => "this is a Poetry project: run 'poetry update' (or 'poetry lock'), then 'tog'".to_string(),
         })),
-        PyShape::Pdm => Err(other(format!(
+        PyShape::Pdm => Err(by_hand(format!(
             "this is a PDM project (pdm.lock) and PDM is not a pinned tool: run 'pdm {} {}', then 'tog'",
             match verb {
                 EditVerb::Add => "add",
@@ -130,7 +130,7 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
             },
             texts.join(" ")
         ))),
-        PyShape::Setup => Err(other(match verb {
+        PyShape::Setup => Err(by_hand(match verb {
             EditVerb::Add => format!(
                 "dependencies live in install_requires here: add {} to setup.cfg [options] install_requires (or setup.py), then 'tog'",
                 python_line(texts)
@@ -141,7 +141,7 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
             ),
             EditVerb::Update => "install_requires projects re-lock on every sync (there is no separate lock to update); loosen the constraint in setup.cfg / setup.py, then 'tog'".to_string(),
         })),
-        PyShape::RequirementsDir => Err(other(format!(
+        PyShape::RequirementsDir => Err(by_hand(format!(
             "dependencies live under requirements/ here: edit the file that applies (requirements/common.txt, base.txt, ...) to {} {}, then 'tog'",
             match verb {
                 EditVerb::Add => "add",
