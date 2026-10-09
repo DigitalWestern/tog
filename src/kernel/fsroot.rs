@@ -32,7 +32,7 @@ use crate::kernel::store::{
 };
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Read as _};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -219,7 +219,13 @@ impl ProjectRoot {
         bytes: &[u8],
         mode: libc::mode_t,
     ) -> io::Result<()> {
-        self.publish_mode(relative, bytes, Some(mode), false, &mut random_temp_name)
+        self.publish_mode(
+            relative,
+            &mut &bytes[..],
+            Some(mode),
+            false,
+            &mut random_temp_name,
+        )
     }
 
     /// Point a project-relative symlink (a `.venv` or `node_modules`
@@ -978,7 +984,9 @@ impl ProjectRoot {
             let fd = held
                 .as_ref()
                 .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
-            match open_directory_at(fd, parent.as_bytes(), display, verb) {
+            // Every parent is only a base for the lookup below it, so it is
+            // held like an ancestor: search permission is enough.
+            match open_directory_with(fd, parent.as_bytes(), display, verb, ANCESTOR_FLAGS) {
                 Ok(dir) => held = Some(dir),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error),
@@ -989,15 +997,17 @@ impl ProjectRoot {
     }
 
     /// Open each component in turn from the held descriptor, creating the
-    /// ones that are absent. Returns the last descriptor, or `None` when
-    /// `components` is empty and the project root itself is the parent.
+    /// ones that are absent. Returns the last descriptor, opened for
+    /// reading so a caller can fsync it, or `None` when `components` is
+    /// empty and the project root itself is the parent. The components
+    /// before it are held like ancestors, so a search-only one is passed.
     fn open_creating(
         &self,
         components: &[&OsStr],
         display: &mut PathBuf,
     ) -> io::Result<Option<fs::File>> {
         let mut held: Option<fs::File> = None;
-        for component in components {
+        for (index, component) in components.iter().enumerate() {
             display.push(component);
             let fd = held
                 .as_ref()
@@ -1008,9 +1018,14 @@ impl ProjectRoot {
                     format!("create {}: {error}", display.display()),
                 )
             })?;
-            let dir = open_directory_at(fd, component.as_bytes(), display, "write")?;
+            let flags = if index + 1 == components.len() {
+                DIRECTORY_FLAGS
+            } else {
+                ANCESTOR_FLAGS
+            };
+            let dir = open_directory_with(fd, component.as_bytes(), display, "write", flags)?;
             if created {
-                fsync_directory(fd)?;
+                fsync_held(fd)?;
             }
             held = Some(dir);
         }
@@ -1023,15 +1038,17 @@ impl ProjectRoot {
         bytes: &[u8],
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
-        self.publish_mode(relative, bytes, None, false, temp_name)
+        self.publish_mode(relative, &mut &bytes[..], None, false, temp_name)
     }
 
     /// `replace_link` lets the rename replace a symlink at the destination
-    /// (the link itself, never what it names), as `rename_in` does.
+    /// (the link itself, never what it names), as `rename_in` does. The
+    /// contents are streamed from `source` into the temporary, so a large
+    /// file is never held in memory whole.
     fn publish_mode(
         &self,
         relative: &Path,
-        bytes: &[u8],
+        source: &mut dyn io::Read,
         mode: Option<libc::mode_t>,
         replace_link: bool,
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
@@ -1122,7 +1139,7 @@ impl ProjectRoot {
                     return Err(io::Error::last_os_error());
                 }
             }
-            file.write_all(bytes)?;
+            io::copy(source, &mut file)?;
             file.sync_all()?;
             let current = stat_at(parent_fd, &temp)?;
             if !same_inode(&current, &created) {
@@ -1380,6 +1397,18 @@ fn rename_between(from: RawFd, old: &[u8], to: RawFd, new: &[u8]) -> io::Result<
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// fsync a held directory, which may be an `O_PATH` ancestor: that kind
+/// cannot be fsynced, so the directory is reopened for reading through it.
+fn fsync_held(fd: RawFd) -> io::Result<()> {
+    match fsync_directory(fd) {
+        Err(error) if error.raw_os_error() == Some(libc::EBADF) => {
+            let dir = open_file_at(fd, b".", DIRECTORY_FLAGS, 0)?;
+            fsync_directory(dir.as_raw_fd())
+        }
+        result => result,
+    }
 }
 
 fn open_directory_at(
@@ -1840,6 +1869,38 @@ mod tests {
         });
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(opened.unwrap().as_deref(), Some(&b"x"[..]));
+    }
+
+    /// Inside a project, a strict walk passes a search-only (0111)
+    /// directory as the kernel's own lookup does: only the directory it
+    /// opens for reading, or lists, needs read permission. A file below it
+    /// is read and written, a subdirectory is held and listed, and a new
+    /// directory is created under it.
+    #[test]
+    fn a_strict_walk_passes_a_search_only_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let gate = dir.join("gate");
+        fs::create_dir_all(gate.join("pkg/inner")).unwrap();
+        fs::write(gate.join("pkg/package.json"), b"{}").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o111)).unwrap();
+        let walked = (|| -> io::Result<_> {
+            let read = root.read_file(Path::new("gate/pkg/package.json"))?;
+            let held = root.subdir(Path::new("gate/pkg"))?.is_some();
+            let listed = root.read_dir(Path::new("gate/pkg"))?;
+            root.write_file(Path::new("gate/pkg/inner/new/out.txt"), b"y")?;
+            let entry = root.entry(Path::new("gate/pkg/inner/new/out.txt"))?;
+            Ok((read, held, listed, entry))
+        })();
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o755)).unwrap();
+        let (read, held, listed, entry) = walked.unwrap();
+        assert!(held);
+        assert_eq!(read.as_deref(), Some(&b"{}"[..]));
+        assert_eq!(listed, Some(vec!["inner".into(), "package.json".into()]));
+        assert_eq!(entry, Entry::Regular);
+        assert_eq!(fs::read(gate.join("pkg/inner/new/out.txt")).unwrap(), b"y");
     }
 
     /// The walk from `/` holds ancestors without reading them, but never
@@ -2607,7 +2668,11 @@ mod tests {
         let other = TempDir(shm.join(format!("tog-rename-in-xdev-{}", random_suffix().unwrap())));
         fs::create_dir(&other.0).unwrap();
         let built = other.0.join("app");
-        fs::write(&built, b"binary").unwrap();
+        // Larger than any copy buffer, so the stream is read in pieces.
+        let binary: Vec<u8> = (0..(4 << 20) + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        fs::write(&built, &binary).unwrap();
         fs::set_permissions(&built, fs::Permissions::from_mode(0o750)).unwrap();
         let outside = temp.0.join("outside");
         fs::write(&outside, b"keep").unwrap();
@@ -2618,7 +2683,7 @@ mod tests {
         let entry = dir.join("app").symlink_metadata().unwrap();
         assert!(entry.file_type().is_file());
         assert_eq!(entry.permissions().mode() & 0o7777, 0o750);
-        assert_eq!(fs::read(dir.join("app")).unwrap(), b"binary");
+        assert!(fs::read(dir.join("app")).unwrap() == binary);
         assert!(built.symlink_metadata().is_err());
         assert!(!entries(&dir)
             .iter()

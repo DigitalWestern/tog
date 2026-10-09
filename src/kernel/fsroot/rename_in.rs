@@ -6,7 +6,7 @@ use crate::kernel::store::{
     fd_stat, fsync_directory, open_file_at, same_inode, stat_at, unlink_if_same,
 };
 use std::fs;
-use std::io::{self, Read as _};
+use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -143,20 +143,18 @@ impl ProjectRoot {
     /// The cross-filesystem half of `rename_in`: the bytes of the source
     /// descriptor it checked, published through the held parent with the
     /// source's permission bits (not set-ID bits, which a write can clear).
-    /// The temporary is written and fsynced before one rename replaces the
-    /// destination, a symlink there included, so a failed copy leaves the
-    /// destination as it was.
+    /// The bytes are streamed into the temporary, which is written and
+    /// fsynced before one rename replaces the destination, a symlink there
+    /// included, so a failed copy leaves the destination as it was.
     fn copy_in(
         &self,
         mut source: &fs::File,
         opened: &libc::stat,
         relative: &Path,
     ) -> io::Result<()> {
-        let mut bytes = Vec::new();
-        source.read_to_end(&mut bytes)?;
         self.publish_mode(
             relative,
-            &bytes,
+            &mut source,
             Some(opened.st_mode & 0o777),
             true,
             &mut random_temp_name,
