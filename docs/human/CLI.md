@@ -1099,6 +1099,9 @@ metadata preparation are needed, including the project's own backend,
 names the package and publishes nothing. An allowed rerun records the
 exception in its signed resolution receipt. The project's own metadata is
 not exempt because its backend can request third-party source builds.
+PyPI wheel metadata sidecars are verified against the index's advertised
+digests before use. A missing digest records `weak-integrity`, which policy
+can deny. A mismatch always fails and is never cached.
 
 Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
 lock the same `uv pip compile` tog ran to write it, which must leave it
