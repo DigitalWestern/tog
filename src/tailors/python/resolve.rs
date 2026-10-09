@@ -349,7 +349,9 @@ pub(crate) fn attest_project(
             format!(
                 "{} has no lock a tool resolved (no uv.lock, requirements.lock.txt, or \
                  requirements.in with its compiled requirements.txt), so there is no lock check \
-                 to attest; run `tog` to write one, commit it, then attest",
+                 to attest; run `tog` for an unpinned source; for a hand-hashed \
+                 requirements.txt, copy it to requirements.in and run `tog update` to \
+                 compile the pair; commit the result, then attest",
                 dir.display()
             ),
         ));

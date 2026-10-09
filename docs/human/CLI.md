@@ -1126,6 +1126,12 @@ tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
 file that includes one outside the project.
 
+Hashes alone prove package bytes, not how the dependency set was resolved.
+To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`
+beside the existing file, then run a Python `tog update` to compile the pair.
+For example, `tog update --no-sync py:six` in a project that pins six writes
+the compiled lock and its resolution receipt before sync or attest.
+
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.
   The checkout is left unchanged, so a CI job can upload the file as an
