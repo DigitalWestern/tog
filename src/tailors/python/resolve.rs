@@ -24,7 +24,7 @@ const OUTPUTS: [&str; 5] = [
 
 /// Project files uv reads when it resolves and never writes: the setuptools
 /// metadata a project without `[project]` declares its dependencies in.
-const INPUTS: [&str; 2] = ["setup.cfg", "setup.py"];
+const INPUTS: [&str; 3] = ["setup.cfg", "setup.py", "tog.toml"];
 
 /// The requirements files whose `-r`/`-c` includes a door's uv reads.
 const REQUIREMENTS: [&str; 2] = ["requirements.in", "requirements.txt"];
@@ -78,11 +78,18 @@ fn includes(root: &ProjectRoot) -> io::Result<Includes> {
         inside: Vec::new(),
         outside: Vec::new(),
     };
-    for top in REQUIREMENTS {
-        if !root.is_input_file(Path::new(top)) {
-            continue;
+    let mut sources: Vec<PathBuf> = REQUIREMENTS
+        .iter()
+        .filter(|top| root.is_input_file(Path::new(top)))
+        .map(|top| root.path().join(top))
+        .collect();
+    if let Some(source) = super::manifest::resolution_requirements_source(root)? {
+        if !sources.contains(&source) {
+            sources.push(source);
         }
-        for file in super::manifest::include_closure(root, &root.path().join(top))? {
+    }
+    for top in sources {
+        for file in super::manifest::include_closure(root, &top)? {
             match super::manifest::held_relative(root, &file) {
                 Some(relative) => {
                     let listed = OUTPUTS.iter().any(|output| relative == Path::new(output));
@@ -560,6 +567,34 @@ mod tests {
         write(&temp.0, "shared.txt", "attrs\n");
         write(&root, "requirements.txt", "-r ../shared.txt\n");
         let held = ProjectRoot::open(&root).unwrap();
+        assert!(has_external_includes(&held).unwrap());
+    }
+
+    #[test]
+    fn requirements_directory_and_configured_sources_are_covered() {
+        let temp = TempDir::named("py-directory-inputs");
+        let root = temp.0.join("proj");
+        write(&root, "requirements/cpu.txt", "-r common.txt\n");
+        write(&root, "requirements/common.txt", "six\n");
+        let held = ProjectRoot::open(&root).unwrap();
+        let inputs = resolution_inputs(&held).unwrap();
+        assert!(inputs.contains(&PathBuf::from("requirements/cpu.txt")));
+        assert!(inputs.contains(&PathBuf::from("requirements/common.txt")));
+        assert!(inputs.contains(&PathBuf::from("tog.toml")));
+        assert!(!has_external_includes(&held).unwrap());
+
+        write(&root, "tog.toml", "[python]\nrequirements = 'custom.in'\n");
+        write(&root, "custom.in", "-c pins.txt\nsix\n");
+        write(&root, "pins.txt", "six<2\n");
+        let inputs = resolution_inputs(&held).unwrap();
+        assert!(inputs.contains(&PathBuf::from("custom.in")));
+        assert!(inputs.contains(&PathBuf::from("pins.txt")));
+        write(&temp.0, "external.in", "six\n");
+        write(
+            &root,
+            "tog.toml",
+            "[python]\nrequirements = '../external.in'\n",
+        );
         assert!(has_external_includes(&held).unwrap());
     }
 
