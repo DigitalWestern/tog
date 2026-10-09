@@ -65,6 +65,9 @@ pub struct RelayArgs {
     /// Where the tool's environment arrives. Without it the tool starts
     /// with an empty environment: the relay's own is never passed on.
     pub env_fd: Option<i32>,
+    /// Refuse the tool a user namespace of its own (`--deny-userns`): set
+    /// when the engine, a container, cannot forbid one itself.
+    pub deny_userns: bool,
     pub argv: Vec<OsString>,
 }
 
@@ -163,6 +166,7 @@ pub fn parse_args(
         listen,
         exec_log_fd,
         env_fd,
+        deny_userns: false,
         argv: argv.iter().map(OsString::from).collect(),
     })
 }
@@ -330,7 +334,7 @@ mod linux {
         };
         let proxy = ProxySocket::hold(&args.socket)?;
         std::thread::spawn(move || accept_loop(listener, &proxy));
-        let status = run_tool(&args.argv, &env, log)?;
+        let status = run_tool(&args.argv, &env, args.deny_userns, log)?;
         log.write(&RelayRecord::Tool(status));
         let killed = quiesce()?;
         log.write(&RelayRecord::Quiesced { killed });
@@ -438,6 +442,7 @@ mod linux {
     fn run_tool(
         argv: &[OsString],
         env: &[(OsString, OsString)],
+        deny_userns: bool,
         log: &RelayLog,
     ) -> io::Result<ToolStatus> {
         let (ours, theirs) = UnixStream::pair()?;
@@ -450,7 +455,7 @@ mod linux {
                 });
             }
         });
-        let mut child = spawn_tool(argv, env, Compiled::native(), theirs.as_raw_fd())?;
+        let mut child = spawn_tool(argv, env, Compiled::native(deny_userns), theirs.as_raw_fd())?;
         drop(theirs);
         let status = child.wait()?;
         Ok(match (status.code(), status.signal()) {
@@ -708,7 +713,7 @@ mod linux {
             .map(OsString::from)
             .collect();
             let env = [(OsString::from("MARK"), OsString::from("sent"))];
-            let status = run_tool(&argv, &env, &log).unwrap();
+            let status = run_tool(&argv, &env, false, &log).unwrap();
             assert_eq!(status, ToolStatus::Code(3));
             drop(log);
             drop(writer);

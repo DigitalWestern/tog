@@ -26,6 +26,7 @@
 pub mod ca;
 pub mod cache;
 pub mod confine;
+pub mod container;
 pub mod door;
 pub mod http;
 pub mod iana;

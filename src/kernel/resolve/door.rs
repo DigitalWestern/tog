@@ -951,7 +951,7 @@ mod tests {
     use crate::kernel::platform::Platform;
     use crate::kernel::policy::Attribution;
     use crate::kernel::resolve::confine::{Engine, Missing, TierOffer, TIERS_FOR_TEST};
-    use crate::kernel::resolve::testing::{relay, Harness};
+    use crate::kernel::resolve::testing::{podman_relay, relay, Harness};
     use crate::kernel::testutil::TempDir;
     use std::collections::BTreeMap;
 
@@ -1463,6 +1463,141 @@ get() {
             PACKAGE_JSON
         );
         assert!(!fx.project.join("new.lock").exists());
+    }
+
+    /// Run `script` through a door whose only tier is rootless podman, as
+    /// on a host where bubblewrap cannot make a user namespace.
+    fn run_podman_door(
+        fx: &Fixture,
+        relay: PathBuf,
+        script: &str,
+        adjust: impl FnOnce(&mut ConfinedSpec<'_>),
+    ) -> Outcome {
+        let podman = TierOffer {
+            engine: Engine::Podman,
+            fenced: true,
+        };
+        TIERS_FOR_TEST.with(|tiers| *tiers.borrow_mut() = Some((vec![podman], Vec::new())));
+        let outcome = run_door(fx, Some(relay), script, Policy::default(), adjust);
+        TIERS_FOR_TEST.with(|tiers| *tiers.borrow_mut() = None);
+        outcome
+    }
+
+    #[test]
+    fn podman_door_publishes_a_fetched_output_as_confined() {
+        let fx = fixture("door-podman");
+        let Some(relay) = podman_relay(
+            "podman_door_publishes_a_fetched_output_as_confined",
+            &fx.harness.activity,
+        ) else {
+            return;
+        };
+        let outcome = run_podman_door(
+            &fx,
+            relay,
+            "get art/free-pkg-1.0.tgz > deps.lock\nid -u > new.lock\n",
+            |confined| {
+                confined.target = Target::Project {
+                    receipt: Some(Box::new(|facts: &PublishFacts<'_>| {
+                        Ok(Some(format!("{}\n", facts.isolation).into_bytes()))
+                    })),
+                };
+            },
+        );
+        let report = outcome.result.unwrap();
+        assert!(
+            report.status.success(),
+            "{}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        let objects = report.ledger.unwrap();
+        assert_eq!(
+            fs::read(fx.project.join("deps.lock")).unwrap(),
+            b"HTTP/1.1 200 OK\n"
+        );
+        // The tool ran as the developer (`--userns keep-id`), so what it
+        // wrote is theirs.
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(
+            fs::read_to_string(fx.project.join("new.lock")).unwrap(),
+            format!("{uid}\n")
+        );
+        assert_eq!(
+            fs::read_to_string(fx.project.join(".tog/resolution/fixture.json")).unwrap(),
+            "confined\n"
+        );
+        let portable =
+            String::from_utf8(ledger::read_portable(&fx.harness.store, &objects.ledger).unwrap())
+                .unwrap();
+        assert!(portable.contains("free-pkg-1.0.tgz"), "{portable}");
+        assert!(outcome.recorded.is_empty(), "{:?}", outcome.recorded);
+    }
+
+    /// The survivor test, in a container: a detached child still writing
+    /// after the tool exits is killed, and nothing it writes is published.
+    #[test]
+    fn podman_door_kills_a_surviving_descendant() {
+        let fx = fixture("door-podman-survivor");
+        let Some(relay) = podman_relay(
+            "podman_door_kills_a_surviving_descendant",
+            &fx.harness.activity,
+        ) else {
+            return;
+        };
+        let script =
+            "( setsid sh -c 'sleep 1; echo late > deps.lock; echo late > package.json' & ) \n\
+             echo good > deps.lock\n";
+        let outcome = run_podman_door(&fx, relay, script, |_| {});
+        let objects = outcome.result.unwrap().ledger.unwrap();
+        let sidecar = fs::read(
+            fx.harness
+                .store
+                .root
+                .join("objects")
+                .join(&objects.diagnostics)
+                .join(ledger::DIAGNOSTICS_FILE),
+        )
+        .unwrap();
+        let sidecar: serde_json::Value = serde_json::from_slice(&sidecar).unwrap();
+        assert!(
+            sidecar["extra"]["killed"].as_u64().unwrap() >= 1,
+            "{sidecar}"
+        );
+        assert_eq!(sidecar["engine"], "podman", "{sidecar}");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"good\n");
+        assert_eq!(
+            fs::read(fx.project.join("package.json")).unwrap(),
+            PACKAGE_JSON
+        );
+    }
+
+    /// The container gives the tool no user namespace of its own (the
+    /// relay's `--deny-userns`), no capabilities, and no network but the
+    /// relay's loopback.
+    #[test]
+    fn podman_door_denies_user_namespaces_and_the_network() {
+        let fx = fixture("door-podman-fence");
+        let Some(relay) = podman_relay(
+            "podman_door_denies_user_namespaces_and_the_network",
+            &fx.harness.activity,
+        ) else {
+            return;
+        };
+        let script = "if unshare -U true 2>/dev/null; then echo userns; else echo no-userns; fi > deps.lock\n\
+             grep CapEff /proc/self/status >> deps.lock\n\
+             if (exec 4<>/dev/tcp/1.1.1.1/443) 2>/dev/null; then echo net; else echo no-net; fi >> deps.lock\n";
+        let outcome = run_podman_door(&fx, relay, script, |_| {});
+        let report = outcome.result.unwrap();
+        assert!(
+            report.status.success(),
+            "{}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(fx.project.join("deps.lock")).unwrap(),
+            "no-userns\nCapEff:\t0000000000000000\nno-net\n"
+        );
     }
 
     #[test]

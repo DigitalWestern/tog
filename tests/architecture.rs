@@ -1659,6 +1659,10 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     // The resolution relay starts the tool inside the resolution sandbox,
     // where no store is mounted writable and there is no lease to borrow.
     ("src/kernel/resolve/relay.rs", "spawn_tool", 1),
+    // The forced removal of a resolution container: it must run after an
+    // interrupt, when the supervisor refuses new children, and it names a
+    // container, not a store path.
+    ("src/kernel/resolve/container.rs", "remove", 1),
 ];
 
 /// The functions allowed to take an activity lease (`.activity(`,

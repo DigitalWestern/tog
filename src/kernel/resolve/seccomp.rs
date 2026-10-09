@@ -29,6 +29,12 @@
 //! - `ptrace`, `process_vm_readv`, `process_vm_writev` and `pidfd_getfd`
 //!   fail with `EPERM`, so the tool cannot borrow the unfiltered relay's
 //!   sockets or memory.
+//! - In a container (`deny_userns`), `unshare` and `clone` with
+//!   `CLONE_NEWUSER` fail with `EPERM`, and `clone3`, whose flags the
+//!   filter cannot read, fails with `ENOSYS` so libc falls back to `clone`.
+//!   bubblewrap's `--disable-userns` does this for the native sandbox; a
+//!   container has no such switch, and a user namespace of its own would
+//!   give the tool back the capabilities the engine dropped.
 //! - `execve` and `execveat` go to the relay as user notifications. The
 //!   relay records `{pid, parent, path}` for the exec log and lets the call
 //!   continue. The log is diagnostics: it never allows or denies anything.
@@ -51,6 +57,7 @@ const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 const BPF_LD_W_ABS: u16 = 0x20;
 const BPF_JMP_JEQ_K: u16 = 0x05 | 0x10;
 const BPF_JMP_JGE_K: u16 = 0x05 | 0x30;
+const BPF_JMP_JSET_K: u16 = 0x05 | 0x40;
 const BPF_RET_K: u16 = 0x06;
 /// `BPF_ALU | BPF_AND | BPF_K` (0x04 | 0x50 | 0x00).
 const BPF_ALU_AND_K: u16 = 0x04 | 0x50;
@@ -82,6 +89,9 @@ const SOCK_STREAM: u32 = 1;
 const SOCK_SEQPACKET: u32 = 5;
 const EPERM: u32 = 1;
 const EAFNOSUPPORT: u32 = 97;
+const ENOSYS: u32 = 38;
+/// `CLONE_NEWUSER` from `linux/sched.h`, in the low 32 bits of the flags.
+const CLONE_NEWUSER: u32 = 0x1000_0000;
 
 /// One classic BPF instruction, laid out like `struct sock_filter`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +144,9 @@ pub struct Numbers {
     pub io_uring_enter: u32,
     pub io_uring_register: u32,
     pub pidfd_getfd: u32,
+    pub unshare: u32,
+    pub clone: u32,
+    pub clone3: u32,
 }
 
 impl Arch {
@@ -173,6 +186,9 @@ impl Arch {
                 io_uring_enter: 426,
                 io_uring_register: 427,
                 pidfd_getfd: 438,
+                unshare: 272,
+                clone: 56,
+                clone3: 435,
             },
             Arch::Aarch64 => Numbers {
                 socket: 198,
@@ -189,6 +205,9 @@ impl Arch {
                 io_uring_enter: 426,
                 io_uring_register: 427,
                 pidfd_getfd: 438,
+                unshare: 97,
+                clone: 220,
+                clone3: 435,
             },
         }
     }
@@ -199,8 +218,9 @@ impl Arch {
 /// another table), then the x32 bit on x86-64, then one equality test per
 /// named syscall, then the `socket` and `socketpair` argument checks,
 /// which reload the accumulator and so must come last. Everything else is
-/// allowed.
-pub fn program(arch: Arch) -> Vec<Insn> {
+/// allowed. With `deny_userns`, the user-namespace checks come right after
+/// the x32 check and reload the number when they pass.
+pub fn program(arch: Arch, deny_userns: bool) -> Vec<Insn> {
     let n = arch.numbers();
     let mut program = vec![
         stmt(BPF_LD_W_ABS, DATA_ARCH),
@@ -213,6 +233,18 @@ pub fn program(arch: Arch) -> Vec<Insn> {
         program.push(stmt(BPF_RET_K, RET_KILL_PROCESS));
     }
     let denied = RET_ERRNO | EPERM;
+    if deny_userns {
+        program.push(jump(BPF_JMP_JEQ_K, n.clone3, 0, 1));
+        program.push(stmt(BPF_RET_K, RET_ERRNO | ENOSYS));
+        // `unshare` jumps over the `clone` test to the flag check; any
+        // other number skips the check to the reload.
+        program.push(jump(BPF_JMP_JEQ_K, n.unshare, 1, 0));
+        program.push(jump(BPF_JMP_JEQ_K, n.clone, 0, 3));
+        program.push(stmt(BPF_LD_W_ABS, DATA_ARG0_LOW));
+        program.push(jump(BPF_JMP_JSET_K, CLONE_NEWUSER, 0, 1));
+        program.push(stmt(BPF_RET_K, denied));
+        program.push(stmt(BPF_LD_W_ABS, DATA_NR));
+    }
     for (number, action) in [
         (n.io_uring_setup, denied),
         (n.io_uring_enter, denied),
@@ -269,9 +301,9 @@ pub struct Compiled {
 
 #[cfg(target_os = "linux")]
 impl Compiled {
-    pub fn native() -> Compiled {
+    pub fn native(deny_userns: bool) -> Compiled {
         Compiled {
-            filters: program(Arch::native())
+            filters: program(Arch::native(), deny_userns)
                 .into_iter()
                 .map(|insn| libc::sock_filter {
                     code: insn.code,
@@ -511,6 +543,13 @@ mod tests {
                         insn.jf as usize
                     };
                 }
+                BPF_JMP_JSET_K => {
+                    pc += 1 + if accumulator & insn.k != 0 {
+                        insn.jt as usize
+                    } else {
+                        insn.jf as usize
+                    };
+                }
                 BPF_ALU_AND_K => {
                     accumulator &= insn.k;
                     pc += 1;
@@ -522,7 +561,13 @@ mod tests {
     }
 
     fn check_arch(arch: Arch) {
-        let program = program(arch);
+        for deny_userns in [false, true] {
+            check_arch_with(arch, deny_userns);
+        }
+    }
+
+    fn check_arch_with(arch: Arch, deny_userns: bool) {
+        let program = program(arch, deny_userns);
         let native = arch.audit_arch();
         let n = arch.numbers();
         let getpid = match arch {
@@ -663,7 +708,7 @@ mod tests {
     #[test]
     fn x86_64_program_denies_each_named_syscall_and_kills_a_foreign_arch() {
         check_arch(Arch::X86_64);
-        let program = program(Arch::X86_64);
+        let program = program(Arch::X86_64, true);
         let n = Arch::X86_64.numbers();
         for nr in [X32_SYSCALL_BIT | 39, X32_SYSCALL_BIT | n.socket, u32::MAX] {
             assert_eq!(
@@ -678,7 +723,7 @@ mod tests {
     fn aarch64_program_denies_each_named_syscall_and_kills_a_foreign_arch() {
         check_arch(Arch::Aarch64);
         // No x32 ABI there: a large number is simply not named.
-        let program = program(Arch::Aarch64);
+        let program = program(Arch::Aarch64, true);
         assert_eq!(
             run(&program, X32_SYSCALL_BIT | 39, AUDIT_ARCH_AARCH64, 0),
             RET_ALLOW
@@ -712,6 +757,84 @@ mod tests {
             libc::SYS_io_uring_register
         );
         assert_eq!(n.pidfd_getfd as libc::c_long, libc::SYS_pidfd_getfd);
+        assert_eq!(n.unshare as libc::c_long, libc::SYS_unshare);
+        assert_eq!(n.clone as libc::c_long, libc::SYS_clone);
+        assert_eq!(n.clone3 as libc::c_long, libc::SYS_clone3);
+    }
+
+    #[test]
+    fn deny_userns_refuses_only_a_new_user_namespace() {
+        for arch in [Arch::X86_64, Arch::Aarch64] {
+            let native = arch.audit_arch();
+            let n = arch.numbers();
+            let newns = 0x0002_0000u64; // CLONE_NEWNS
+            let thread = 0x003d_0f00u64; // pthread_create's clone flags
+            let denying = program(arch, true);
+            for nr in [n.unshare, n.clone] {
+                assert_eq!(
+                    run(&denying, nr, native, CLONE_NEWUSER as u64),
+                    RET_ERRNO | EPERM
+                );
+                assert_eq!(
+                    run(&denying, nr, native, CLONE_NEWUSER as u64 | newns),
+                    RET_ERRNO | EPERM
+                );
+                assert_eq!(run(&denying, nr, native, newns), RET_ALLOW);
+                assert_eq!(run(&denying, nr, native, thread), RET_ALLOW);
+            }
+            assert_eq!(run(&denying, n.clone3, native, 0), RET_ERRNO | ENOSYS);
+            // After the check the number is reloaded: the later rules
+            // still see `socket`.
+            assert_eq!(
+                run(&denying, n.socket, native, AF_UNIX as u64),
+                RET_ERRNO | EAFNOSUPPORT
+            );
+            let plain = program(arch, false);
+            assert_eq!(
+                run(&plain, n.unshare, native, CLONE_NEWUSER as u64),
+                RET_ALLOW
+            );
+            assert_eq!(run(&plain, n.clone3, native, 0), RET_ALLOW);
+        }
+    }
+
+    /// The kernel's verdict on the container filter: no user namespace,
+    /// and `clone3` answers `ENOSYS`, the answer libc falls back on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_installed_userns_filter_refuses_unshare_and_clone3() {
+        let compiled = Compiled::native(true);
+        // SAFETY: the child runs only async-signal-safe syscalls and exits
+        // with _exit; the parent waits for it.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // SAFETY: see above.
+            unsafe {
+                let code = (|| {
+                    if compiled.install().is_err() {
+                        return 10;
+                    }
+                    if libc::unshare(libc::CLONE_NEWUSER) == 0
+                        || *libc::__errno_location() != libc::EPERM
+                    {
+                        return 11;
+                    }
+                    if libc::syscall(libc::SYS_clone3, std::ptr::null_mut::<u8>(), 0) >= 0
+                        || *libc::__errno_location() != libc::ENOSYS
+                    {
+                        return 12;
+                    }
+                    0
+                })();
+                libc::_exit(code);
+            }
+        }
+        let mut status = 0;
+        // SAFETY: waiting for our own child.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "child status {status:#x}");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "failed step");
     }
 
     /// The filter installed for real, in a forked child that reports each
@@ -720,7 +843,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_installed_filter_allows_only_inet_and_route_sockets_and_refuses_keyrings() {
-        let compiled = Compiled::native();
+        let compiled = Compiled::native(false);
         // SAFETY: the child runs only async-signal-safe syscalls and exits
         // with _exit; the parent waits for it.
         let pid = unsafe { libc::fork() };

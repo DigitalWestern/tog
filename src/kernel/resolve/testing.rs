@@ -157,7 +157,7 @@ impl Reach {
 }
 
 #[cfg(test)]
-pub(crate) use host::relay;
+pub(crate) use host::{podman_relay, relay};
 
 /// A scratch store, a fixture upstream serving the kernel registry, and a
 /// proxy that trusts only the fixture's CA.
@@ -634,5 +634,25 @@ mod host {
                 None
             }
         }
+    }
+
+    /// `relay`, for a door run through rootless podman: `None` (after a
+    /// skip) when podman cannot run a fenced container here. Its own switch,
+    /// `TOG_PODMAN_TESTS`, makes the skip a panic, since a host with
+    /// bubblewrap need not have a podman new enough.
+    pub(crate) fn podman_relay(
+        test: &str,
+        activity: &crate::kernel::activity::StoreActivity,
+    ) -> Option<std::path::PathBuf> {
+        let relay = relay(test)?;
+        if let Err(error) = crate::kernel::resolve::container::preflight(activity) {
+            let reason = format!("podman preflight failed: {error}");
+            if matches!(std::env::var_os("TOG_PODMAN_TESTS"), Some(value) if !value.is_empty()) {
+                panic!("required podman test {test} unavailable: {reason}");
+            }
+            eprintln!("skip {test}: {reason}");
+            return None;
+        }
+        Some(relay)
     }
 }

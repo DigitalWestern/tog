@@ -495,7 +495,7 @@ selects the ecosystem, so it formats Rust instead of running that script.
         name: "doctor",
         group: Group::Inspect,
         summary: "check host prerequisites, the sandbox, and the store",
-        usage: "tog doctor [--json]",
+        usage: "tog doctor [--isolation] [--json]",
         description: "\
 The first-five-minutes command. Checks this build against the newest
 GitHub release (one request; 'not checked' when offline), the platform,
@@ -503,12 +503,24 @@ the store (path, writable, free space), the build sandbox (bubblewrap and
 user namespaces on Linux, sandbox-exec on macOS), the host C toolchain
 native builds need, the toolchains already realized, and the project in
 the current directory. Each line is ok, warn, or fail with the fix; exit
-status 1 on any fail.",
+status 1 on any fail.
+
+--isolation checks only what isolates a resolver (npm, cargo, Bundler and
+the rest when they change a lock): bubblewrap, else rootless podman, and
+the tog-isolate helper. It fails when none of them can run one here.",
         examples: &[
             ("tog doctor", "check this machine, the sandbox, and the store"),
             ("tog doctor --json", "the same rows as one JSON document"),
+            ("tog doctor --isolation", "can this machine run a resolver isolated?"),
         ],
-        options: &[JSON_OPTION, HELP_OPTION],
+        options: &[
+            (
+                "--isolation",
+                "check only the engines that isolate a lock-changing tool",
+            ),
+            JSON_OPTION,
+            HELP_OPTION,
+        ],
         words: &[],
     },
     Spec {
