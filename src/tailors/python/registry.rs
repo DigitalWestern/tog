@@ -462,14 +462,17 @@ mod tests {
     fn mismatched_wheel_metadata_hard_fails_and_never_poison_caches() {
         use crate::kernel::policy::Policy;
         use crate::kernel::resolve::session::Mode;
-        use crate::kernel::resolve::testing::{get, Harness, Reach, TEST_ORIGIN_PUBLIC};
+        use crate::kernel::resolve::testing::{
+            get, stored_rows, Harness, Reach, TEST_ORIGIN_PUBLIC,
+        };
         use crate::kernel::testutil::upstream::{Behavior, Reply};
         use sha2::{Digest as _, Sha256};
+        let rows = stored_rows("python", "pypi-metadata-mismatch");
         let harness = Harness::serving(
             "pypi-metadata-mismatch",
             Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]),
             &[INDEX_HOST, FILES_HOST],
-            "python",
+            &rows.0.to_string_lossy(),
         );
         let path = format!("{WHEEL}.metadata");
         let poisoned = b"Name: six\nVersion: 1.16.0\nRequires-Dist: injected\n";
@@ -484,7 +487,9 @@ mod tests {
                 &address,
                 &format!(
                     "{}{}",
-                    address.route_base(ROUTE_ID),
+                    url::Url::parse(&address.route_base(ROUTE_ID))
+                        .unwrap()
+                        .path(),
                     path.trim_start_matches('/')
                 ),
                 "",
@@ -522,7 +527,9 @@ mod tests {
                 &address,
                 &format!(
                     "{}{}",
-                    address.route_base(ROUTE_ID),
+                    url::Url::parse(&address.route_base(ROUTE_ID))
+                        .unwrap()
+                        .path(),
                     path.trim_start_matches('/')
                 ),
                 "",
