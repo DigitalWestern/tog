@@ -1058,10 +1058,41 @@ fn with_dev_files(host: &str, dev: &Path) -> io::Result<String> {
     };
     digest.digest.update(b"tog-host-build-inputs/3+dev-files");
     digest.field(host.as_bytes());
+    refuse_linked_dirs(dev)?;
     if digest.entry(dev, dev)? {
         digest.tree(dev, dev)?;
     }
     Ok(hex::encode(digest.digest.finalize()))
+}
+
+/// The fingerprint walk records a symlink and what it resolves to, never
+/// the tree behind a symlinked directory, so a file changed there would
+/// leave the fingerprint stale. The stand-in refuses one, loudly, rather
+/// than miss a change (#620).
+fn refuse_linked_dirs(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(fingerprint_error(path, error)),
+    };
+    if metadata.file_type().is_symlink() {
+        if fs::metadata(path).is_ok_and(|target| target.is_dir()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} in TOG_TEST_HOST_DEV_FILES is a symlink to a directory; \
+                     the fingerprint does not walk through one, so copy the directory in",
+                    path.display()
+                ),
+            ));
+        }
+    } else if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|error| fingerprint_error(path, error))? {
+            let entry = entry.map_err(|error| fingerprint_error(path, error))?;
+            refuse_linked_dirs(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
@@ -1289,6 +1320,33 @@ mod tests {
         fs::write(dev.join("usr/include/probe.h"), "int probe, more;\n").unwrap();
         assert_ne!(with_dev_files(&host, &dev).unwrap(), with);
         assert_ne!(with_dev_files(&"1".repeat(64), &dev).unwrap(), with);
+    }
+
+    /// A symlinked directory in the stand-in, or the stand-in itself as a
+    /// symlink, is refused: the walk would not see a change behind it. A
+    /// symlink to a file is recorded as usual (#620).
+    #[test]
+    fn dev_files_refuse_a_symlinked_directory() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("dev-files-linked");
+        let dev = temp.0.join("dev");
+        let real = temp.0.join("real-include");
+        fs::create_dir_all(dev.join("usr")).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("probe.h"), "int probe;\n").unwrap();
+        symlink(real.join("probe.h"), dev.join("usr/probe.h")).unwrap();
+        let host = "0".repeat(64);
+        with_dev_files(&host, &dev).unwrap();
+        symlink(&real, dev.join("usr/include")).unwrap();
+        let error = with_dev_files(&host, &dev).unwrap_err();
+        assert!(
+            error.to_string().contains("symlink to a directory"),
+            "{error}"
+        );
+        fs::remove_file(dev.join("usr/include")).unwrap();
+        let linked = temp.0.join("dev-link");
+        symlink(&dev, &linked).unwrap();
+        assert!(with_dev_files(&host, &linked).is_err());
     }
 
     /// A fake host with one of each entry the `RuntimeOnly` rules decide
