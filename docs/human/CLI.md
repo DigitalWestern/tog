@@ -1099,6 +1099,8 @@ metadata preparation are needed, including the project's own backend,
 names the package and publishes nothing. An allowed rerun records the
 exception in its signed resolution receipt. The project's own metadata is
 not exempt because its backend can request third-party source builds.
+The older `setup.py egg_info` path and reuse of its metadata cache also
+require permission and carry `resolution-build` provenance.
 PyPI wheel metadata sidecars are verified against the index's advertised
 digests before use. A missing digest records `weak-integrity`, which policy
 can deny. A mismatch always fails and is never cached.
@@ -1116,8 +1118,11 @@ lock the same `uv pip compile` tog ran to write it, which must leave it
 byte for byte the same: `requirements.lock.txt` from the requirements tog
 compiles it from, or `requirements.txt` from `requirements.in`. A
 compiled lock whose header names another command than `tog` (one written
-by uv or pip-tools directly) is refused: run `tog update` to
-compile it again. A project with no lock a tool resolved (a hand-pinned
+by uv or pip-tools directly) is refused. For a pip-compile pair, retain
+`requirements.txt` and run `tog update`. For a generated
+`requirements.lock.txt`, delete only that lock and run `tog` again.
+Commit the regenerated lock before attesting. A project with no lock a
+tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
 file that includes one outside the project.
 

@@ -207,7 +207,7 @@ fn python_foreign_header_pair_recovers_with_update() {
     // Follow the documented recovery while retaining the compiled file,
     // so the pair remains discoverable. No dependency range can upgrade.
     assert_ok(
-        run(&project, &store, &["update", "--no-sync"], &temp.0),
+        run(&project, &store, &["update"], &temp.0),
         "recover foreign header",
     );
     assert_eq!(

@@ -417,10 +417,15 @@ fn refuse_foreign_header(project: &ProjectRoot, output: &str) -> io::Result<()> 
     if compiled_by_tog(&text) {
         return Ok(());
     }
+    let recovery = if output == "requirements.txt" {
+        "run `tog update` to compile it again"
+    } else {
+        "delete only requirements.lock.txt and run `tog` to compile it again"
+    };
     Err(io::Error::other(format!(
         "{output} in {} was not compiled by tog (its header names another command), so \
-         rerunning the compile would rewrite it and the check cannot pass; run \
-         `tog update` to compile it again, commit the result, then attest",
+         rerunning the compile would rewrite it and the check cannot pass; \
+         {recovery}, commit the result, then attest",
         project.path().display()
     )))
 }
@@ -612,6 +617,31 @@ mod tests {
         write(&temp.0, "uv.lock", "generation B");
         let error = resolution_basis(&observed).unwrap_err();
         assert!(error.to_string().contains("changed while planning"));
+    }
+
+    #[test]
+    fn foreign_headers_name_recovery_for_the_actual_compiled_file() {
+        let temp = TempDir::named("py-header-recovery");
+        write(
+            &temp.0,
+            "requirements.txt",
+            "# foreign header\nsix==1.16.0\n",
+        );
+        write(
+            &temp.0,
+            "requirements.lock.txt",
+            "# foreign header\nsix==1.16.0\n",
+        );
+        let root = ProjectRoot::open(&temp.0).unwrap();
+        let pair = refuse_foreign_header(&root, "requirements.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(pair.contains("run `tog update`"));
+        assert!(!pair.contains("delete"));
+        let generated = refuse_foreign_header(&root, "requirements.lock.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(generated.contains("delete only requirements.lock.txt and run `tog`"));
     }
 
     /// The header uv writes for `--custom-compile-command tog`, and one a

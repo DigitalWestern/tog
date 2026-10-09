@@ -3621,7 +3621,9 @@ uv rows onto the door:
   that differs per machine) and the probe's `--no-build`. Every compile
   passes `--custom-compile-command tog`, so the bytes are the same
   everywhere and an attest rerun can leave them unchanged. A lock with
-  another header is refused by attest with the fix (delete, run `tog`).
+  another header is refused by attest. Retain `requirements.txt` and run
+  `tog update` for a pip-compile pair. Delete only `requirements.lock.txt`
+  and run `tog` for generated locks.
 - **Attest.** `uv lock --locked` for `uv.lock`. For
   `requirements.lock.txt`, the same compile planning runs, from the
   input planning picks (`inputs::lock_compile_input`, which writes the
