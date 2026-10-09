@@ -323,8 +323,7 @@ pub(super) fn run(
         ));
     }
     if !status.success() {
-        // The call site words a failing tool, as it does for `Legacy`.
-        // Nothing was published and no ledger is kept.
+        // The call site words a failing tool. Nothing was published and no ledger is kept.
         return Ok(report(status, ran.outcome, None));
     }
     let outputs = check_outputs(store, activity, &confined, &snapshot, &ran)?;
