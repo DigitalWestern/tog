@@ -861,6 +861,14 @@ The one wait is behind a `gc --reset` that is emptying the store: doctor
 says what it is waiting for, like every other command, and goes on when
 the reset is done.
 
+`doctor --isolation` checks only what isolates a tool that changes a lock
+(npm, cargo, Bundler, mix, `dotnet restore` and the rest, through the
+resolution door): bubblewrap, then rootless podman, which tog uses only
+where bubblewrap cannot create a user namespace, then the `tog-isolate`
+helper, which this build does not have. It exits 1 when neither engine
+can run one here. The podman row needs the store, so it is `warn` and
+`not checked` when the store is busy or cannot be opened.
+
 **--version** prints `tog <crate version> (<short commit> <commit date>)`,
 stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);
 outside a checkout the parenthesis says `unknown build`. Two binaries of the
