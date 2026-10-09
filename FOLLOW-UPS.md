@@ -68,7 +68,6 @@ None open.
   unblocks the authenticated parts of `docs/agent/DESIGNS.md` §2 (WP3,
   #404) and §4 (WP5, #405); §2 PR 0, the provider evidence spike, comes
   first.
-- **#560: e2e layouts with HOME inside the project.** The Python and Ruby tests moved their projects beside HOME in #205 and #206. Left: the harness guard in `tests/common/mod.rs`.
 - **macOS arm64 gate. Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
   (after #305); `tests/supervise_signals.rs` (#57) and the Mach allow-list
