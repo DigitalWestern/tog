@@ -43,6 +43,29 @@ impl Tailor for Python {
         super::edit::edit_manifest(edit, door)
     }
 
+    fn edit_root(&self, project: &Path) -> io::Result<std::path::PathBuf> {
+        super::edit::edit_root(project)
+    }
+
+    fn resolution_outputs(&self, project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        super::resolve::resolution_outputs(project)
+    }
+
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        super::resolve::resolution_inputs(project)
+    }
+
+    fn attest_lock(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        super::resolve::attest_project(door, project, toolchain)
+    }
+
     fn id(&self) -> &'static str {
         "python"
     }
@@ -143,6 +166,10 @@ impl Tailor for Python {
         let mut door =
             ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?;
         let (plan, selection, inputs) = inputs::read_plan(project, selected, &mut door)?;
+        // The resolution files this plan was built from, by digest, taken
+        // before realization so a lock another writer swaps in meanwhile
+        // is not the basis of a closure planned from the old one.
+        let basis = super::resolve::resolution_basis(project)?;
         let runtime = python::realize_runtime(store, activity, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.
@@ -167,6 +194,7 @@ impl Tailor for Python {
             Some((selected, runtime.as_path())),
             &crate::tailors::helper_record(self, &helpers),
             &ledgers,
+            &basis,
             attribution,
         )?;
         ui::synced(".venv", &env);

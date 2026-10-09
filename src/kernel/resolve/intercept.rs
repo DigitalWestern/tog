@@ -462,6 +462,20 @@ fn git_fetch(url: &Url, method: &str) -> Option<Result<String, String>> {
         }
         return None;
     }
+    // GitHub's raw file read at a pinned commit, which uv makes for a
+    // GitHub dependency's `pyproject.toml` instead of cloning it:
+    // `/<owner>/<repo>/<40-hex commit>/<path>`. It reads the repository at
+    // the commit the lock names, so it is that repository's git fetch.
+    if url.host_str() == Some("raw.githubusercontent.com") && matches!(method, "GET" | "HEAD") {
+        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if let [owner, repo, commit, file @ ..] = parts.as_slice() {
+            let pinned = commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
+            let named = [owner, repo].iter().all(|part| !part.is_empty());
+            if pinned && named && !file.is_empty() && file.iter().all(|part| !part.is_empty()) {
+                return Some(Ok(format!("https://github.com/{owner}/{repo}")));
+            }
+        }
+    }
     // GitHub's commit lookup, which cargo and uv make before cloning a
     // GitHub dependency: `/repos/<owner>/<repo>/commits/<ref>`.
     if url.host_str() == Some("api.github.com") && matches!(method, "GET" | "HEAD") {
@@ -1106,6 +1120,35 @@ mod tests {
             ),
             Some(Ok("https://github.com/dtolnay/ryu".to_string()))
         );
+        // uv's raw read of a GitHub dependency's pyproject at its commit.
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            fetch(
+                &format!("https://raw.githubusercontent.com/pytest-dev/iniconfig/{commit}/pyproject.toml"),
+                "GET"
+            ),
+            Some(Ok("https://github.com/pytest-dev/iniconfig".to_string()))
+        );
+        for (url, method) in [
+            (
+                format!("https://raw.githubusercontent.com/a/b/{commit}/pyproject.toml"),
+                "POST",
+            ),
+            (
+                "https://raw.githubusercontent.com/a/b/main/pyproject.toml".to_string(),
+                "GET",
+            ),
+            (
+                format!("https://raw.githubusercontent.com/a/b/{commit}"),
+                "GET",
+            ),
+            (
+                format!("https://raw.githubusercontent.com/a/b/{commit}/"),
+                "GET",
+            ),
+        ] {
+            assert_eq!(fetch(&url, method), None, "{method} {url}");
+        }
         assert!(matches!(
             fetch("https://github.com/a/b/git-receive-pack", "POST"),
             Some(Err(_))

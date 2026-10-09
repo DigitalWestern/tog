@@ -256,6 +256,22 @@ pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Every file of `path`'s `-r`/`-c` include closure, `path` first, each
+/// canonical. A resolution record names the ones inside the project; one
+/// outside it is a file no record can cover.
+pub fn include_closure(project: &ProjectRoot, path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    walk_includes(project, path, &mut |step| {
+        if let IncludeStep::File { file, .. } = step {
+            if !files.iter().any(|seen| seen == file) {
+                files.push(file.to_path_buf());
+            }
+        }
+        Ok(())
+    })?;
+    Ok(files)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IncludeDirective {
     pub(super) target: Option<String>,

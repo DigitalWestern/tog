@@ -600,6 +600,7 @@ pub fn project_env_with_inputs(
     toolchain: Option<(&Selected, &Path)>,
     helpers: &serde_json::Value,
     ledgers: &[LedgerObjects],
+    basis: &crate::comforter::join::Digests,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     project_env_inner(
@@ -612,6 +613,7 @@ pub fn project_env_with_inputs(
         toolchain,
         helpers,
         ledgers,
+        Some(basis),
         attribution,
     )
 }
@@ -638,6 +640,7 @@ pub fn project_env_with_selection(
         None,
         &serde_json::Value::Null,
         &[],
+        None,
         attribution,
     )
 }
@@ -654,6 +657,10 @@ pub(super) fn project_env_inner(
     // toolchain record; `Null` writes none.
     helpers: &serde_json::Value,
     ledgers: &[LedgerObjects],
+    // The resolution files the plan was built from, by digest (the
+    // closure's `resolution_basis`); `None` for a `tog x` cache root,
+    // which joins nothing.
+    basis: Option<&crate::comforter::join::Digests>,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     // `.venv` is moved aside, replaced and published through the held
@@ -732,6 +739,9 @@ pub(super) fn project_env_inner(
     // `manifest::kernel_marker_record`.
     if let Some(kernel) = crate::tailors::python::manifest::kernel_marker_record(project)? {
         body["host_kernel"] = kernel;
+    }
+    if let Some(basis) = basis {
+        body[crate::comforter::join::BASIS_FIELD] = crate::comforter::join::basis_value(basis);
     }
     write_closure_with_project_lock(
         project,
@@ -871,6 +881,7 @@ mod tests {
             Some((&selected, runtime.as_path())),
             &serde_json::Value::Null,
             std::slice::from_ref(&kept),
+            None,
             &mut attribution,
         )
         .unwrap();

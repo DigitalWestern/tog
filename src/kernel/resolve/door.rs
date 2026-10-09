@@ -135,6 +135,10 @@ pub struct ConfinedSpec<'a> {
     pub permitted: Permitted,
     /// `None` is the process policy.
     pub policy: Option<Policy>,
+    /// Exceptions the call site established before this run (uv's
+    /// `--no-build` probe: `resolution-build`), recorded with the session's
+    /// and carried in the receipt.
+    pub facts: Vec<Fact>,
 }
 
 impl<'a> ConfinedSpec<'a> {
@@ -162,6 +166,7 @@ impl<'a> ConfinedSpec<'a> {
             proxy: None,
             permitted: Permitted::compiled(),
             policy: None,
+            facts: Vec::new(),
         }
     }
 
@@ -676,6 +681,7 @@ fn record_facts(confined: &ConfinedSpec<'_>, policy: &Policy, ran: &Ran) -> io::
             ),
         })
         .collect();
+    facts.extend(confined.facts.iter().cloned());
     facts.extend(ran.session.facts.exceptions.iter().cloned());
     for fact in &facts {
         policy::record_with(policy, fact.kind, &fact.subject, &fact.detail)?;

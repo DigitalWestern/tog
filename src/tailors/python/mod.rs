@@ -5,6 +5,7 @@
 
 pub mod build;
 pub(crate) mod build_requires;
+pub(crate) mod door;
 pub mod edit;
 pub mod env;
 pub mod inputs;
@@ -12,7 +13,9 @@ pub mod manifest;
 pub mod objects;
 pub mod pypi;
 pub mod pyselect;
+pub(crate) mod registry;
 pub mod registry_tool;
+pub(crate) mod resolve;
 pub mod run_refusal;
 mod sdist_view;
 pub mod tailor;
@@ -56,19 +59,6 @@ pub(crate) fn uv_failure(what: &str, status: std::process::ExitStatus, stderr: &
     }
     let tail = &lines[lines.len().saturating_sub(20)..];
     io::Error::other(format!("{what} ({status}):\n{}", tail.join("\n")))
-}
-
-/// The interpreter a store-uv run builds sdists on, realized: tog's
-/// CPython for `selected`. uv takes it as `--python` on every invocation,
-/// because `uv pip compile` ignores `UV_PYTHON` and would otherwise build
-/// an sdist's metadata on whatever `python3` is first on PATH (#210).
-pub(crate) fn uv_interpreter(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: Platform,
-    selected: &Selected,
-) -> io::Result<PathBuf> {
-    Ok(realize_runtime(store, activity, platform, selected)?.join("bin/python3"))
 }
 
 /// Realize the CPython this selection names (interpreter at
