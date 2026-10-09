@@ -38,7 +38,7 @@ None open.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
   - #615 design questions: SRI candidate choice, cargo's symlinked members, the ecosystem-arm check in `kernel/provider`, the `hard_link_target` doc.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
-  - #620 test gaps: the hook for tailors other than Ruby, the `sandbox_deny` header, a CPython test in `tests/cli.rs`.
+  - #620 test gaps: the dev-files hook for tailors other than Ruby, to add with the next tailor whose host-header fallback changes.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **Action leftovers (#427).** Left: the first tag that carries

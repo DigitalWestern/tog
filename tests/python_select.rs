@@ -1,16 +1,18 @@
-//! E2e for interpreter selection and warm lock/plan caches (network tests
-//! are ignored; the preflight refusal runs offline).
+//! E2e for interpreter selection, warm lock/plan caches, and `tog run`'s
+//! refusal of a runtime the synced environment lost (network tests are
+//! ignored; the preflight refusal runs offline).
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
+use std::os::unix::fs::PermissionsExt;
 use std::process::Output;
 
 use tog::kernel::platform::Platform;
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, fixture, tog, tog_at, warm_store, TempDir};
+use common::{assert_ok, command, copy_tree, fixture, text, tog, tog_at, warm_store, TempDir};
 
 #[test]
 #[ignore]
@@ -202,4 +204,57 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     );
     assert!(stderr.contains("request one of:"), "{stderr}");
     assert!(!store.exists(), "store was opened: {store:?}");
+}
+
+/// `tog run` itself refuses a runtime its project's environment does not
+/// provide, rather than letting the host's PATH supply one (#564, #581):
+/// the unit tests of `unprovided_runtime` do not show that `run` calls it.
+/// Ignored: the sync downloads CPython. The environment is then broken in
+/// this case's own store (never a shared `TOG_STORE`), by making the
+/// interpreter `.venv/bin` points at non-executable, so `python` and
+/// `python3` are named but not provided. A host python3 (every CI runner
+/// has one) would answer `--version` if `run` fell through.
+#[test]
+#[ignore]
+fn run_refuses_a_runtime_its_synced_environment_lost() {
+    let home = TempDir::boundary("cli-run-runtime");
+    let project = TempDir::boundary("cli-run-runtime-project");
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let out = tog(&project.0, &home.0, &["run", "python3", "--version"]);
+    let stdout = text(&out.stdout);
+    assert!(
+        out.status.success() && stdout.starts_with("Python 3."),
+        "stdout: {stdout}\nstderr: {}",
+        text(&out.stderr)
+    );
+    let interpreter = std::fs::canonicalize(project.0.join(".venv/bin/python3")).unwrap();
+    assert!(
+        interpreter.starts_with(std::fs::canonicalize(home.0.join("store")).unwrap()),
+        "{} is not in this case's store",
+        interpreter.display()
+    );
+    let mode = std::fs::metadata(&interpreter).unwrap().permissions();
+    std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o644)).unwrap();
+    for program in ["python3", "python"] {
+        let out = tog(&project.0, &home.0, &["run", program, "--version"]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{program}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "'{program}' is the python runtime, but the project's environment does not \
+                 provide it"
+            )),
+            "{program}: {stderr}"
+        );
+        assert!(
+            text(&out.stdout).is_empty(),
+            "{program} ran: {}",
+            text(&out.stdout)
+        );
+    }
+    std::fs::set_permissions(&interpreter, mode).unwrap();
 }
