@@ -87,7 +87,8 @@ deny = [
     # network fenced to tog's recording proxy, because this machine could
     # not give it a network namespace. The resolution ledger may therefore
     # miss traffic the tool sent. Denied: only fully confined resolutions
-    # pass; enable unprivileged user namespaces for bubblewrap.
+    # pass; enable unprivileged user namespaces for bubblewrap, or install
+    # rootless podman (`tog doctor --isolation` shows which works).
     "unconfined-resolution",
 ]
 

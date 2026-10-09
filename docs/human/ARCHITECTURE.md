@@ -486,6 +486,41 @@ must be an exact pin with `rollForward = "disable"`. A missing lock and
 (`dotnet/door.rs`), with a `nuget.config` whose one source is the
 session's NuGet mirror (`dotnet/registry.rs`).
 
+## Resolution doors
+
+A resolution door is where tog runs an ecosystem's own tool to choose
+versions or check a lock: the one kind of child that may use the network
+and evaluate project code (a Gemfile, a `build.rs`, a csproj). Every one
+starts through `ResolutionDoor::run_confined` (`src/kernel/resolve/`):
+isolated on a snapshot of the project, its network fenced to tog's
+recording proxy, its declared outputs published all or nothing with a
+signed resolution record. There is no unsandboxed mode. Isolation is
+bubblewrap, or rootless podman where bubblewrap cannot make a user
+namespace (`resolve/container.rs`), and a host with neither refuses the
+door naming what is missing (`tog doctor --isolation`). Host-local
+helpers that only read what tog staged (an offline `go mod`, a Gem spec
+read) go through `kernel::supervise`'s `local_*` functions, whose tripwire
+refuses a resolver outside its reviewed offline forms.
+
+The census, by door kind:
+
+| ecosystem | edit (`add`/`remove`/`update`) | missing lock | planner (in a sync) | `attest` |
+|---|---|---|---|---|
+| Go | confined | confined | confined | confined |
+| Cargo | confined | confined, and an sdist's `Cargo.lock` (detached) | none | confined |
+| Node (npm, pnpm) | confined | confined | none | confined (a `yarn.lock` is refused) |
+| Python (uv) | confined | confined | confined | confined |
+| Ruby (Bundler) | confined | confined | confined | confined |
+| Elixir (mix) | `update` confined, `add`/`remove` refused | confined | confined | confined |
+| .NET | refused | confined | none (reads the lock) | confined |
+
+`tog x` resolves a registry tool into `~/.tog/x` through a door of its
+own kind, confined the same way.
+
+Not covered, by design: `tog build` and `tog run` run project code in the
+build sandbox, which has no network and records no ledger, and an install
+script runs there too. They are builds, not resolutions.
+
 ## Toolchain lock
 
 Every ecosystem has a pinned toolchain table with exact selection rules;

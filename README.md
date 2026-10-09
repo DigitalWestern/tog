@@ -243,6 +243,7 @@ repository that ignores all of `.tog/` can never make `tog audit` pass.
 |---|---|---|
 | `tog-toolchain.toml` | **yes** (it is outside `.tog/`) | the exact toolchain per ecosystem, written by your first sync. Everyone who syncs this repo gets that runtime; `tog update --toolchain` is the only thing that moves it |
 | `.tog/closures/*.json` | **yes** | one record per ecosystem: inputs, object ids, exceptions, signature. `tog audit`, `tog ls`, `tog sbom` and `tog status` read it |
+| `.tog/resolution/*.json` | **yes** | one signed resolution record per lock: which tog door produced the lock and manifest, in which isolation, and the ledger of every fetch. `tog attest` writes them; a sync's join checks them |
 | `.tog/policy.toml` | **yes**, if you use one | the project's deny list, merged with the machine policy. See [docs/human/policy-company.toml](docs/human/policy-company.toml) |
 | `.tog/plan.json`, `.tog/go-plan.json` | no | plan cache, keyed by input hash |
 | `.tog/manifest-*.txt`, `.tog/lock-source.hash`, `.tog/egg-info.json` | no | Python manifest snapshots and stamps |
@@ -257,8 +258,12 @@ root-anchored `.tog/*` would miss every one of them.
 node_modules/
 **/.tog/*
 !**/.tog/closures/
+!**/.tog/resolution/
 !**/.tog/policy.toml
 ```
+
+Only receipts live in `.tog/resolution/`. The journals a door keeps while
+it runs are in `.tog/journal/`, which stays ignored.
 
 Three things to know before you adopt this.
 
@@ -278,6 +283,88 @@ Three things to know before you adopt this.
 The last two point the same way: let one protected job on one platform write
 the closures that get committed. The CI recipe is in
 [docs/human/CLI.md](docs/human/CLI.md#gating-a-pull-request-with-sync-and-audit).
+
+## Signing locks: who attests
+
+A lock is trusted when a signed resolution record says a tog door produced
+it: the ecosystem's own tool ran confined (bubblewrap, or rootless podman
+where bubblewrap cannot run), reached its registry only through tog's
+proxy, and every fetch went into a ledger. The company policy
+([docs/human/policy-company.toml](docs/human/policy-company.toml)) denies a
+lock without one (`unrecorded-resolution`). `tog attest` is how a
+repository's existing locks get records: it runs each ecosystem's own lock
+check confined and signs the result only when the lock comes out
+byte-unchanged.
+
+Two setups. Both are verified the same way, against the `[signing]` keys
+in the machine policy.
+
+**On CI, the default.** One job holds the signing key and runs no project
+code. It writes its records as a build artifact, and a keyless gate job
+verifies them, so nothing is committed by a bot. The public half of the
+key is the repository variable `TOG_ATTEST_PUBKEY`. The gate writes its
+machine policy from that variable, never from the checkout, because a
+project policy file can only narrow trust:
+
+```yaml
+jobs:
+  attest:                      # holds the key, runs no project code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - run: |
+          umask 077
+          printf '%s\n' "$TOG_ATTEST_KEY" > "$RUNNER_TEMP/attest.key"
+          TOG_SIGNING_KEY="$RUNNER_TEMP/attest.key" tog attest --record-out resolution/
+        env:
+          TOG_ATTEST_KEY: ${{ secrets.TOG_ATTEST_KEY }}
+      - uses: actions/upload-artifact@v4
+        with: { name: resolution-records, path: resolution/ }
+
+  gate:                        # no key, verifies the records
+    needs: attest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - uses: actions/download-artifact@v4
+        with: { name: resolution-records, path: resolution/ }
+      - run: |
+          printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
+          export TOG_POLICY="$RUNNER_TEMP/policy.toml"
+          tog --strict sync --frozen --resolution-record resolution/
+          tog audit
+        env:
+          TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
+
+  test:                        # runs project code, holds no key
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - run: tog sync --frozen && tog run test
+```
+
+The `attest` job runs only confined tools, so no project code runs outside
+a sandbox where the key is. GitHub withholds secrets from fork pull
+requests, so a fork's `attest` job fails and its gate reports
+`unrecorded-resolution`. That is the fail-closed result: a maintainer's
+run of the same commit signs it. Make the gate a required check and
+protect its workflow file with branch rules.
+
+The alternative is a bot commit: the key-holding job runs `tog attest`
+without `--record-out` and commits `.tog/resolution/` back to the branch.
+The gate is then `tog --strict sync --frozen` with no extra flag.
+
+**Per developer.** Each developer makes a key (`tog keygen <path>`), sets
+`TOG_SIGNING_KEY=<path>`, and the team lists every public key in the
+machine policy's `[signing] trusted` set on the gate. Then `tog add`,
+`tog update` and a missing-lock sync sign their own records as they
+write the lock, and the developer commits `.tog/resolution/` with it. A
+laptop that runs project code holds a key this way, which is why CI
+signing is the default.
 
 ## Working across machines
 

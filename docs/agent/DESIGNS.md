@@ -3812,6 +3812,17 @@ errors. The README `.gitignore` stanza gains `!**/.tog/resolution/`
 (receipts only: journals live in `.tog/journal/`, which stays ignored).
 FOLLOW-UPS "Delegated-tool doors" is deleted and #68 closed.
 
+**PR 10 as built (2026-10-09, #208).** `Mode`, `Legacy`,
+`ResolutionDoor::run` and its reviewed supervise site are deleted; no
+production caller was left after PR 9. The company template already
+denied both kinds and listed the two non-denied ones, so only its
+`unconfined-resolution` fix gained podman. The README has the signing
+setups ("Signing locks: who attests") with the worked Actions example,
+the per-developer alternative and the `!**/.tog/resolution/` line.
+ARCHITECTURE has "Resolution doors" with the census. CLI.md already
+documented `tog attest`. #68 closes with this PR; what is left of the
+isolation backends stays on #201.
+
 Each PR from 3 on runs its ecosystem's `--ignored` tests on the Mac
 before merge, and PR 3 also runs `tests/sandbox_deny.rs` there.
 
