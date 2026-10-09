@@ -3596,6 +3596,75 @@ Node doors, each the flexible option that still fails closed:
 `attest`), the default index forced on every uv invocation (known gap 2),
 the `--no-build` probe, and `resolution-build`.
 
+**PR 7 as built (Linux, 2026-10-09, #205).** Decisions made moving the
+uv rows onto the door:
+
+- **One runner.** `tailors/python/door.rs` runs every uv operation:
+  `UvRun` names the lock root, the member to run in, the arguments, the
+  index flag, the outputs, and the target (a project with its record, or
+  a detached root). The door adds the forced default index
+  (`--index-url` or `--default-index`), `--no-build` for the probe, and
+  the forced row before any `--`.
+- **The probe.** Every operation runs `--no-build` first, captured. A
+  failure that names no build need is the answer. uv 0.12.7 wraps a long
+  message onto several lines behind box drawing, so the parser joins
+  them before reading the names. A need whose url is a `file://` path
+  under the lock root is the project's own code: a pre-step compiles
+  `-e <dir>` (from a one-line input in the operation's cache, since
+  `uv pip compile` takes requirements from a file) with `--no-deps
+  --only-binary <build-system.requires names>`, and the probe runs
+  again. A non-editable pre-step does not help: `uv lock` reuses only the
+  editable metadata (measured). A pre-step that fails names the build
+  requirements as the third-party build. Anything else is
+  `resolution-build`: refused through `policy::refusal` when denied,
+  otherwise passed to the run without `--no-build` as a fact
+  (`ConfinedSpec::facts`, new), which the door records with the session's
+  facts and carries in the receipt.
+- **One cache per operation.** A store stage, bound read-write as a
+  cache root and named by `UV_CACHE_DIR`, shared by the probe, the
+  pre-step, and the run after them, removed when the operation ends.
+- **The compiled lock's header.** `uv pip compile` writes its own
+  command line into the lock, which names the store interpreter (a path
+  that differs per machine) and the probe's `--no-build`. Every compile
+  passes `--custom-compile-command tog`, so the bytes are the same
+  everywhere and an attest rerun can leave them unchanged. A lock with
+  another header is refused by attest with the fix (delete, run `tog`).
+- **Attest.** `uv lock --locked` for `uv.lock`. For
+  `requirements.lock.txt`, the same compile planning runs, from the
+  input planning picks (`inputs::lock_compile_input`, which writes the
+  generated `.tog` input afresh), with `require_unchanged`. For a
+  pip-compile pair, `requirements.in` to `requirements.txt`. A
+  hand-pinned `requirements.txt` has no check and is refused.
+- **Resolution files.** Outputs: `pyproject.toml`, `uv.lock`,
+  `requirements.in`, `requirements.txt`, `requirements.lock.txt`, and each
+  uv workspace member's `pyproject.toml` (`[tool.uv.workspace]` members
+  globs minus `exclude`). Inputs: `setup.cfg`, `setup.py`, and every file
+  a top-level requirements file includes inside the project. An include
+  outside the project means the door publishes with no record (the
+  missing-lock door already compiles the flattened text then) and attest
+  refuses it. The sync takes the basis right after planning.
+- **uv workspaces.** A `[project]` directory that an ancestor's
+  `[tool.uv.workspace]` lists is edited at the workspace root with uv run
+  in the member, and syncs at the root (`Tailor::edit_root`).
+- **Detached doors.** The build-requirements planner runs in its store
+  scratch and keeps its ledger for the sync to root; `tog x` runs at the
+  cache root and roots its ledger there.
+- **raw.githubusercontent.com.** uv reads a GitHub dependency's
+  `pyproject.toml` at a commit before cloning. `intercept::git_fetch`
+  classifies a GET or HEAD of `/<owner>/<repo>/<40-hex>/<file>` there as a
+  git fetch of `https://github.com/<owner>/<repo>`.
+- **Tests.** In `tailors/python/door.rs` against the recorded PyPI rows:
+  `uv_compile_through_interception_publishes_the_lock_with_its_record`,
+  `a_third_party_build_is_refused_when_denied` (docopt, sdist only), and
+  `the_projects_own_build_goes_through_the_metadata_pre_step` (a dynamic
+  hatchling version: the refusal names `hatchling`, never the project).
+  The recorded rows hold neither `editables` (which an editable hatchling
+  build asks for) nor a replayable git exchange (git makes two
+  `git-upload-pack` POSTs and one was recorded), so the pre-step's
+  success path and an allowed third-party build have no offline test.
+  The stub-uv tests in `tailors/python/inputs.rs` now read what the stub
+  saw from the lock it writes, the one file a confined run may change.
+
 **PR 8: Ruby and Elixir.** Bundler mirror and Hex mirror, the visible
 refusals, the Ruby gate-1 helper and Elixir lock parser behind no-route
 doors, and mix `deps.get --check-locked` on ordinary syncs through the

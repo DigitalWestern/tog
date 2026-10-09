@@ -1078,7 +1078,7 @@ before any record is written. With `TOG_SIGNING_KEY` unset it warns and
 writes the record unsigned, which no sync will attest. It reads
 `tog-toolchain.toml` the way `--frozen` does and never writes it, and it
 refuses `--frozen` (exit 2). An ecosystem with no resolution door is
-refused by name. Today three have one. Go's check is `go mod download -json
+refused by name. Today four have one. Go's check is `go mod download -json
 all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
 workspace root, run in the sandbox through tog's resolution proxy (TLS
 interception to crates.io), so its fetches are in the record's ledger. Run
@@ -1093,6 +1093,15 @@ the pnpm `packageManager` pins for a `pnpm-lock.yaml`, each confined the
 same way, at the lock root: from a pnpm workspace member it is refused,
 naming the root. A `yarn.lock` has no check, since yarn is not a pinned
 tool, and a `file:` dependency outside the project is refused by name.
+Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
+lock the same `uv pip compile` tog ran to write it, which must leave it
+byte for byte the same: `requirements.lock.txt` from the requirements tog
+compiles it from, or `requirements.txt` from `requirements.in`. A
+compiled lock whose header names another command than `tog` (one written
+by uv or pip-tools directly) is refused: delete it and run `tog` to
+compile it again. A project with no lock a tool resolved (a hand-pinned
+`requirements.txt`) has no check and is refused, as is a requirements
+file that includes one outside the project.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.
