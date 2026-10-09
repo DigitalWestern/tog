@@ -299,7 +299,7 @@ pub fn tracked_among(
             if protected {
                 break;
             }
-            let actual_path = held_git_directory_path(dir.as_raw_fd())?;
+            let actual_path = crate::kernel::fsroot::descriptor_path(dir.as_raw_fd())?;
             let Some(child) = actual_path.file_name() else {
                 break;
             };
@@ -324,33 +324,6 @@ pub fn tracked_among(
         }
     }
     Ok(tracked)
-}
-
-fn held_git_directory_path(fd: std::os::fd::RawFd) -> io::Result<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        fs::read_link(format!("/proc/self/fd/{fd}"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        let mut bytes = [0 as libc::c_char; libc::PATH_MAX as usize];
-        // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
-        if unsafe { libc::fcntl(fd, libc::F_GETPATH, bytes.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: successful F_GETPATH writes a NUL-terminated pathname.
-        let path = unsafe { std::ffi::CStr::from_ptr(bytes.as_ptr()) };
-        Ok(std::ffi::OsString::from_vec(path.to_bytes().to_vec()).into())
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = fd;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "held Git directory paths are unsupported on this platform",
-        ))
-    }
 }
 
 fn tracked_in_git_index(

@@ -1303,6 +1303,36 @@ fn walk_from_root_with(path: &Path, last_flags: libc::c_int) -> io::Result<fs::F
     Ok(dir)
 }
 
+/// The current path of what the descriptor `fd` holds, from the kernel
+/// (`/proc/self/fd` on Linux, `F_GETPATH` on macOS): the file or directory
+/// actually opened, wherever it is now, never a name looked up again.
+pub(crate) fn descriptor_path(fd: RawFd) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_link(format!("/proc/self/fd/{fd}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = [0 as libc::c_char; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, bytes.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful F_GETPATH writes a NUL-terminated pathname.
+        let path = unsafe { std::ffi::CStr::from_ptr(bytes.as_ptr()) };
+        Ok(std::ffi::OsString::from_vec(path.to_bytes().to_vec()).into())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fd;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the path of a held descriptor is unsupported on this platform",
+        ))
+    }
+}
+
 fn is_directory_stat(stat: &libc::stat) -> bool {
     stat.st_mode & libc::S_IFMT == libc::S_IFDIR
 }

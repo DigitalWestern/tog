@@ -285,6 +285,114 @@ pub fn config_files(dir: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
     Ok(found)
 }
 
+/// [`config_files`] in `dir` (relative to `root`, empty for the root itself),
+/// read from the descriptor `root` holds rather than by path: a directory
+/// renamed or replaced after tog opened the root is not what is read.
+/// Each file is opened from the held root, symlinks inside the project
+/// followed as cargo follows them, and the file actually opened is then
+/// checked: its path from the kernel must lie under the root's, and it
+/// must not be one of `keys` by device and inode. An include is resolved
+/// from the including file's directory the same way.
+pub fn held_config_files(
+    root: &ProjectRoot,
+    dir: &Path,
+    keys: &[confine::FileId],
+) -> io::Result<Vec<ConfigFile>> {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let root_real = root.current_name()?;
+    let mut queue: Vec<PathBuf> = CONFIG_FILES
+        .iter()
+        .rev()
+        .map(|name| dir.join(name))
+        .collect();
+    let mut found: Vec<ConfigFile> = Vec::new();
+    while let Some(relative) = queue.pop() {
+        let shown = root.path().join(&relative);
+        let Some(mut file) = root.open_input_file(&relative)? else {
+            continue;
+        };
+        let real = crate::kernel::fsroot::descriptor_path(file.as_raw_fd())?;
+        let meta = file.metadata()?;
+        if keys.contains(&(meta.dev(), meta.ino())) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is the signing key (the same file, by device and inode, through {}); \
+                     tog does not read it as a cargo file or let cargo read it",
+                    shown.display(),
+                    real.display()
+                ),
+            ));
+        }
+        if !real.starts_with(&root_real) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} resolves to {}, outside {}; tog does not read, or let cargo read, a \
+                     project file that leads out of the project",
+                    shown.display(),
+                    real.display(),
+                    root.path().display()
+                ),
+            ));
+        }
+        if found.iter().any(|file| file.real == real) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|error| {
+            io::Error::new(error.kind(), format!("read {}: {error}", shown.display()))
+        })?;
+        let text = String::from_utf8(bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not valid UTF-8", shown.display()),
+            )
+        })?;
+        let table = parse_toml(&shown, &text)?;
+        let base = relative.parent().unwrap_or(dir).to_path_buf();
+        let entries = table
+            .get("include")
+            .and_then(|include| include.as_array())
+            .into_iter()
+            .flatten();
+        for entry in entries {
+            let named = match entry {
+                toml::Value::String(path) => Some(path.as_str()),
+                toml::Value::Table(table) => table.get("path").and_then(|path| path.as_str()),
+                _ => None,
+            };
+            let Some(named) = named.filter(|named| named.ends_with(".toml")) else {
+                continue;
+            };
+            let named = Path::new(named);
+            if !named.is_absolute() {
+                queue.push(base.join(named));
+            } else if let Ok(inside) = named.strip_prefix(&root_real) {
+                queue.push(inside.to_path_buf());
+            } else if std::fs::symlink_metadata(named).is_ok() {
+                // An absolute include outside the project: refused by
+                // name, as the path-based read refuses it. A missing one
+                // is left for cargo to report.
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{} includes {}, outside {}; tog does not read, or let cargo read, a \
+                         project file that leads out of the project",
+                        shown.display(),
+                        named.display(),
+                        root.path().display()
+                    ),
+                ));
+            }
+        }
+        found.push(ConfigFile { real, table });
+    }
+    Ok(found)
+}
+
 /// Every registry name cargo's configuration in `lock_root` defines
 /// (`[registries.<name>]`), so each gets the forced credential provider.
 /// cargo reads `.cargo/config.toml` (and the older `.cargo/config`) in the
