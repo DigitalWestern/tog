@@ -1001,10 +1001,10 @@ pub fn build_sdist_wheel(
     build_sdist_wheel_at_depth(door, pkg, selected, None, None, 0).map(|wheel| wheel.path)
 }
 
-/// Public runtime-aware entry point for callers that are building one sdist
-/// outside a complete environment realization (for example, an integration
-/// test). Normal project sync supplies this automatically from its Plan.
-pub fn build_sdist_wheel_with_runtime_plan(
+/// Test a single sdist with a runtime constraint. Project sync supplies
+/// its complete plan directly to the depth-aware production path.
+#[cfg(test)]
+fn build_sdist_wheel_with_runtime_plan(
     door: &mut ResolutionDoor<'_>,
     pkg: &LockedPackage,
     selected: &Selected,
@@ -1497,6 +1497,9 @@ pub fn ensure_build_environment(
         selected,
     )
 }
+
+#[cfg(test)]
+mod isolation_tests;
 
 #[cfg(test)]
 mod tests {
