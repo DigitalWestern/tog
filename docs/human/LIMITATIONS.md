@@ -187,11 +187,15 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   header, archive, object, `lib*.so` symlink or linker script (#331); the compiler's own
   `gcc` and `clang` directories are kept whole, as are a versioned LLVM tree's
   (`llvm-<N>`) `bin` and `lib/clang`, where Ubuntu keeps clang's own headers; the rest
-  of that tree, LLVM's own headers and archives, is curated. Two gaps: a regular ELF `lib*.so` in a
-  curated subdirectory stays where it is (plugins and extension modules there are loaded by
-  that path), so `-L` into it can link it; and a subdirectory whose only development file
-  is a `lib*.so` symlink or linker script is bound whole, as plugin directories such as
-  `bfd-plugins`, `sasl2` and `xtables` are full of `lib*.so` symlinks programs load. Kept files are symlinks into
+  of that tree, LLVM's own headers and archives, is curated. A `lib*.so` symlink or linker
+  script marks a subdirectory for curation like a header does, except in a known plugin
+  directory (`bfd-plugins`, `dri`, `sasl2`, `xtables`, `libibverbs`, `gtk-<N>`, any
+  `modules` or `plugins`, and the rest of `PLUGIN_DIRS` in `src/kernel/hostview.rs`), where
+  programs load those names and they stay. Two gaps: a regular ELF `lib*.so` in a curated
+  subdirectory stays where it is (plugins and extension modules there are loaded by that
+  path), so `-L` into it can link it; and a plugin directory missing from that list loses
+  its `lib*.so` symlinks, so a program that loads one by that name fails in the build
+  sandbox until the directory is added. Kept files are symlinks into
   one read-only bind of each whole curated host directory under `/.tog-host-files` (#334),
   so every file the view hides is still readable there by that path: no default search
   path, pkg-config directory or symlink in the view names it, but a build that names
