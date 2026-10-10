@@ -394,10 +394,23 @@ fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
     let message = format!("{verb} {}: {}", shown_url(url), network_cause(&error));
     match error {
         ureq::Error::Status(code, _) => io::Error::other(StatusFailure { code, message }),
-        ureq::Error::Transport(_) => {
+        ureq::Error::Transport(transport) if retryable_transport(transport.kind()) => {
             error::new(error::Class::Network, io::ErrorKind::Other, message)
         }
+        // Invalid URLs, schemes, proxy credentials, HTTPS-only refusals,
+        // redirect loops and malformed responses need an input or server fix.
+        ureq::Error::Transport(_) => io::Error::other(message),
     }
+}
+
+fn retryable_transport(kind: ureq::ErrorKind) -> bool {
+    matches!(
+        kind,
+        ureq::ErrorKind::Dns
+            | ureq::ErrorKind::ConnectionFailed
+            | ureq::ErrorKind::Io
+            | ureq::ErrorKind::ProxyConnect
+    )
 }
 
 /// A response body that broke off while it was read: a `Network` failure,
@@ -2432,6 +2445,34 @@ mod integrity_tests {
         assert_eq!(class_of(&remote), Some(Class::Network));
         assert_eq!(remote.kind(), io::ErrorKind::ConnectionReset);
         assert_eq!(class_of(&read_failure("file:///a", reset())), None);
+    }
+
+    #[test]
+    fn permanent_request_errors_are_not_retryable_network_failures() {
+        for url in [
+            "https://[",
+            "ftp://example.invalid/x",
+            "http://example.invalid/x",
+        ] {
+            let error = fetch_text(url).unwrap_err();
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                None,
+                "{url}: {error}"
+            );
+        }
+        for kind in [
+            ureq::ErrorKind::InvalidUrl,
+            ureq::ErrorKind::UnknownScheme,
+            ureq::ErrorKind::InsecureRequestHttpsOnly,
+            ureq::ErrorKind::InvalidProxyUrl,
+            ureq::ErrorKind::ProxyUnauthorized,
+            ureq::ErrorKind::TooManyRedirects,
+            ureq::ErrorKind::BadStatus,
+            ureq::ErrorKind::BadHeader,
+        ] {
+            assert!(!retryable_transport(kind), "{kind:?}");
+        }
     }
 
     /// An unpinned download stops reading one byte past its cap, so a
