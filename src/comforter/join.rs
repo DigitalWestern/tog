@@ -1246,7 +1246,7 @@ mod tests {
     /// Everything the closure writer's side of the join needs: the lookup,
     /// the policy, and the supplied records, reset when the test ends.
     struct Writer {
-        // Dropped before the lock, so no other test sees this policy.
+        // Restore the enclosing policy before releasing the attribution lock.
         _policy: policy::PolicyScope,
         _attribution: std::sync::MutexGuard<'static, ()>,
     }

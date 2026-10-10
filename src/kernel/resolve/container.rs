@@ -37,7 +37,8 @@ use crate::kernel::sandbox;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -54,7 +55,19 @@ const ROOT_DIRS: [&str; 8] = ["usr", "etc", "run", "run/tog", "tmp", "proc", "de
 
 /// The flags every container of a run gets, the preflight's included, so
 /// the probe cannot pass on a configuration the run never uses.
-const FENCE: [&str; 21] = [
+const FENCE: [&str; 33] = [
+    "--privileged=false",
+    "--sig-proxy=false",
+    "--pid",
+    "private",
+    "--ipc",
+    "private",
+    "--uts",
+    "private",
+    "--cgroupns",
+    "private",
+    "--cgroups",
+    "enabled",
     "--network",
     "none",
     "--userns",
@@ -77,6 +90,59 @@ const FENCE: [&str; 21] = [
     "never",
     "--log-driver=none",
 ];
+
+/// Engine configuration stays outside every mount visible to the tool.
+/// Ambient configuration must never add host mounts, hooks or namespaces.
+#[derive(Clone)]
+pub(super) struct EngineConfig {
+    config: PathBuf,
+    hooks: PathBuf,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl EngineConfig {
+    pub(super) fn new(stage: &Path) -> io::Result<Self> {
+        // SAFETY: UID queries have no pointer arguments or failure mode.
+        let (uid, effective) = unsafe { (libc::getuid(), libc::geteuid()) };
+        if uid == 0 || effective != uid {
+            return Err(io::Error::new(io::ErrorKind::Unsupported,
+                "the resolution container requires a local non-root user without elevated privileges"));
+        }
+        let config = stage.join("engine.conf");
+        let hooks = stage.join("engine-hooks");
+        fs::create_dir(&hooks)?;
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&config)?;
+        file.write_all(
+            b"[containers]\ndefault_mounts_file=\"/dev/null\"\n[engine]\nhooks_dir=[]\n",
+        )?;
+        let mut env = Vec::new();
+        // Infrastructure only. Neither the engine nor its helpers inherit
+        // loader, remote, containers.conf or storage configuration overrides.
+        for key in ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+            if let Some(value) = std::env::var_os(key) {
+                env.push((key.into(), value));
+            }
+        }
+        Ok(Self { config, hooks, env })
+    }
+
+    pub(super) fn command(&self, podman: &Path) -> io::Result<std::process::Command> {
+        let mut command = sandbox::bwrap_command(podman)?;
+        command
+            .env_clear()
+            .envs(self.env.iter().cloned())
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("CONTAINERS_CONF", &self.config)
+            .env("CONTAINERS_STORAGE_CONF", "/dev/null")
+            .args(["--remote=false", "--hooks-dir"])
+            .arg(&self.hooks);
+        Ok(command)
+    }
+}
 
 /// The rootless podman this machine can run a fenced container with, found
 /// and tried once per process. An interrupt during the probe is returned
@@ -116,41 +182,121 @@ fn run_preflight(activity: &StoreActivity) -> io::Result<Result<PathBuf, String>
     }
 }
 
-/// Run `/usr/bin/true` in a container fenced exactly as a run is.
+/// Run the actual relay and a harmless tool with both descriptors under the fence.
 fn probe_container(
     podman: &Path,
     scratch: &Path,
     activity: &StoreActivity,
 ) -> io::Result<Result<(), String>> {
-    fs::create_dir(scratch)?;
-    fs::set_permissions(scratch, fs::Permissions::from_mode(0o700))?;
+    fs::DirBuilder::new().mode(0o700).create(scratch)?;
     let (rootfs, system) = root(scratch)?;
+    let config = EngineConfig::new(scratch)?;
     let name = name();
     let mut args = run_args(&name);
     for (source, destination) in &system {
         args.extend(mount(source, destination, true)?);
     }
+    let socket = scratch.join("probe.sock");
+    // Bind through a held parent so a long TMPDIR does not exceed the
+    // Unix socket address limit. The mount still uses its real pathname.
+    #[cfg(target_os = "linux")]
+    let parent = fs::File::open(scratch)?;
+    #[cfg(target_os = "linux")]
+    let bind_path =
+        PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd())).join("probe.sock");
+    #[cfg(not(target_os = "linux"))]
+    let bind_path = socket.clone();
+    let _listener = std::os::unix::net::UnixListener::bind(bind_path)?;
+    let executable = std::env::current_exe()?;
+    // A unit-test binary is not the CLI. Production always uses itself.
+    #[cfg(test)]
+    let executable = executable
+        .parent()
+        .and_then(Path::parent)
+        .map(|dir| dir.join("tog"))
+        .ok_or_else(|| io::Error::other("no probe relay binary"))?;
+    args.extend(mount(&executable, Path::new(relay::TOG_EXECUTABLE), true)?);
+    args.extend(mount(&socket, Path::new(relay::PROXY_SOCKET), true)?);
+    args.extend([OsString::from("--preserve-fds"), "2".into()]);
     args.extend(rootfs_args(&rootfs)?);
-    args.push("/usr/bin/true".into());
-    let mut command = sandbox::bwrap_command(podman)?;
+    args.extend(
+        [
+            relay::TOG_EXECUTABLE,
+            relay::VERB,
+            "--exec-log-fd",
+            "3",
+            "--env-fd",
+            "4",
+            "--deny-userns",
+            relay::PROXY_SOCKET,
+            relay::LISTEN_ADDRESS,
+            "--",
+            "/bin/sh",
+            "-c",
+            "test \"$TOG_ISOLATION_PROBE\" = scoped",
+        ]
+        .map(OsString::from),
+    );
+    let log_path = scratch.join("probe.log");
+    let log = fs::File::create(&log_path)?;
+    let env_path = scratch.join("probe.env");
+    fs::write(
+        &env_path,
+        relay::encode_env(&[("TOG_ISOLATION_PROBE".into(), "scoped".into())]),
+    )?;
+    let env = fs::File::open(&env_path)?;
+    let mut command = config.command(podman)?;
     command.args(&args);
-    let removal = Removal::new(podman, name);
-    let output = crate::kernel::supervise::local_output(&mut command, activity);
-    drop(removal);
-    let output = output?;
+    sandbox::pass_fds(
+        &mut command,
+        vec![
+            (log.as_raw_fd(), relay::EXEC_LOG_FD),
+            (env.as_raw_fd(), relay::ENV_FD),
+        ],
+    );
+    let removal = Removal::new(podman, name, config);
+    let output = crate::kernel::supervise::during_cleanup(|| {
+        let output = crate::kernel::supervise::local_output(&mut command, activity);
+        removal.finish()?;
+        output
+    })?;
     if output.status.success() {
-        return Ok(Ok(()));
+        let records = relay::parse_log(&fs::read(log_path)?)?;
+        if records
+            .iter()
+            .any(|r| matches!(r, relay::RelayRecord::Tool(relay::ToolStatus::Code(0))))
+            && records
+                .iter()
+                .any(|r| matches!(r, relay::RelayRecord::Quiesced { killed: 0 }))
+            && records
+                .iter()
+                .any(|r| matches!(r, relay::RelayRecord::Exec { .. }))
+        {
+            return Ok(Ok(()));
+        }
+        return Ok(Err(
+            "podman did not prove relay setup, descriptor passing and stopped processes".into(),
+        ));
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let reason = stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no message");
+    let reason = probe_failure_reason(&stderr);
     Ok(Err(format!(
         "rootless podman cannot run a fenced container here ({}): {reason}",
         output.status
     )))
+}
+
+fn probe_failure_reason(stderr: &str) -> &str {
+    let lines = || {
+        stderr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+    };
+    lines()
+        .find(|line| line.starts_with("Error:") || line.contains("level=error"))
+        .or_else(|| lines().next())
+        .unwrap_or("no message")
 }
 
 /// The distro podman first, then `PATH`, as for bubblewrap.
@@ -183,7 +329,14 @@ pub fn name() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    format!("tog-resolve-{}-{}-{nanos}", std::process::id(), sequence())
+    let name = format!("tog-resolve-{}-{}-{nanos}", std::process::id(), sequence());
+    #[cfg(test)]
+    NAME_FOR_TEST.with(|slot| {
+        if let Some(path) = slot.borrow().as_ref() {
+            fs::write(path, &name).unwrap();
+        }
+    });
+    name
 }
 
 /// `podman run` and the fence, up to the mounts.
@@ -344,20 +497,60 @@ pub(super) fn podman_args(
 pub struct Removal {
     podman: PathBuf,
     name: String,
+    config: EngineConfig,
+    finished: bool,
 }
 
 impl Removal {
-    pub fn new(podman: &Path, name: String) -> Removal {
+    pub(super) fn new(podman: &Path, name: String, config: EngineConfig) -> Removal {
         Removal {
             podman: podman.to_path_buf(),
             name,
+            config,
+            finished: false,
         }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_RUN_FOR_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static REMOVE_PID_FOR_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static REMOVE_PROGRAM: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static NAME_FOR_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static FAIL_FINISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl Removal {
+    /// Publication is gated on checked teardown, not on a best-effort drop.
+    pub fn finish(mut self) -> io::Result<()> {
+        self.finished = true;
+        remove(
+            &self.podman,
+            &self.name,
+            &self.config,
+            std::time::Duration::from_secs(10),
+        )?;
+        #[cfg(test)]
+        if FAIL_FINISH.with(|flag| flag.replace(false)) {
+            return Err(io::Error::other(
+                "test engine could not confirm container removal",
+            ));
+        }
+        Ok(())
     }
 }
 
 impl Drop for Removal {
     fn drop(&mut self) {
-        remove(&self.podman, &self.name);
+        if !self.finished {
+            let _ = remove(
+                &self.podman,
+                &self.name,
+                &self.config,
+                std::time::Duration::from_secs(10),
+            );
+        }
     }
 }
 
@@ -367,19 +560,117 @@ impl Drop for Removal {
 /// reads and writes no store path.
 // Reviewed site (tests/architecture.rs): the forced removal of a resolution container, which must run after an interrupt.
 #[allow(clippy::disallowed_methods)]
-fn remove(podman: &Path, name: &str) {
-    let mut command = std::process::Command::new(podman);
-    command
-        .args(["rm", "--force", "--time", "0", "--ignore", name])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let _ = command.status();
+fn remove(
+    podman: &Path,
+    name: &str,
+    config: &EngineConfig,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    #[cfg(test)]
+    let replacement = REMOVE_PROGRAM.with(|slot| slot.borrow_mut().take());
+    #[cfg(test)]
+    let podman = replacement.as_deref().unwrap_or(podman);
+    let perform = || -> io::Result<()> {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = config.command(podman)?;
+        command.process_group(0);
+        command
+            .args(["rm", "--force", "--time", "0", "--ignore", name])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn()?;
+        #[cfg(test)]
+        REMOVE_PID_FOR_TEST.with(|slot| {
+            if let Some(path) = slot.borrow().as_ref() {
+                fs::write(path, child.id().to_string()).unwrap();
+            }
+        });
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(io::Error::other(format!(
+                "cannot confirm removal of resolution container {name} ({status}); its outputs are refused; inspect it with podman")));
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                // Reap when the kernel delivers the kill, without blocking
+                // forever on an engine stuck in uninterruptible kernel I/O.
+                let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while std::time::Instant::now() < reap_deadline {
+                    if child.try_wait()?.is_some() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!(
+                "removing resolution container {name} timed out; its outputs are refused; inspect it with podman")));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    perform().map_err(|error| io::Error::new(error.kind(), format!(
+        "removal of resolution container {name} is unconfirmed; its outputs are refused; inspect it with podman: {error}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_failure_and_timeout_refuse_confirmation() {
+        let stage = crate::kernel::testutil::TempDir::named("container-removal");
+        let config = EngineConfig::new(&stage.0).unwrap();
+        let fake = stage.0.join("podman");
+        fs::write(&fake, "#!/bin/sh\nexit 42\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        let error = remove(
+            &fake,
+            "own-container",
+            &config,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("own-container"));
+        fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 5\n").unwrap();
+        let start = std::time::Instant::now();
+        let error = remove(
+            &fake,
+            "own-container",
+            &config,
+            std::time::Duration::from_millis(40),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        let error = remove(
+            &stage.0.join("absent"),
+            "own-container",
+            &config,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("own-container"));
+        assert!(error.to_string().contains("unconfirmed"));
+    }
+
+    #[test]
+    fn probe_reports_engine_failure_ahead_of_configuration_warnings() {
+        assert_eq!(
+            probe_failure_reason(
+                "warning: storage driver default\nError: private PID namespaces unavailable\n"
+            ),
+            "Error: private PID namespaces unavailable"
+        );
+        assert_eq!(
+            probe_failure_reason("\n permission denied\n"),
+            "permission denied"
+        );
+        assert_eq!(probe_failure_reason("\n"), "no message");
+    }
 
     #[test]
     fn mounts_refuse_what_podman_would_misread() {

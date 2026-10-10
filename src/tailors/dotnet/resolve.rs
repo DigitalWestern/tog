@@ -2,7 +2,7 @@
 //! proxy session's NuGet mirror, for a missing lock and for `tog attest`.
 
 use super::door::{dotnet_tool, run_restore, DotnetRun};
-use super::{err, find_project, preflight, require_lock, LOCK_FILE};
+use super::{err, find_project, require_lock, LOCK_FILE};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
 use crate::kernel::resolve::ResolutionDoor;
@@ -17,19 +17,19 @@ pub(crate) fn resolution_outputs(project: &ProjectRoot) -> io::Result<Vec<PathBu
     Ok(vec![find_project(project)?, PathBuf::from(LOCK_FILE)])
 }
 
-/// The files MSBuild reads beside the csproj during restore: `global.json`
-/// (the SDK it selects) and the `Directory.Build` files it imports on its
-/// own, each when the project has one.
+/// MSBuild property functions and imported targets can read arbitrary project
+/// data. Bind every regular file visible to its snapshot until precise input
+/// declarations have a reviewed design.
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    Ok([
-        "global.json",
-        "Directory.Build.props",
-        "Directory.Build.targets",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .filter(|path| project.is_input_file(path))
-    .collect())
+    let outputs = resolution_outputs(project)?;
+    let outputs: Vec<_> = outputs
+        .iter()
+        .map(|p| {
+            p.to_str()
+                .ok_or_else(|| err(".NET resolution output path is not UTF-8"))
+        })
+        .collect::<io::Result<_>>()?;
+    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &outputs)
 }
 
 /// Every resolution file of `project` that exists, by digest: a closure's
@@ -40,6 +40,155 @@ pub(crate) fn resolution_basis(
     let mut listed = resolution_outputs(project)?;
     listed.extend(resolution_inputs(project)?);
     record::file_digests(project, &listed)
+}
+
+/// Command-line global properties hold the lock contract unless imported
+/// MSBuild opts them back into local reassignment. Scan all visible bytes,
+/// including UTF-16/32 XML's NUL-padded ASCII names, rather than guessing
+/// which extensions arbitrary imports may use. This is a conservative refusal.
+fn reject_lock_controls(
+    project: &ProjectRoot,
+    basis: &crate::comforter::join::Digests,
+) -> io::Result<()> {
+    for path in basis.keys().filter(|path| path.as_str() != LOCK_FILE) {
+        let bytes = project
+            .read_input(Path::new(path))?
+            .ok_or_else(|| err("MSBuild input vanished"))?;
+        let ascii: Vec<u8> = bytes
+            .into_iter()
+            .filter(|byte| *byte != 0)
+            .map(|byte| byte.to_ascii_lowercase())
+            .collect();
+        for control in ["treataslocalproperty", "nugetlockfilepath"] {
+            if ascii
+                .windows(control.len())
+                .any(|part| part == control.as_bytes())
+            {
+                return Err(err(format!("{path}: unsupported MSBuild lock control {control}; restore must check packages.lock.json with tog's global settings")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What preflight checked: the canonical project file, and the lock's text
+/// and parse when the project has one (it may not exist until delegated
+/// planning writes it). Planning and realization take it as proof.
+#[derive(Debug)]
+pub struct Preflight {
+    pub csproj: PathBuf,
+    pub(super) lock: Option<(String, super::ParsedLock)>,
+    pub(super) basis: crate::comforter::join::Digests,
+}
+
+/// Central v0 trust-boundary validation.
+///
+/// Project files are read through the held descriptor (a held root is a
+/// directory by construction); the returned paths are for messages and
+/// child-process arguments. Ancestors lie outside the project and are
+/// still inspected by path.
+pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflight> {
+    let observed = project.observing_inputs()?;
+    let project = &observed;
+    let basis = resolution_basis(project)?;
+    reject_lock_controls(project, &basis)?;
+    let project_dir = project.path();
+    let csproj_rel = find_project(project)?;
+    let csproj = project_dir.join(&csproj_rel);
+    if !super::regular_file_if_present(project, &csproj_rel, "csproj")? {
+        return Err(err(format!("csproj is missing: {}", csproj.display())));
+    }
+    super::validate_csproj(project, &csproj_rel)?;
+
+    let lock_rel = Path::new(LOCK_FILE);
+    super::regular_file_if_present(project, lock_rel, "packages.lock.json")?;
+    super::regular_file_if_present(project, Path::new("global.json"), "global.json")?;
+    super::check_global_json(project, sdk_version)?;
+
+    // Each directory above is reached from the held project, not its path.
+    for (depth, ancestor) in project.ancestors().enumerate() {
+        let ancestor = ancestor?;
+        let present = |name: &str| {
+            ancestor
+                .entry(Path::new(name))
+                .map(|entry| entry != crate::kernel::fsroot::Entry::Absent)
+        };
+        for name in [
+            "Directory.Packages.props",
+            "Directory.Build.rsp",
+            "packages.config",
+        ] {
+            if present(name)? {
+                return Err(err(format!(
+                    "{name} is not supported in the project or an SDK ancestor: {}",
+                    ancestor.path().join(name).display()
+                )));
+            }
+        }
+        if depth > 0 && present("global.json")? {
+            return Err(err(format!(
+                "ancestor global.json is not supported; SDK discovery would see {}",
+                ancestor.path().join("global.json").display()
+            )));
+        }
+    }
+    let lock = if project.is_input_file(lock_rel) {
+        let text = super::read_input_text(project, lock_rel)?;
+        let parsed = super::parse_lock(&text)?;
+        Some((text, parsed))
+    } else {
+        None
+    };
+    project.verify_observed_inputs()?;
+    if resolution_basis(project)? != basis {
+        return Err(err(
+            ".NET resolution inputs changed during preflight; run `tog` again",
+        ));
+    }
+    Ok(Preflight {
+        csproj,
+        lock,
+        basis,
+    })
+}
+
+/// Build receipt filenames from the already validated generation. Re-listing
+/// the live project here could omit a temporarily removed input that is
+/// restored before staging (an ABA race).
+fn receipt_spec(
+    checked: &Preflight,
+    selected: &Selected,
+    args: &[&str],
+) -> io::Result<record::RecordSpec> {
+    let outputs = vec![
+        PathBuf::from(
+            checked
+                .csproj
+                .file_name()
+                .ok_or_else(|| err("checked .NET project has no filename"))?,
+        ),
+        PathBuf::from(LOCK_FILE),
+    ];
+    let inputs = checked
+        .basis
+        .keys()
+        .map(PathBuf::from)
+        .filter(|path| !outputs.contains(path))
+        .collect();
+    let tool = dotnet_tool(selected)?;
+    let mut command = vec![tool.name.clone()];
+    command.extend(args.iter().map(|arg| (*arg).to_string()));
+    let spec = record::RecordSpec {
+        tool,
+        command,
+        files: record::ResolutionFiles { outputs, inputs },
+        key: crate::comforter::signing_key(),
+        require_unchanged: false,
+        publish_receipt: true,
+    };
+    #[cfg(test)]
+    after_receipt_spec_for_test();
+    Ok(spec)
 }
 
 /// `prepare`: packages.lock.json, written by the store SDK's `restore
@@ -53,22 +202,22 @@ pub fn generate_lock(
     sdk_obj: &Path,
     selected: &Selected,
 ) -> io::Result<()> {
-    preflight(project, selected.version("dotnet-sdk")?)?;
+    let checked = preflight(project, selected.version("dotnet-sdk")?)?;
+    let basis = &checked.basis;
+    #[cfg(test)]
+    after_preflight_for_test();
     ui::note("no packages.lock.json; resolving with the store SDK...");
     let args = ["--use-lock-file"];
-    let spec = crate::tailors::record_spec(
-        &super::tailor::Dotnet,
-        project,
-        dotnet_tool(selected)?,
-        &["restore", "--use-lock-file"],
-    )?;
+    let spec = receipt_spec(&checked, selected, &["restore", "--use-lock-file"])?;
+    let outputs = spec.files.outputs.clone();
     let report = run_restore(
         door,
         DotnetRun {
             sdk_obj,
             lock_root: project.path(),
             args: &args,
-            outputs: resolution_outputs(project)?,
+            outputs,
+            inputs: Some(basis),
             receipt: Some(record::producer(spec, Default::default())),
         },
     )?;
@@ -91,15 +240,14 @@ pub fn attest_project(
     sdk_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(record::ResolutionRecord, Vec<u8>)> {
-    preflight(project, selected.version("dotnet-sdk")?)?;
+    let checked = preflight(project, selected.version("dotnet-sdk")?)?;
+    let basis = &checked.basis;
+    #[cfg(test)]
+    after_preflight_for_test();
     require_lock(project)?;
     let args = ["--locked-mode"];
-    let mut spec = crate::tailors::record_spec(
-        &super::tailor::Dotnet,
-        project,
-        dotnet_tool(selected)?,
-        &["restore", "--locked-mode"],
-    )?;
+    let mut spec = receipt_spec(&checked, selected, &["restore", "--locked-mode"])?;
+    let outputs = spec.files.outputs.clone();
     spec.require_unchanged = true;
     spec.publish_receipt = false;
     let slot = record::RecordSlot::default();
@@ -109,7 +257,8 @@ pub fn attest_project(
             sdk_obj,
             lock_root: project.path(),
             args: &args,
-            outputs: resolution_outputs(project)?,
+            outputs,
+            inputs: Some(basis),
             receipt: Some(record::producer(spec, slot.clone())),
         },
     )?;
@@ -139,6 +288,28 @@ fn restore_failure(report: &crate::kernel::resolve::DelegateReport) -> String {
 }
 
 #[cfg(test)]
+thread_local! {
+    static AFTER_RECEIPT_SPEC_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_PREFLIGHT_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_preflight_for_test() {
+    let hook = AFTER_PREFLIGHT_FOR_TEST.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn after_receipt_spec_for_test() {
+    let hook = AFTER_RECEIPT_SPEC_FOR_TEST.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernel::platform::Platform;
@@ -151,6 +322,98 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use std::fs;
     use std::io::Write as _;
+
+    #[test]
+    fn msbuild_data_and_nested_imports_are_resolution_inputs() {
+        let temp = TempDir::named("dotnet-inputs");
+        for directory in ["config/nested", "obj", "bin", ".git", ".tog"] {
+            fs::create_dir_all(temp.0.join(directory)).unwrap();
+        }
+        fs::write(temp.0.join("app.csproj"), csproj("")).unwrap();
+        fs::write(temp.0.join("config/nested/version.txt"), "1.0.0").unwrap();
+        for file in [
+            "obj/ignored",
+            "bin/ignored",
+            ".git/config",
+            ".tog/closure.json",
+        ] {
+            fs::write(temp.0.join(file), "excluded").unwrap();
+        }
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        assert_eq!(
+            resolution_inputs(&project).unwrap(),
+            vec![PathBuf::from("config/nested/version.txt")]
+        );
+        let before = resolution_basis(&project).unwrap();
+        fs::write(temp.0.join("config/nested/version.txt"), "2.0.0").unwrap();
+        assert_ne!(resolution_basis(&project).unwrap(), before);
+        std::os::unix::fs::symlink("config", temp.0.join("linked")).unwrap();
+        assert!(resolution_inputs(&project).is_err());
+    }
+
+    #[test]
+    fn a_cached_preflight_cannot_label_a_changed_project_generation() {
+        let temp = TempDir::named("dotnet-captured-plan");
+        fs::write(temp.0.join("app.csproj"), csproj("")).unwrap();
+        fs::write(
+            temp.0.join(LOCK_FILE),
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        )
+        .unwrap();
+        fs::write(temp.0.join("version.txt"), "A").unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let selected = super::super::shipped_selection().unwrap();
+        let checked = preflight(&project, selected.version("dotnet-sdk").unwrap()).unwrap();
+        super::super::plan_dotnet(&project, &selected, &checked).unwrap();
+        fs::write(temp.0.join("version.txt"), "B").unwrap();
+        let why = super::super::plan_dotnet(&project, &selected, &checked)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("resolution inputs changed"), "{why}");
+        fs::write(temp.0.join("version.txt"), "A").unwrap();
+        fs::write(temp.0.join("new.props"), "new input").unwrap();
+        assert!(super::super::plan_dotnet(&project, &selected, &checked).is_err());
+        fs::remove_file(temp.0.join("new.props")).unwrap();
+        fs::write(temp.0.join("app.csproj"), csproj("<!-- changed -->")).unwrap();
+        assert!(super::super::plan_dotnet(&project, &selected, &checked).is_err());
+    }
+
+    #[test]
+    fn alternate_lock_controls_are_refused_in_main_and_imported_files() {
+        let temp = TempDir::named("dotnet-lock-control");
+        let plain = csproj("");
+        fs::write(temp.0.join("app.csproj"), &plain).unwrap();
+        fs::write(
+            temp.0.join(LOCK_FILE),
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.0.join("alternate.lock.json"),
+            r#"{"version":1,"dependencies":{"net9.0":{"Other":{}}}}"#,
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let sdk_version = super::super::shipped_selection()
+            .unwrap()
+            .version("dotnet-sdk")
+            .unwrap()
+            .to_owned();
+        fs::write(temp.0.join("app.csproj"), plain.replace("</Project>", "<PropertyGroup><NuGetLockFilePath>alternate.lock.json</NuGetLockFilePath></PropertyGroup></Project>")).unwrap();
+        let why = preflight(&project, &sdk_version).unwrap_err().to_string();
+        assert!(why.contains("nugetlockfilepath"), "{why}");
+        fs::write(temp.0.join("app.csproj"), &plain).unwrap();
+        for control in [
+            "<Project TreatAsLocalProperty=\"NuGetLockFilePath;RestoreLockedMode\" />",
+            "<Project><PropertyGroup><NuGetLockFilePath>alternate.lock.json</NuGetLockFilePath></PropertyGroup></Project>",
+        ] {
+            fs::write(temp.0.join("Directory.Build.props"), control).unwrap();
+            assert!(preflight(&project, &sdk_version).is_err());
+            let utf16: Vec<_> = std::iter::once(0xfeffu16).chain(control.encode_utf16()).flat_map(u16::to_le_bytes).collect();
+            fs::write(temp.0.join("Directory.Build.props"), utf16).unwrap();
+            assert!(preflight(&project, &sdk_version).is_err());
+        }
+    }
 
     /// An unsigned package with one netstandard2.0 asset, so the fixture
     /// restore has a real `.nupkg` to install (the recorded rows kept
@@ -271,9 +534,10 @@ mod tests {
     /// signed, a drifted csproj refused.
     #[test]
     #[ignore = "realizes the store .NET SDK over the network"]
-    fn dotnet_missing_lock_restore_through_nuget_mirror() {
+    fn dotnet_restore_attest_without_unix_sockets_through_nuget_mirror() {
+        let _env = policy::test_env_lock();
         let _serial = policy::attribution_test_lock();
-        let label = "dotnet_missing_lock_restore_through_nuget_mirror";
+        let label = "dotnet_restore_attest_without_unix_sockets_through_nuget_mirror";
         let Some(harness) = nuget_harness(label) else {
             return;
         };
@@ -288,8 +552,27 @@ mod tests {
         let temp = TempDir::named("dotnet-mirror");
         let dir = temp.0.join("project");
         fs::create_dir_all(&dir).unwrap();
-        let reference = "    <PackageReference Include=\"Tog.Fixture\" Version=\"1.0.0\" />\n";
+        let reference =
+            "    <PackageReference Include=\"Tog.Fixture\" Version=\"$(FixtureVersion)\" Condition=\"!Exists('empty-switch') And Exists('feature.flag')\" />\n";
         fs::write(dir.join("app.csproj"), csproj(reference)).unwrap();
+        fs::write(dir.join("feature.flag"), "enabled").unwrap();
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::write(dir.join("config/version.txt"), "1.0.0").unwrap();
+        fs::write(dir.join("config/package.props"), r#"<Project><PropertyGroup>
+          <FixtureVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)version.txt').Trim())</FixtureVersion>
+        </PropertyGroup></Project>"#).unwrap();
+        fs::write(dir.join("Directory.Build.props"), r#"<Project>
+          <Import Project="config/package.props" />
+          <PropertyGroup>
+            <TogDiagnostics>$([System.Environment]::GetEnvironmentVariable('DOTNET_EnableDiagnostics'))</TogDiagnostics>
+            <TogNodeReuse>$([System.Environment]::GetEnvironmentVariable('MSBUILDDISABLENODEREUSE'))</TogNodeReuse>
+          </PropertyGroup>
+          <Target Name="TogNoUnixSettings" BeforeTargets="Restore">
+            <Error Condition="'$(TogDiagnostics)' != '0'" Text="diagnostic IPC not disabled" />
+            <Error Condition="'$(TogNodeReuse)' != '1'" Text="MSBuild node reuse not disabled" />
+            <Error Condition="'$(MSBuildNodeCount)' != '1'" Text="parallel MSBuild workers not disabled" />
+          </Target>
+        </Project>"#).unwrap();
         let dir = dir.canonicalize().unwrap();
         let held = ProjectRoot::open(&dir).unwrap();
 
@@ -313,6 +596,137 @@ mod tests {
         let (record, _) = attested.unwrap();
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(record.outputs.len(), 2, "{:?}", record.outputs);
+        for input in [
+            "Directory.Build.props",
+            "config/package.props",
+            "config/version.txt",
+        ] {
+            assert!(record.inputs.contains_key(input), "{record:?}");
+        }
+        // Changing data read by an imported props file invalidates the receipt,
+        // even though the main project and its lock remain byte-identical.
+        let before_basis = resolution_basis(&held).unwrap();
+        fs::write(dir.join("config/version.txt"), "2.0.0").unwrap();
+        assert_ne!(resolution_basis(&held).unwrap(), before_basis);
+        let before_lock = fs::read(dir.join(LOCK_FILE)).unwrap();
+        let (changed_data, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        assert!(changed_data.is_err());
+        assert_eq!(fs::read(dir.join(LOCK_FILE)).unwrap(), before_lock);
+        fs::write(dir.join("config/version.txt"), "1.0.0").unwrap();
+
+        // Deterministically replace validated input before staging. A fresh
+        // basis here would bypass the lock-control refusal scan.
+        let props = dir.join("Directory.Build.props");
+        let original_props = fs::read(&props).unwrap();
+        let replacement = props.clone();
+        AFTER_PREFLIGHT_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+            fs::write(replacement, "<Project TreatAsLocalProperty=\"NuGetLockFilePath\"><PropertyGroup><NuGetLockFilePath>alternate.lock.json</NuGetLockFilePath></PropertyGroup></Project>").unwrap();
+        })));
+        let receipt_before = fs::read(dir.join(".tog/resolution/dotnet.json")).unwrap();
+        let (replaced, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        let why = replaced.unwrap_err().to_string();
+        assert!(why.contains("changed while planning"), "{why}");
+        assert_eq!(fs::read(dir.join(LOCK_FILE)).unwrap(), before_lock);
+        assert_eq!(
+            fs::read(dir.join(".tog/resolution/dotnet.json")).unwrap(),
+            receipt_before
+        );
+        fs::write(&props, original_props).unwrap();
+
+        let missing = temp.0.join("replaced-missing-lock");
+        fs::create_dir(&missing).unwrap();
+        fs::write(missing.join("app.csproj"), csproj("")).unwrap();
+        let inserted = missing.join("Directory.Build.props");
+        AFTER_PREFLIGHT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::write(
+                    inserted,
+                    "<Project TreatAsLocalProperty=\"RestoreLockedMode\" />",
+                )
+                .unwrap();
+            }))
+        });
+        let missing_held = ProjectRoot::open(&missing).unwrap();
+        let (replaced_missing, _) = through_door(harness, DoorKind::MissingLock, |door| {
+            generate_lock(door, &missing_held, &sdk, &selected)
+        });
+        let why = replaced_missing.unwrap_err().to_string();
+        assert!(why.contains("changed while planning"), "{why}");
+        assert!(!missing.join(LOCK_FILE).exists());
+        assert!(!missing.join(".tog/resolution/dotnet.json").exists());
+
+        // Remove an input during receipt-spec creation, then restore it before
+        // staging. Receipt filenames must come from the captured generation.
+        let flag = dir.join("feature.flag");
+        let removed = flag.clone();
+        AFTER_PREFLIGHT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::remove_file(removed).unwrap();
+            }))
+        });
+        let restored = flag.clone();
+        AFTER_RECEIPT_SPEC_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::write(restored, "enabled").unwrap();
+            }))
+        });
+        let (aba, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        let (aba_record, _) = aba.unwrap();
+        assert!(
+            aba_record.inputs.contains_key("feature.flag"),
+            "{aba_record:?}"
+        );
+        let key_path = temp.0.join("receipt-test.key");
+        let public = crate::kernel::signing::generate(&key_path).unwrap();
+        let key = crate::kernel::signing::SigningKey::load(&key_path).unwrap();
+        let envelope = serde_json::to_vec(&aba_record.envelope(Some(&key)).unwrap()).unwrap();
+        let trusted = [public].into_iter().collect();
+        let judge = || {
+            record::judge(
+                "test",
+                &envelope,
+                "dotnet",
+                &trusted,
+                &crate::tailors::resolution_files(&super::super::tailor::Dotnet, &held)
+                    .unwrap()
+                    .unwrap(),
+                &held,
+            )
+            .unwrap()
+        };
+        assert!(matches!(judge(), record::Judgment::Attests(_)));
+        fs::remove_file(&flag).unwrap();
+        assert!(matches!(judge(), record::Judgment::Unrecorded(_)));
+        fs::write(flag, "enabled").unwrap();
+
+        // Empty directories and host execute bits cannot select a different
+        // dependency set in the canonical resolver view. The checkout stays intact.
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::create_dir(dir.join("empty-switch")).unwrap();
+        fs::set_permissions(
+            dir.join("config/version.txt"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let (canonical, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        canonical.unwrap();
+        assert!(dir.join("empty-switch").is_dir());
+        assert_eq!(
+            fs::metadata(dir.join("config/version.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
 
         fs::write(dir.join("app.csproj"), csproj("")).unwrap();
         let before = fs::read(dir.join(LOCK_FILE)).unwrap();

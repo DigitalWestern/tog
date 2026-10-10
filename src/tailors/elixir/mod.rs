@@ -13,6 +13,7 @@
 mod check_locked;
 mod door;
 pub mod edit;
+mod env;
 mod hextar;
 pub mod objects;
 pub(crate) mod registry;
@@ -35,6 +36,7 @@ use crate::kernel::toolchain::ArtifactRow;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
+pub use env::project_elixir_env;
 pub use resolve::{attest_project, generate_lock, plan_elixir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -1302,93 +1304,6 @@ pub fn expected_projection(
         .join("hex-deps"))
 }
 
-/// Project: clonefile the deps object into a writable per-project tree
-/// (native builds write into their source dirs — npm mutablePackages
-/// precedent; recorded unattested) + closure envelope.
-pub fn project_elixir_env(
-    activity: &StoreActivity,
-    platform: Platform,
-    project: &ProjectRoot,
-    beam_obj: &Path,
-    deps_obj: &Path,
-    plan: &ElixirPlan,
-    lock_sha256: &str,
-    resolution_basis: &crate::comforter::join::Digests,
-    fresh: bool,
-    selected: &Selected,
-    ledgers: &[crate::kernel::resolve::ledger::LedgerObjects],
-    attribution: &mut crate::kernel::policy::Attribution,
-) -> io::Result<PathBuf> {
-    let spec = beam_spec(platform, selected)?;
-    let beam_obj = beam_obj.canonicalize()?;
-    let deps_obj = deps_obj.canonicalize()?;
-    let store = crate::comforter::store_from_object_path(&beam_obj)
-        .ok_or_else(|| err("BEAM object is not in a Tog store"))?;
-    let project_dir = project.path();
-    let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
-    let project_lock = store.project_lock_in(project)?;
-    store.ensure_namespace(Path::new("forests"))?;
-    let mut refs = crate::comforter::ClosureRefs::new();
-    refs.object_path(&store, activity, &beam_obj)?;
-    refs.object_path(&store, activity, &deps_obj)?;
-    refs.forest(&store, activity, &proj_dir)?;
-    // The planner doors' ledgers, kept as long as this closure is and
-    // named in the body so a root rebuilt from the closure keeps them.
-    let mut ledger_refs = Vec::new();
-    for objects in ledgers {
-        for id in [&objects.ledger, &objects.diagnostics] {
-            refs.object_id(&store, activity, id)?;
-            ledger_refs.push(crate::comforter::object_ref(&store.object_path(id))?);
-        }
-    }
-    // Protect the dependency projection before cloning or publishing it.
-    crate::comforter::persist_root_for_refs_with_project_lock(
-        project,
-        &store,
-        activity,
-        &refs,
-        &project_lock,
-    )?;
-    if fresh && proj_dir.exists() {
-        crate::kernel::store::remove_tree(&proj_dir)?;
-    }
-    if !proj_dir.exists() {
-        // Atomic publication: clone into a tmp sibling, then rename — a
-        // crashed clone must never be trusted as a complete forest.
-        let parent = proj_dir.parent().unwrap();
-        fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(
-            ".hex-deps.tmp.{}",
-            crate::kernel::fsroot::random_suffix()?
-        ));
-        crate::comforter::clone_tree_with_activity(activity, &deps_obj, &tmp, platform)?;
-        fs::rename(&tmp, &proj_dir)?;
-    }
-    let mut body = closure_body(
-        &beam_obj,
-        &deps_obj,
-        &proj_dir,
-        plan,
-        lock_sha256,
-        &spec,
-        selected,
-    )?;
-    body["resolution_ledgers"] = ledger_refs.into();
-    body[crate::comforter::join::BASIS_FIELD] =
-        crate::comforter::join::basis_value(resolution_basis);
-    crate::comforter::write_closure_with_project_lock(
-        project,
-        "elixir",
-        body,
-        &store,
-        activity,
-        refs,
-        &project_lock,
-        attribution,
-    )?;
-    Ok(proj_dir)
-}
-
 /// The Elixir closure body: the projection's objects and plan, the
 /// toolchain fingerprint `tog run` reconstructs the build root from, and
 /// the toolchain record that says which selection realized them. The BEAM
@@ -2583,6 +2498,89 @@ exit 0
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
+    }
+
+    #[test]
+    fn refused_fresh_sync_preserves_the_active_forest_and_closure() {
+        use crate::comforter::join;
+        use crate::kernel::policy::{self, Policy};
+        let _env = policy::test_env_lock();
+        let _serial = policy::attribution_test_lock();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                join::set_resolution_files_for_test(None);
+            }
+        }
+        let _reset = Reset;
+        join::set_resolution_files_for_test(Some(std::sync::Arc::new(|_, project| {
+            crate::tailors::resolution_files(&tailor::Elixir, project)
+        })));
+        let temp = TempDir::named("elixir-refused-fresh");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let beam =
+            store.publish_bare_test("beam", &format!("{OTP_VERSION}-elixir{ELIXIR_VERSION}"));
+        let deps = store.publish_bare_test("deps", "0");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::write(dir.join("mix.exs"), "manifest A").unwrap();
+        fs::write(dir.join("mix.lock"), "lock A").unwrap();
+        fs::write(dir.join(".tog/closures/elixir.json"), "previous closure").unwrap();
+        let held = ProjectRoot::open(&dir).unwrap();
+        let forest = expected_projection(&store, &dir, &store.object_path(&deps)).unwrap();
+        fs::create_dir_all(forest.join("jason")).unwrap();
+        fs::write(forest.join("jason/compiled.beam"), "previous compiled code").unwrap();
+        let plan = ElixirPlan {
+            otp_version: OTP_VERSION.into(),
+            elixir_version: ELIXIR_VERSION.into(),
+            deps: Vec::new(),
+        };
+        for changed in [false, true] {
+            let basis = resolve::resolution_basis(&held).unwrap();
+            let _policy = policy::PolicyScope::install(if changed {
+                fs::write(dir.join("mix.lock"), "lock B").unwrap();
+                Policy::default()
+            } else {
+                policy::parse_file(Path::new("test-policy"), "deny = ['unrecorded-resolution']")
+                    .unwrap()
+            });
+            let mut attribution = policy::Attribution::open("elixir").unwrap();
+            let error = project_elixir_env(
+                &activity,
+                Platform::host().unwrap(),
+                &held,
+                &store.object_path(&beam),
+                &store.object_path(&deps),
+                &plan,
+                &"c".repeat(64),
+                &basis,
+                true,
+                &shipped_selection().unwrap(),
+                &[],
+                &mut attribution,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(if changed {
+                    "changed"
+                } else {
+                    "unrecorded-resolution"
+                }),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(forest.join("jason/compiled.beam")).unwrap(),
+                b"previous compiled code"
+            );
+            assert_eq!(
+                fs::read(dir.join(".tog/closures/elixir.json")).unwrap(),
+                b"previous closure"
+            );
+            attribution.discard();
+        }
     }
 
     /// A project renamed mid-sync with another project put at its path:

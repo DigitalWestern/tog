@@ -84,6 +84,10 @@ impl RegistryProtocol for RubyGems {
         }
     }
 
+    fn expects_claim(&self, url: &Url) -> bool {
+        matches!(self.classify(url), RequestClass::Artifact)
+    }
+
     fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)> {
         let Some(name) = url.path().strip_prefix("/info/") else {
             return Vec::new();

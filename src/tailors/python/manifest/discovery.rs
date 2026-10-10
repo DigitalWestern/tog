@@ -214,6 +214,12 @@ pub fn dynamic_requirements_fallback(project: &ProjectRoot) -> io::Result<Option
     requirements_manifest(project, &path, &relative).map(Some)
 }
 
+/// The requirements-directory source discovery would consume, including
+/// an explicit `tog.toml` choice. Resolution receipts cover its includes too.
+pub(crate) fn resolution_requirements_source(project: &ProjectRoot) -> io::Result<Option<PathBuf>> {
+    requirements_directory_candidate(project, &config(project)?)
+}
+
 pub(super) fn setup_or_requirements_manifest(
     project: &ProjectRoot,
     cfg: &TogPythonConfig,

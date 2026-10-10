@@ -384,12 +384,16 @@ impl Catalog {
                 return Ok(candidate.bundle);
             }
         }
-        Err(invalid(format!(
-            "no complete {} release satisfies {request} ({} complete of {} in the catalog)",
-            self.ecosystem(),
-            ranked.len(),
-            self.bundles().len()
-        )))
+        Err(crate::kernel::error::new(
+            crate::kernel::error::Class::Unsupported,
+            io::ErrorKind::InvalidData,
+            format!(
+                "no complete {} release satisfies {request} ({} complete of {} in the catalog)",
+                self.ecosystem(),
+                ranked.len(),
+                self.bundles().len()
+            ),
+        ))
     }
 }
 

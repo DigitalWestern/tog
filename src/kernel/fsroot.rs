@@ -38,6 +38,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 mod held;
+mod observed;
 mod rename_in;
 use held::HeldEntry;
 pub(crate) use held::{held_root_for, start_in};
@@ -77,6 +78,7 @@ pub struct ProjectRoot {
     /// The files outside the project this root has read, shared with every
     /// root derived from it, so one command reads each once (#501).
     external: std::sync::Arc<crate::kernel::external_input::ExternalInputs>,
+    observed: Option<std::sync::Arc<observed::Inputs>>,
 }
 
 /// The held directory, for a caller that must issue a descriptor-relative
@@ -93,6 +95,26 @@ impl ProjectRoot {
     /// component at a time with O_NOFOLLOW, so an ancestor swapped for a
     /// symlink after canonicalization is refused rather than followed.
     pub fn open(project_dir: &Path) -> io::Result<Self> {
+        // An ordinary non-directory request is absent from detection. Decide
+        // this before the no-follow walk. A later walk refusal must never be
+        // reinterpreted by looking up its now-mutable pathname again.
+        if !fs::metadata(project_dir)
+            .map_err(|error| {
+                crate::kernel::error::context(
+                    error,
+                    format_args!("open project {}", project_dir.display()),
+                )
+            })?
+            .is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!(
+                    "open project {}: not a real directory",
+                    project_dir.display()
+                ),
+            ));
+        }
         let path = project_dir.canonicalize().map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -106,6 +128,7 @@ impl ProjectRoot {
             path,
             _held: Some(held),
             external: Default::default(),
+            observed: None,
         })
     }
 
@@ -126,6 +149,7 @@ impl ProjectRoot {
             dir,
             path,
             external: Default::default(),
+            observed: None,
         }))
     }
 
@@ -596,6 +620,7 @@ impl ProjectRoot {
             path: self.path.clone(),
             _held: held,
             external: self.external.clone(),
+            observed: self.observed.clone(),
         })
     }
 
@@ -655,10 +680,10 @@ impl ProjectRoot {
     pub fn check_still_named(&self) -> io::Result<()> {
         let held = fd_stat(self.dir.as_raw_fd())?;
         let moved = |detail: String| {
-            io::Error::other(format!(
-                "{}: {detail}; run 'tog' again",
-                self.path.display()
-            ))
+            crate::kernel::error::refused(
+                io::ErrorKind::Other,
+                format!("{}: {detail}; run 'tog' again", self.path.display()),
+            )
         };
         // Only the identity is compared, so the directory is not opened
         // for reading again: a held ancestor that can be searched but not
@@ -692,6 +717,7 @@ impl ProjectRoot {
     /// absolute, since an absolute path would ignore the descriptor.
     pub fn read_input(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
         let Some(mut file) = self.open_input(relative)? else {
+            self.observe_input(relative, None)?;
             return Ok(None);
         };
         let mut bytes = Vec::new();
@@ -701,6 +727,7 @@ impl ProjectRoot {
                 format!("read {}: {error}", self.path.join(relative).display()),
             )
         })?;
+        self.observe_input(relative, Some(&bytes))?;
         Ok(Some(bytes))
     }
 
@@ -744,7 +771,15 @@ impl ProjectRoot {
     /// `input_entry(relative) == Entry::Regular`, with an unreadable
     /// parent read as absent, as `Path::is_file` reads it.
     pub fn is_input_file(&self, relative: &Path) -> bool {
-        matches!(self.input_entry(relative), Ok(Entry::Regular))
+        let regular = matches!(self.input_entry(relative), Ok(Entry::Regular));
+        if self.observed.is_some()
+            && (regular || matches!(self.input_entry(relative), Ok(Entry::Absent)))
+        {
+            // A boolean caller may ignore the read error. The observer
+            // remembers conflicts and verification still refuses them.
+            let _ = self.read_input(relative);
+        }
+        regular
     }
 
     /// `input_entry(relative) == Entry::Directory`, as `Path::is_dir`.
@@ -798,6 +833,7 @@ impl ProjectRoot {
                     path: display,
                     _held: Some(held),
                     external: self.external.clone(),
+                    observed: None,
                 }))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -828,6 +864,7 @@ impl ProjectRoot {
                     path,
                     _held: Some(held),
                     external: self.external.clone(),
+                    observed: None,
                 }))
             }
             Err(error)
@@ -897,6 +934,7 @@ impl ProjectRoot {
             dir,
             path: path.to_path_buf(),
             external: self.external.clone(),
+            observed: None,
         }))
     }
 
@@ -2218,6 +2256,8 @@ mod tests {
         let file = temp.0.join("file");
         fs::write(&file, b"x").unwrap();
         let error = ProjectRoot::open(&file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(crate::kernel::error::class_of(&error), None);
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -2253,6 +2293,10 @@ mod tests {
         fs::write(dir.join("extra.json"), b"impostor").unwrap();
 
         let error = root.check_still_named().unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         assert!(
             error.to_string().contains("moved or replaced during sync"),
             "{error}"
@@ -2425,6 +2469,10 @@ mod tests {
         fs::rename(&parent, &real).unwrap();
         symlink(&real, &parent).unwrap();
         let error = root.check_still_named().unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         assert!(error.to_string().contains("moved"), "{error}");
     }
 
