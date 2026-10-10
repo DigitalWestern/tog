@@ -836,7 +836,6 @@ mod tests {
         impl Drop for Reset {
             fn drop(&mut self) {
                 join::set_resolution_files_for_test(None);
-                join::set_policy_for_test(None);
             }
         }
         let _reset = Reset;
@@ -867,7 +866,7 @@ mod tests {
                 policy::parse_file(Path::new("test-policy"), "deny = ['unrecorded-resolution']")
                     .unwrap()
             };
-            join::set_policy_for_test(Some(policy));
+            let _policy = policy::PolicyScope::install(policy);
             let mut attribution = policy::Attribution::open("python").unwrap();
             let plan = Plan {
                 ecosystem: "python".into(),
