@@ -877,7 +877,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     // pinned channel stops that sync offline, at selection, as it did the
     // Rust path above.
     let out = tog(&project.0, &home.0, &["fmt", "--check"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(5));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("syncing first: ") && stderr.contains("node not synced"),
