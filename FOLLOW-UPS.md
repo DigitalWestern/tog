@@ -100,3 +100,6 @@ None open.
 - #646: Design policy-owned Podman runtime and storage configuration with tenant boundaries.
 - #647: Design persisted owned-container recovery and stopped-process proof after crashes.
 - #648: Require a supported-Podman CI lane and forced-backend real ecosystem coverage.
+
+- #649: Validate the documented signing workflow on fresh Linux runners and adversarial inputs.
+- #650: Publish trusted admission results on the exact verified candidate commit.
