@@ -342,8 +342,8 @@ fn layers_point_one_way() {
 /// install (#255).
 ///
 /// A comparison listed in `ECOSYSTEM_COMPARISONS` is the one exception,
-/// and every entry must still be found, so a fixed site leaves no stale
-/// permission behind.
+/// and every entry must occur exactly once, so a fixed site leaves no stale
+/// permission behind and a copied site needs its own review.
 #[test]
 fn the_kernel_branches_on_no_ecosystem_name() {
     let mut names: Vec<&str> = tog::tailors::registry()
@@ -356,41 +356,90 @@ fn the_kernel_branches_on_no_ecosystem_name() {
     let mut files = Vec::new();
     rust_files(&root.join("kernel"), &mut files);
     let mut violations = Vec::new();
-    let mut allowed_seen = vec![false; ECOSYSTEM_COMPARISONS.len()];
+    let mut allowed_counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
     for file in &files {
         let relative = file.strip_prefix(&root).unwrap();
         let text = fs::read_to_string(file).unwrap();
-        for (number, line) in non_test(&text).lines().enumerate() {
-            let Some(name) = ecosystem_arm(line, &names) else {
-                continue;
-            };
-            let allowed = ECOSYSTEM_COMPARISONS.iter().position(|(path, code, _)| {
-                relative == Path::new(path).strip_prefix("src").unwrap() && line.trim() == *code
-            });
-            match allowed {
-                Some(index) => allowed_seen[index] = true,
-                None => {
-                    violations.push(format!("{}:{}: \"{name}\"", relative.display(), number + 1))
-                }
-            }
-        }
+        violations.extend(ecosystem_violations(
+            relative,
+            &text,
+            &names,
+            &mut allowed_counts,
+        ));
     }
     assert!(
         violations.is_empty(),
         "the kernel matches on an ecosystem name; give the tailors a method or a table instead:\n  {}",
         violations.join("\n  ")
     );
-    let stale: Vec<String> = ECOSYSTEM_COMPARISONS
-        .iter()
-        .zip(&allowed_seen)
-        .filter(|(_, seen)| !**seen)
-        .map(|((path, code, _), _)| format!("{path}: {code}"))
-        .collect();
+    let allowances = ecosystem_allowance_violations(&allowed_counts);
     assert!(
-        stale.is_empty(),
-        "ECOSYSTEM_COMPARISONS lists a comparison the kernel no longer makes; delete it:\n  {}",
-        stale.join("\n  ")
+        allowances.is_empty(),
+        "ECOSYSTEM_COMPARISONS must allow exactly one occurrence per entry; remove stale entries or review copied sites:\n  {}",
+        allowances.join("\n  ")
     );
+}
+
+fn ecosystem_violations(
+    relative: &Path,
+    text: &str,
+    names: &[&str],
+    allowed_counts: &mut [usize],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (number, line) in non_test(text).lines().enumerate() {
+        let Some(name) = ecosystem_arm(line, names) else {
+            continue;
+        };
+        let allowed = ECOSYSTEM_COMPARISONS.iter().position(|(path, code, _)| {
+            relative == Path::new(path).strip_prefix("src").unwrap() && line.trim() == *code
+        });
+        match allowed {
+            Some(index) => allowed_counts[index] += 1,
+            None => violations.push(format!("{}:{}: \"{name}\"", relative.display(), number + 1)),
+        }
+    }
+    violations
+}
+
+fn ecosystem_allowance_violations(allowed_counts: &[usize]) -> Vec<String> {
+    ECOSYSTEM_COMPARISONS
+        .iter()
+        .zip(allowed_counts)
+        .filter(|(_, count)| **count != 1)
+        .map(|((path, code, _), count)| format!("{path}: {code} (found {count}, expected 1)"))
+        .collect()
+}
+
+#[test]
+fn ecosystem_allowances_cover_one_live_site_only() {
+    let path = Path::new("kernel/provider/cpython.rs");
+    let guard = "if selected.ecosystem != \"python\" {\n    return Err(refused());\n}\n";
+    for (source, accepted) in [
+        (String::new(), false),
+        (guard.into(), true),
+        (guard.repeat(2), false),
+    ] {
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        assert!(ecosystem_violations(path, &source, &["python"], &mut counts).is_empty());
+        assert_eq!(ecosystem_allowance_violations(&counts).is_empty(), accepted);
+    }
+    // Neither another provider nor another comparison in the same provider
+    // inherits the reviewed input guard's permission.
+    for (path, source) in [
+        (Path::new("kernel/provider/rust.rs"), guard),
+        (
+            path,
+            "if selected.ecosystem == \"python\" {\n    choose_runtime();\n}\n",
+        ),
+    ] {
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        assert_eq!(
+            ecosystem_violations(path, source, &["python"], &mut counts).len(),
+            1
+        );
+        assert!(!ecosystem_allowance_violations(&counts).is_empty());
+    }
 }
 
 /// The kernel's reviewed comparisons with an ecosystem name: the file, the

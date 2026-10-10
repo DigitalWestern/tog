@@ -1036,7 +1036,8 @@ These keep the layout organized. The first is enforced by
    or `matches!` pattern holding a tailor's id or lock ecosystem, and no
    `==` or `!=` against one. The one reviewed exception, the CPython
    provider refusing another ecosystem's selection, is listed with its
-   reason in the test's `ECOSYSTEM_COMPARISONS`.
+   reason in the test's `ECOSYSTEM_COMPARISONS`. Each listed comparison
+   must occur exactly once. Removing or copying it fails the check.
 4. **Folders are future crates.** Nothing may prevent a top-level folder
    becoming its own crate later: no reaching into another folder's private
    items; cross-folder use goes through `pub` items at the folder's `mod.rs`.
