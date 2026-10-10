@@ -1061,7 +1061,9 @@ fn with_dev_files(host: &str, dev: &Path) -> io::Result<String> {
     use sha2::Digest as _;
     // The resolver starts at `/`. Preserve symlinks so a linked fixture
     // root is still refused, while giving relative paths their real base.
-    let dev = std::path::absolute(dev)?;
+    // Components remove trailing separators and final dots that would make
+    // lstat follow a root link. ParentDir and symlinks keep their meaning.
+    let dev: PathBuf = std::path::absolute(dev)?.components().collect();
     let mut digest = Fingerprint::dev_files(host);
     if digest.entry(&dev, &dev)? {
         digest.tree(&dev, &dev)?;
@@ -1352,11 +1354,15 @@ mod tests {
         fs::remove_file(dev.join("usr/include")).unwrap();
         let linked = temp.0.join("dev-link");
         symlink(&dev, &linked).unwrap();
-        let error = with_dev_files(&host, &linked).unwrap_err();
-        assert_eq!(
-            crate::kernel::error::class_of(&error),
-            Some(crate::kernel::error::Class::Refused)
-        );
+        for fixture in [linked.clone(), linked.join(""), linked.join(".")] {
+            let error = with_dev_files(&host, &fixture).unwrap_err();
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Refused),
+                "{}: {error}",
+                fixture.display()
+            );
+        }
     }
 
     #[test]
@@ -1432,7 +1438,18 @@ mod tests {
         );
         symlink("../real", dev.join("include")).unwrap();
         symlink("dev", temp.0.join("dev-link")).unwrap();
-        for fixture in [relative.join("dev"), relative.join("dev-link")] {
+        let error = with_dev_files(&host, &relative.join("dev")).unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        assert!(error.to_string().contains("symlink to a directory"));
+        fs::remove_file(dev.join("include")).unwrap();
+        for fixture in [
+            relative.join("dev-link"),
+            relative.join("dev-link/"),
+            relative.join("dev-link/."),
+        ] {
             let error = with_dev_files(&host, &fixture).unwrap_err();
             assert_eq!(
                 crate::kernel::error::class_of(&error),
