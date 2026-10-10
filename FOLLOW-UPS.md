@@ -39,7 +39,7 @@ None open.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
 - **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
-  - #615 design questions: SRI candidate choice, cargo's symlinked members, the ecosystem-arm check in `kernel/provider`, the `hard_link_target` doc.
+  - #615 remaining design questions: SRI candidate choice, cargo's symlinked members, the `hard_link_target` doc.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
   - #619 held project root: `tog fmt` reads cargo config by path.
   - #620 test gaps: the dev-files hook and symlinked directories, the hook for tailors other than Ruby, the `sandbox_deny` header, a CPython test in `tests/cli.rs`, the proxy reader's upper cap.
