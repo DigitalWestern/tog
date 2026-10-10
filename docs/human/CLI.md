@@ -434,6 +434,12 @@ alone, it is what keeps that root readable); every reader but gc skips it. Nothi
 and the next run realizes it again. A package.json script named `fmt` wins and runs as
 `tog run fmt`; an explicit `--eco rust` bypasses the script.
 
+Rust formatting reads Cargo configuration and its includes from the held
+workspace. A config that resolves outside that workspace, or to the signing
+key by any name, is refused with exit 3. Absolute include paths must name
+files inside the workspace. An absolute alias outside it is refused even
+when that alias points back inside. Missing optional includes remain allowed.
+
 **run** executes a command with the PATH and ecosystem variables of the
 nearest projected root (the closest ancestor with `.tog/closures/`). A
 package.json script of the same name wins over an executable on PATH and

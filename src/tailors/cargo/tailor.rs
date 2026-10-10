@@ -480,8 +480,8 @@ impl Formatter for Rustfmt {
 /// Then the configuration cargo-fmt's cargo reads, from the invocation
 /// directory up to the workspace root (nothing above it is mounted): a
 /// file there (or one it includes) that is the key, or a symlink out of
-/// the workspace, is refused by name. These are read at the names the two
-/// held directories have now, each checked against its descriptor.
+/// the workspace, is refused by name. Reads start from the held workspace,
+/// and each opened file's ancestry must reach that directory's identity.
 fn fmt_preflight(
     invocation: &ProjectRoot,
     workspace: &ProjectRoot,

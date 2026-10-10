@@ -966,6 +966,46 @@ impl ProjectRoot {
         self.open_input_with_missing(relative, false)
     }
 
+    /// Verify that an opened file belongs to this held directory. Recover
+    /// its parent from the kernel name, verify the file's identity there,
+    /// then walk held parents until this root's identity is reached.
+    /// A renamed root is still the same root. A replacement at its old
+    /// pathname cannot satisfy this check.
+    pub(crate) fn contains_open_file(&self, file: &fs::File) -> io::Result<bool> {
+        let real = descriptor_path(file.as_raw_fd())?;
+        let parent = real
+            .parent()
+            .ok_or_else(|| refusal("file has no parent".into()))?;
+        let name = real
+            .file_name()
+            .ok_or_else(|| refusal("file has no name".into()))?;
+        let mut dir = walk_from_root_with(parent, ANCESTOR_FLAGS)?;
+        if !same_inode(
+            &fd_stat(file.as_raw_fd())?,
+            &stat_at(dir.as_raw_fd(), name.as_bytes())?,
+        ) {
+            return Err(refusal(
+                "file moved while checking project containment".into(),
+            ));
+        }
+        let root = fd_stat(self.dir.as_raw_fd())?;
+        // Bound the walk even if another process keeps moving directories.
+        for _ in 0..4096 {
+            let current = fd_stat(dir.as_raw_fd())?;
+            if same_inode(&current, &root) {
+                return Ok(true);
+            }
+            let parent = open_file_at(dir.as_raw_fd(), b"..", ANCESTOR_FLAGS, 0)?;
+            if same_inode(&current, &fd_stat(parent.as_raw_fd())?) {
+                return Ok(false);
+            }
+            dir = parent;
+        }
+        Err(refusal(
+            "project ancestry kept changing during containment check".into(),
+        ))
+    }
+
     fn open_input(&self, relative: &Path) -> io::Result<Option<fs::File>> {
         self.open_input_with_missing(relative, true)
     }

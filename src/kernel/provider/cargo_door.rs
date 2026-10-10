@@ -290,13 +290,22 @@ pub fn config_files(dir: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
 /// renamed or replaced after tog opened the root is not what is read.
 /// Each file is opened from the held root, symlinks inside the project
 /// followed as cargo follows them, and the file actually opened is then
-/// checked: its path from the kernel must lie under the root's, and it
+/// checked: its held ancestry must reach the root's identity, and it
 /// must not be one of `keys` by device and inode. An include is resolved
 /// from the including file's directory the same way.
 pub fn held_config_files(
     root: &ProjectRoot,
     dir: &Path,
     keys: &[confine::FileId],
+) -> io::Result<Vec<ConfigFile>> {
+    held_config_files_with(root, dir, keys, |_| {})
+}
+
+fn held_config_files_with(
+    root: &ProjectRoot,
+    dir: &Path,
+    keys: &[confine::FileId],
+    mut after_read: impl FnMut(&Path),
 ) -> io::Result<Vec<ConfigFile>> {
     use std::io::Read as _;
     use std::os::fd::AsRawFd as _;
@@ -316,7 +325,7 @@ pub fn held_config_files(
         let real = crate::kernel::fsroot::descriptor_path(file.as_raw_fd())?;
         let meta = file.metadata()?;
         if keys.contains(&(meta.dev(), meta.ino())) {
-            return Err(io::Error::new(
+            return Err(crate::kernel::error::refused(
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "{} is the signing key (the same file, by device and inode, through {}); \
@@ -326,8 +335,8 @@ pub fn held_config_files(
                 ),
             ));
         }
-        if !real.starts_with(&root_real) {
-            return Err(io::Error::new(
+        if !root.contains_open_file(&file)? {
+            return Err(crate::kernel::error::refused(
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "{} resolves to {}, outside {}; tog does not read, or let cargo read, a \
@@ -352,6 +361,7 @@ pub fn held_config_files(
             )
         })?;
         let table = parse_toml(&shown, &text)?;
+        after_read(&relative);
         let base = relative.parent().unwrap_or(dir).to_path_buf();
         let entries = table
             .get("include")
@@ -376,7 +386,7 @@ pub fn held_config_files(
                 // An absolute include outside the project: refused by
                 // name, as the path-based read refuses it. A missing one
                 // is left for cargo to report.
-                return Err(io::Error::new(
+                return Err(crate::kernel::error::refused(
                     io::ErrorKind::PermissionDenied,
                     format!(
                         "{} includes {}, outside {}; tog does not read, or let cargo read, a \
@@ -1232,6 +1242,71 @@ pub fn run_cargo_checked(
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    #[test]
+    fn held_config_refuses_an_include_in_a_replacement_workspace() {
+        let temp = TempDir::named("held-config-replacement");
+        let original = temp.0.join("ws");
+        let moved = temp.0.join("moved");
+        std::fs::create_dir_all(original.join(".cargo")).unwrap();
+        std::fs::write(
+            original.join(".cargo/config.toml"),
+            "include = [\"next.toml\"]\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            original.join(".cargo/outside.toml"),
+            original.join(".cargo/next.toml"),
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&original).unwrap();
+        let error = held_config_files_with(&root, Path::new(""), &[], |relative| {
+            assert_eq!(relative, Path::new(".cargo/config.toml"));
+            std::fs::rename(&original, &moved).unwrap();
+            std::fs::create_dir_all(original.join(".cargo")).unwrap();
+            // Invalid UTF-8 proves refusal happens before parsing these bytes.
+            std::fs::write(original.join(".cargo/outside.toml"), [0xff]).unwrap();
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        assert!(error.to_string().contains("outside"), "{error}");
+        assert!(!error.to_string().contains("UTF-8"), "{error}");
+    }
+
+    #[test]
+    fn held_config_reads_internal_includes_after_a_workspace_rename() {
+        let temp = TempDir::named("held-config-rename");
+        let original = temp.0.join("ws");
+        let moved = temp.0.join("moved");
+        std::fs::create_dir_all(original.join(".cargo")).unwrap();
+        std::fs::write(
+            original.join(".cargo/config.toml"),
+            "include = [\"../shared.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            original.join("shared.toml"),
+            "[registries.internal]\nindex = \"sparse+https://internal.test/\"\n",
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&original).unwrap();
+        let files = held_config_files_with(&root, Path::new(""), &[], |relative| {
+            if relative == Path::new(".cargo/config.toml") {
+                std::fs::rename(&original, &moved).unwrap();
+                std::fs::create_dir_all(original.join(".cargo")).unwrap();
+                std::fs::write(original.join("shared.toml"), [0xff]).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files[1].table["registries"].get("internal").is_some());
+        assert_eq!(files[1].real, moved.join("shared.toml"));
+    }
 
     /// Path dependencies outside the lock root are read roots, found
     /// through every manifest under it and transitively through theirs;
