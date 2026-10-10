@@ -39,17 +39,8 @@
   options, and the one you would pick. Add a short pointer to each in
   FOLLOW-UPS.md so the repo's to-do list and the tracker agree.
 
-- When spawning a Claude subagent, pick the model by the kind of work.
-  Set `model` on the Agent call and ask for the effort level below. Use
-  the family names only, never a version number.
-  - Fable, high effort: work that needs a lot of critical decision
-    making, or code that is complex and hard to build.
-  - Opus, medium effort: intensive, long-form agentic work that is
-    decently complex but doable from a plan.
-  - Sonnet, medium effort: implementation of a clear, defined plan that
-    is hard to deviate from and needs few decisions. Also summaries and
-    collecting different parts of the codebase to report back to the
-    orchestrator.
+- You are allowed to use Claude subagents whenever you judge they help.
+  Use your own discretion on when, and on which model and effort.
 
 - Keep CI runs few. The repository is public (since 2026-10-06), so
   Actions minutes are free on the standard runners, but the heavy suite
