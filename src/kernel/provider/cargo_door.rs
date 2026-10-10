@@ -319,7 +319,7 @@ fn held_config_files_with(
     let mut found: Vec<ConfigFile> = Vec::new();
     while let Some(relative) = queue.pop() {
         let shown = root.path().join(&relative);
-        let Some(mut file) = root.open_input_file(&relative)? else {
+        let Some(mut file) = root.open_optional_input_file(&relative)? else {
             continue;
         };
         let real = crate::kernel::fsroot::descriptor_path(file.as_raw_fd())?;
@@ -1306,6 +1306,29 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files[1].table["registries"].get("internal").is_some());
         assert_eq!(files[1].real, moved.join("shared.toml"));
+    }
+
+    #[test]
+    fn held_config_treats_a_file_named_cargo_as_no_config() {
+        let temp = TempDir::named("held-config-cargo-file");
+        let ws = temp.0.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join(".cargo"), "not a directory\n").unwrap();
+        let root = ProjectRoot::open(&ws).unwrap();
+        let files = held_config_files(&root, Path::new(""), &[]).unwrap();
+        assert!(files.is_empty());
+
+        std::fs::remove_file(ws.join(".cargo")).unwrap();
+        std::fs::create_dir_all(ws.join(".cargo")).unwrap();
+        std::fs::write(
+            ws.join(".cargo/config.toml"),
+            "include = [{ path = \"plain.toml/inner.toml\", optional = true }]\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join(".cargo/plain.toml"), "").unwrap();
+        let root = ProjectRoot::open(&ws).unwrap();
+        let files = held_config_files(&root, Path::new(""), &[]).unwrap();
+        assert_eq!(files.len(), 1);
     }
 
     /// Path dependencies outside the lock root are read roots, found

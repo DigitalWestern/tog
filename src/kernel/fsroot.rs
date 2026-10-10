@@ -966,6 +966,13 @@ impl ProjectRoot {
         self.open_input_with_missing(relative, false)
     }
 
+    /// Like `open_input_file`, for an optional input that cargo treats as
+    /// absent when a parent component is a regular file (a file named
+    /// `.cargo`, or an include under a file): ENOTDIR is a missing input.
+    pub(crate) fn open_optional_input_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+        self.open_input_with_missing(relative, true)
+    }
+
     /// Verify that an opened file belongs to this held directory. Recover
     /// its parent from the kernel name, verify the file's identity there,
     /// then walk held parents until this root's identity is reached.
