@@ -1847,7 +1847,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - run: |
+          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
+            | sh -s -- --no-modify-path --no-completions
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: |
           umask 077
           trap 'rm -f "$RUNNER_TEMP/attest.key"' EXIT
@@ -1864,7 +1867,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - run: |
+          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
+            | sh -s -- --no-modify-path --no-completions
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@v4
         with: { name: resolution-records, path: "${{ runner.temp }}/resolution-records" }
       - run: |
@@ -1879,7 +1885,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
+      - run: |
+          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
+            | sh -s -- --no-modify-path --no-completions
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: tog sync --frozen && tog run test
 ```
 
