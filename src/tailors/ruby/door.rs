@@ -50,6 +50,8 @@ pub(crate) struct RubyRun<'a> {
     /// Reach rubygems.org through the mirror. `false` is a run with no
     /// route at all: full network denial, for the helper's lock checks.
     pub online: bool,
+    /// The exact input generation this planner consumed, if any.
+    pub inputs: Option<&'a crate::comforter::join::Digests>,
     /// `BUNDLE_FROZEN`: false for an edit, which must write the lock.
     pub frozen: bool,
     /// Files written into the scratch directory before the run, relative
@@ -101,6 +103,7 @@ fn in_scratch(arg: &OsString, scratch: &Path) -> OsString {
 pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     let mut confined = ConfinedSpec::new("ruby", "bundler", WHY);
     confined.name = "bundler";
+    confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.store_reads = vec![run.ruby_obj.to_path_buf()];
     confined.exclude = EXCLUDE
         .iter()
@@ -220,6 +223,7 @@ mod tests {
             lock_root: Path::new("/work/project"),
             args: &["bundle", "lock"],
             online: true,
+            inputs: None,
             frozen: false,
             files: Vec::new(),
             publish: RubyPublish::Detached,

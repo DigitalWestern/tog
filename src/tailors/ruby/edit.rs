@@ -96,6 +96,7 @@ pub(crate) fn edit_manifest(
                 args: &args,
                 // Bundler's Gemfile editor needs no network; the lock runs do.
                 online: args[0] == "bundle",
+                inputs: None,
                 frozen: false,
                 files: Vec::new(),
                 publish: RubyPublish::Project {

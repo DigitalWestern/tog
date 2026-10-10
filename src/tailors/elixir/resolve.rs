@@ -73,6 +73,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             online: true,
+            inputs: None,
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -104,6 +105,7 @@ pub(crate) fn update(
             lock_root: project.path(),
             args,
             online: true,
+            inputs: None,
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -123,6 +125,7 @@ fn check_locked(
     door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     beam_obj: &Path,
+    basis: &crate::comforter::join::Digests,
 ) -> io::Result<()> {
     let out = run_mix(
         door,
@@ -131,6 +134,7 @@ fn check_locked(
             lock_root: project.path(),
             args: &["mix", "deps.get", "--check-locked"],
             online: true,
+            inputs: Some(basis),
             files: Vec::new(),
             publish: MixPublish::Detached,
         },
@@ -152,6 +156,7 @@ fn parse_lock(
     project: &ProjectRoot,
     beam_obj: &Path,
     lock: &str,
+    basis: &crate::comforter::join::Digests,
 ) -> io::Result<Vec<HexDep>> {
     let helper = format!("{SCRATCH}/helper.exs");
     let lock_copy = format!("{SCRATCH}/mix.lock");
@@ -162,6 +167,7 @@ fn parse_lock(
             lock_root: project.path(),
             args: &["elixir", &helper, "lock", &lock_copy],
             online: false,
+            inputs: Some(basis),
             files: vec![
                 (PathBuf::from("helper.exs"), HELPER.as_bytes().to_vec()),
                 (PathBuf::from("mix.lock"), lock.as_bytes().to_vec()),
@@ -194,6 +200,9 @@ pub fn plan_elixir(
     beam_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(ElixirPlan, String, crate::comforter::join::Digests)> {
+    let observed = project.observing_inputs()?;
+    let project = &observed;
+    let basis = resolution_basis(project)?;
     if !project.is_input_file(Path::new("mix.exs")) {
         return Err(err("mix.exs not found"));
     }
@@ -207,7 +216,7 @@ pub fn plan_elixir(
     if unchanged {
         ui::trace("mix.exs and mix.lock unchanged since their last passing check");
     } else {
-        check_locked(door, project, beam_obj)?;
+        check_locked(door, project, beam_obj, &basis)?;
         // Recorded only when the inputs still hash the same after the
         // check, so the record names the bytes the check actually read.
         let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?;
@@ -217,7 +226,7 @@ pub fn plan_elixir(
             }
         }
     }
-    let mut deps = parse_lock(door, project, beam_obj, &lock)?;
+    let mut deps = parse_lock(door, project, beam_obj, &lock, &basis)?;
     deps.sort_by(|a, b| a.app.cmp(&b.app));
     let plan = ElixirPlan {
         // The toolchain this plan was made under is the selected one, so
@@ -232,7 +241,12 @@ pub fn plan_elixir(
     }
     // The resolution files this plan was built from, so the resolution
     // join binds a record to this generation of mix.exs and its lock.
-    let basis = resolution_basis(project)?;
+    project.verify_observed_inputs()?;
+    if resolution_basis(project)? != basis {
+        return Err(err(
+            "Elixir resolution inputs changed while planning; run `tog` again",
+        ));
+    }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
 }
 
@@ -267,6 +281,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             online: true,
+            inputs: None,
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, slot.clone())),
@@ -297,6 +312,22 @@ mod tests {
     use crate::kernel::testutil::TempDir;
     use crate::tailors::elixir::registry::REPO_HOST;
     use std::fs;
+
+    #[test]
+    fn basis_refuses_a_lock_or_manifest_replaced_after_consumption() {
+        let temp = TempDir::named("elixir-basis-race");
+        fs::write(temp.0.join("mix.exs"), "manifest A").unwrap();
+        fs::write(temp.0.join("mix.lock"), "lock A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("mix.lock"), "lock B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("mix.exs"), "manifest B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+    }
 
     /// A harness whose upstream answers repo.hex.pm from the recorded Hex
     /// rows, and whose proxy every door in this thread uses while it

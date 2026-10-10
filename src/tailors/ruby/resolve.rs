@@ -49,6 +49,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             online: true,
+            inputs: None,
             frozen: false,
             files: Vec::new(),
             publish: RubyPublish::Project {
@@ -67,6 +68,7 @@ pub(super) fn helper(
     project: &ProjectRoot,
     ruby_obj: &Path,
     mode: &str,
+    basis: Option<&crate::comforter::join::Digests>,
 ) -> io::Result<DelegateReport> {
     let helper = format!("{SCRATCH}/{HELPER_FILE}");
     let mut args = vec!["ruby", helper.as_str(), mode];
@@ -81,6 +83,7 @@ pub(super) fn helper(
             lock_root: project.path(),
             args: &args,
             online: false,
+            inputs: basis,
             frozen: true,
             files: vec![(PathBuf::from(HELPER_FILE), HELPER.as_bytes().to_vec())],
             publish: RubyPublish::Detached,
@@ -118,6 +121,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             online: true,
+            inputs: None,
             frozen: true,
             files: Vec::new(),
             publish: RubyPublish::Project {
@@ -151,6 +155,22 @@ mod tests {
     use crate::tailors::ruby::registry::{GEMS_HOST, INDEX_HOST};
     use sha2::{Digest as _, Sha256};
     use std::fs;
+
+    #[test]
+    fn basis_refuses_a_lock_or_manifest_replaced_after_consumption() {
+        let temp = TempDir::named("ruby-basis-race");
+        fs::write(temp.0.join("Gemfile"), "manifest A").unwrap();
+        fs::write(temp.0.join("Gemfile.lock"), "lock A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("Gemfile.lock"), "lock B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("Gemfile"), "manifest B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+    }
 
     /// A harness whose upstream answers from the recorded RubyGems rows,
     /// and whose proxy every door in this thread uses while it lives. The
@@ -279,8 +299,8 @@ mod tests {
         assert!(dir.join(".tog/resolution/ruby.json").is_file());
 
         let ((check, plan), recorded) = through_door(harness, DoorKind::Planner, |door| {
-            let check = helper(door, &held, &ruby_obj, "check").unwrap();
-            let plan = helper(door, &held, &ruby_obj, "plan").unwrap();
+            let check = helper(door, &held, &ruby_obj, "check", None).unwrap();
+            let plan = helper(door, &held, &ruby_obj, "plan", None).unwrap();
             assert_eq!(door.take_kept_ledgers().len(), 2);
             (check, plan)
         });
@@ -315,6 +335,7 @@ mod tests {
                         lock_root: &dir,
                         args: &args,
                         online: true,
+                        inputs: None,
                         frozen: false,
                         files: Vec::new(),
                         publish: RubyPublish::Project {

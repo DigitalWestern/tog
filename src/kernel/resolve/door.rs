@@ -25,7 +25,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::policy::{self, Policy};
 use crate::kernel::store::Store;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -139,6 +139,9 @@ pub struct ConfinedSpec<'a> {
     /// `--no-build` probe: `resolution-build`), recorded with the session's
     /// and carried in the receipt.
     pub facts: Vec<Fact>,
+    /// Digests a planner already consumed. The staged bytes must match
+    /// before project code runs, even if the live files change back later.
+    pub expected_inputs: BTreeMap<String, String>,
 }
 
 impl<'a> ConfinedSpec<'a> {
@@ -167,6 +170,7 @@ impl<'a> ConfinedSpec<'a> {
             permitted: Permitted::compiled(),
             policy: None,
             facts: Vec::new(),
+            expected_inputs: BTreeMap::new(),
         }
     }
 
@@ -311,6 +315,7 @@ pub(super) fn run(
             forbidden: &key_ids,
         },
     )?;
+    check_planning_inputs(&snapshot, &confined.expected_inputs)?;
     let ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
     if let Some(failure) = ran.session.facts.failure() {
@@ -362,6 +367,23 @@ pub(super) fn run(
         )?,
     }
     Ok(report(status, ran.outcome, Some(objects)))
+}
+
+/// Bind a detached planner's snapshot to the generation it already read.
+fn check_planning_inputs(
+    snapshot: &Snapshot,
+    expected: &BTreeMap<String, String>,
+) -> io::Result<()> {
+    for (relative, digest) in expected {
+        let path = snapshot.lock_root().real.join(relative);
+        if !matches!(snapshot.baseline(&path), Some(EntryState::File { sha256, .. }) if hex::encode(sha256) == *digest)
+        {
+            return Err(io::Error::other(format!(
+                "{relative} changed while planning; nothing was published; run `tog` again"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Step 1: refuse before anything is held or copied.
@@ -976,6 +998,32 @@ mod tests {
             project: project.canonicalize().unwrap(),
             _temp: temp,
         }
+    }
+
+    #[test]
+    fn planner_checks_the_staged_generation_even_if_live_inputs_change_back() {
+        let fx = fixture("planner-generation");
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let expected =
+            super::super::record::file_digests(&held, &[PathBuf::from("deps.lock")]).unwrap();
+        fs::write(fx.project.join("deps.lock"), "new generation").unwrap();
+        let snapshot = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        fs::write(fx.project.join("deps.lock"), OLD_LOCK).unwrap();
+        assert!(check_planning_inputs(&snapshot, &expected)
+            .unwrap_err()
+            .to_string()
+            .contains("changed while planning"));
+        assert!(check_planning_inputs(&snapshot, &BTreeMap::new()).is_ok());
     }
 
     /// Every file under `dir` with its bytes.

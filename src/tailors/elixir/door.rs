@@ -49,6 +49,8 @@ pub(crate) struct MixRun<'a> {
     /// Reach repo.hex.pm through the mirror. `false` is a run with no route
     /// at all and `HEX_OFFLINE=1`.
     pub online: bool,
+    /// The exact input generation this planner consumed, if any.
+    pub inputs: Option<&'a crate::comforter::join::Digests>,
     /// Files written into the scratch directory before the run, relative
     /// to it.
     pub files: Vec<(PathBuf, Vec<u8>)>,
@@ -100,6 +102,7 @@ fn in_scratch(arg: &OsString, scratch: &Path) -> OsString {
 /// otherwise.
 fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     let mut confined = ConfinedSpec::new("elixir", "mix", WHY);
+    confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.store_reads = vec![run.beam_obj.to_path_buf()];
     confined.exclude = EXCLUDE
         .iter()
@@ -204,6 +207,7 @@ mod tests {
             lock_root: Path::new("/work/project"),
             args: &["mix", "deps.get"],
             online,
+            inputs: None,
             files: Vec::new(),
             publish: MixPublish::Detached,
         }
