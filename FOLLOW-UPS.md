@@ -37,6 +37,7 @@ None open.
 
 - **#655: hand-hashed Python adoption.** Test the documented conversion to a compiled lock and signed receipt, then consider an explicit adoption command.
 - **#656: harness HOME containment.** Add alternate-spelling coverage and define physical containment with the existing offline exceptions in the next shared-harness change.
+- **#657: native_libs probe target directory.** Give the Rust probe build an explicit `--target-dir` so an inherited `CARGO_TARGET_DIR` cannot hide its output, and list `TOG_STORE` in the local e2e recipe.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
