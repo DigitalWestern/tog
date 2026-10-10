@@ -272,11 +272,11 @@ fn writes_closures(command: &cli::Command) -> bool {
 /// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
 /// and `--strict`; the parser has already refused them for a verb that
 /// never syncs. `--frozen` is handed to the verbs that skip lock writes.
-/// `--strict` is recorded once here, before any verb runs, and every policy
-/// load in the process reads it, so no verb can load a policy without it.
+/// `--strict` is held for this dispatch on the creating thread. Policy loads
+/// here snapshot it, while a nested dispatch holds and restores its own flag.
 pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> {
     use cli::Command::*;
-    crate::kernel::policy::request_strict(sync.strict);
+    let _strict = crate::kernel::policy::request_strict(sync.strict);
     install_tailor_tables(&command);
     // Maintenance commands need no host-platform validation here: GC must
     // stay usable on a copied store from a host that cannot realize its

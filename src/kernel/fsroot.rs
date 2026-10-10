@@ -38,6 +38,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 mod held;
+mod observed;
+mod publish;
 mod rename_in;
 use held::HeldEntry;
 pub(crate) use held::{held_root_for, start_in};
@@ -77,6 +79,7 @@ pub struct ProjectRoot {
     /// The files outside the project this root has read, shared with every
     /// root derived from it, so one command reads each once (#501).
     external: std::sync::Arc<crate::kernel::external_input::ExternalInputs>,
+    observed: Option<std::sync::Arc<observed::Inputs>>,
 }
 
 /// The held directory, for a caller that must issue a descriptor-relative
@@ -93,6 +96,26 @@ impl ProjectRoot {
     /// component at a time with O_NOFOLLOW, so an ancestor swapped for a
     /// symlink after canonicalization is refused rather than followed.
     pub fn open(project_dir: &Path) -> io::Result<Self> {
+        // An ordinary non-directory request is absent from detection. Decide
+        // this before the no-follow walk. A later walk refusal must never be
+        // reinterpreted by looking up its now-mutable pathname again.
+        if !fs::metadata(project_dir)
+            .map_err(|error| {
+                crate::kernel::error::context(
+                    error,
+                    format_args!("open project {}", project_dir.display()),
+                )
+            })?
+            .is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!(
+                    "open project {}: not a real directory",
+                    project_dir.display()
+                ),
+            ));
+        }
         let path = project_dir.canonicalize().map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -106,6 +129,7 @@ impl ProjectRoot {
             path,
             _held: Some(held),
             external: Default::default(),
+            observed: None,
         })
     }
 
@@ -126,6 +150,7 @@ impl ProjectRoot {
             dir,
             path,
             external: Default::default(),
+            observed: None,
         }))
     }
 
@@ -602,6 +627,7 @@ impl ProjectRoot {
             path: self.path.clone(),
             _held: held,
             external: self.external.clone(),
+            observed: self.observed.clone(),
         })
     }
 
@@ -661,10 +687,10 @@ impl ProjectRoot {
     pub fn check_still_named(&self) -> io::Result<()> {
         let held = fd_stat(self.dir.as_raw_fd())?;
         let moved = |detail: String| {
-            io::Error::other(format!(
-                "{}: {detail}; run 'tog' again",
-                self.path.display()
-            ))
+            crate::kernel::error::refused(
+                io::ErrorKind::Other,
+                format!("{}: {detail}; run 'tog' again", self.path.display()),
+            )
         };
         // Only the identity is compared, so the directory is not opened
         // for reading again: a held ancestor that can be searched but not
@@ -698,6 +724,7 @@ impl ProjectRoot {
     /// absolute, since an absolute path would ignore the descriptor.
     pub fn read_input(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
         let Some(mut file) = self.open_input(relative)? else {
+            self.observe_input(relative, None)?;
             return Ok(None);
         };
         let mut bytes = Vec::new();
@@ -707,6 +734,7 @@ impl ProjectRoot {
                 format!("read {}: {error}", self.path.join(relative).display()),
             )
         })?;
+        self.observe_input(relative, Some(&bytes))?;
         Ok(Some(bytes))
     }
 
@@ -750,7 +778,15 @@ impl ProjectRoot {
     /// `input_entry(relative) == Entry::Regular`, with an unreadable
     /// parent read as absent, as `Path::is_file` reads it.
     pub fn is_input_file(&self, relative: &Path) -> bool {
-        matches!(self.input_entry(relative), Ok(Entry::Regular))
+        let regular = matches!(self.input_entry(relative), Ok(Entry::Regular));
+        if self.observed.is_some()
+            && (regular || matches!(self.input_entry(relative), Ok(Entry::Absent)))
+        {
+            // A boolean caller may ignore the read error. The observer
+            // remembers conflicts and verification still refuses them.
+            let _ = self.read_input(relative);
+        }
+        regular
     }
 
     /// `input_entry(relative) == Entry::Directory`, as `Path::is_dir`.
@@ -804,6 +840,7 @@ impl ProjectRoot {
                     path: display,
                     _held: Some(held),
                     external: self.external.clone(),
+                    observed: None,
                 }))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -834,6 +871,7 @@ impl ProjectRoot {
                     path,
                     _held: Some(held),
                     external: self.external.clone(),
+                    observed: None,
                 }))
             }
             Err(error)
@@ -903,6 +941,7 @@ impl ProjectRoot {
             dir,
             path: path.to_path_buf(),
             external: self.external.clone(),
+            observed: None,
         }))
     }
 
@@ -1039,129 +1078,6 @@ impl ProjectRoot {
         temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
     ) -> io::Result<()> {
         self.publish_mode(relative, &mut &bytes[..], None, false, temp_name)
-    }
-
-    /// `replace_link` lets the rename replace a symlink at the destination
-    /// (the link itself, never what it names), as `rename_in` does. The
-    /// contents are streamed from `source` into the temporary, so a large
-    /// file is never held in memory whole.
-    fn publish_mode(
-        &self,
-        relative: &Path,
-        source: &mut dyn io::Read,
-        mode: Option<libc::mode_t>,
-        replace_link: bool,
-        temp_name: &mut dyn FnMut(&[u8], usize) -> io::Result<Vec<u8>>,
-    ) -> io::Result<()> {
-        let (parents, name) = split_relative(relative)?;
-        let mut display = self.path.clone();
-        let held = self.open_creating(&parents, &mut display)?;
-        display.push(name);
-        let parent_fd = held
-            .as_ref()
-            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
-        match stat_at(parent_fd, name.as_bytes()) {
-            Ok(stat) => match stat.st_mode & libc::S_IFMT {
-                libc::S_IFLNK if replace_link => {}
-                libc::S_IFLNK => {
-                    return Err(refusal(format!(
-                        "{} is a symlink; refusing to replace it",
-                        display.display()
-                    )))
-                }
-                libc::S_IFDIR => {
-                    return Err(refusal(format!(
-                        "{} is a directory; refusing to replace it",
-                        display.display()
-                    )))
-                }
-                libc::S_IFREG => {}
-                _ => {
-                    return Err(refusal(format!(
-                        "{} is not a regular file; refusing to replace it",
-                        display.display()
-                    )))
-                }
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let (temp, mut file) = {
-            let mut last = Vec::new();
-            let mut opened = None;
-            for attempt in 0..TEMP_ATTEMPTS {
-                let candidate = temp_name(name.as_bytes(), attempt)?;
-                match open_file_at(
-                    parent_fd,
-                    &candidate,
-                    libc::O_WRONLY
-                        | libc::O_CREAT
-                        | libc::O_EXCL
-                        | libc::O_NOFOLLOW
-                        | libc::O_CLOEXEC,
-                    0o644,
-                ) {
-                    Ok(file) => {
-                        opened = Some((candidate, file));
-                        break;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                        last = candidate;
-                    }
-                    Err(error) => {
-                        return Err(io::Error::new(
-                            error.kind(),
-                            format!("create temporary for {}: {error}", display.display()),
-                        ))
-                    }
-                }
-            }
-            match opened {
-                Some(opened) => opened,
-                None => {
-                    return Err(refusal(format!(
-                        "every temporary name for {} is occupied (last tried {:?}); \
-                         remove stale .tog-tmp entries and retry",
-                        display.display(),
-                        OsStr::from_bytes(&last)
-                    )))
-                }
-            }
-        };
-        let created = fd_stat(file.as_raw_fd())?;
-        let mut renamed = false;
-        // `file` stays open through the identity checks below so the inode
-        // it names cannot be recycled under them.
-        let result = (|| {
-            if let Some(mode) = mode {
-                // SAFETY: the descriptor is owned by `file` for this call.
-                if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-            io::copy(source, &mut file)?;
-            file.sync_all()?;
-            let current = stat_at(parent_fd, &temp)?;
-            if !same_inode(&current, &created) {
-                return Err(refusal(format!(
-                    "temporary for {} was replaced while it was being written",
-                    display.display()
-                )));
-            }
-            rename_at(parent_fd, &temp, name.as_bytes()).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("publish {}: {error}", display.display()),
-                )
-            })?;
-            renamed = true;
-            fsync_directory(parent_fd)
-        })();
-        if result.is_err() && !renamed {
-            let _ = unlink_if_same(parent_fd, &temp, &created, 0);
-        }
-        drop(file);
-        result
     }
 }
 
@@ -1698,6 +1614,149 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_stream_preserves_the_destination_and_removes_its_partial_temporary() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        struct FailingReader {
+            temporary: PathBuf,
+            emitted: usize,
+        }
+        impl io::Read for FailingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if buffer.is_empty() {
+                    return Ok(0);
+                }
+                if self.emitted == 7 {
+                    assert_eq!(fs::read(&self.temporary).unwrap(), b"partial");
+                    return Err(io::Error::other("source read failed"));
+                }
+                let size = buffer.len().min(7 - self.emitted);
+                buffer[..size].copy_from_slice(&b"partial"[self.emitted..self.emitted + size]);
+                self.emitted += size;
+                Ok(size)
+            }
+        }
+
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        fs::create_dir(dir.join(".tog")).unwrap();
+        let victim = temp.0.join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        for name in ["regular", "link", "absent"] {
+            let destination = dir.join(".tog").join(name);
+            match name {
+                "regular" => {
+                    fs::write(&destination, b"old").unwrap();
+                    fs::set_permissions(&destination, fs::Permissions::from_mode(0o740)).unwrap();
+                }
+                "link" => symlink(&victim, &destination).unwrap(),
+                _ => {}
+            }
+            let temporary = dir.join(".tog").join(OsStr::from_bytes(
+                &fixed_temp_name(name.as_bytes(), 0).unwrap(),
+            ));
+            let error = root
+                .publish_mode(
+                    &Path::new(".tog").join(name),
+                    &mut FailingReader {
+                        temporary,
+                        emitted: 0,
+                    },
+                    Some(0o750),
+                    true,
+                    &mut fixed_temp_name,
+                )
+                .unwrap_err();
+            assert_eq!(error.to_string(), "source read failed");
+            match name {
+                "regular" => {
+                    assert_eq!(fs::read(&destination).unwrap(), b"old");
+                    assert_eq!(
+                        destination.metadata().unwrap().permissions().mode() & 0o777,
+                        0o740
+                    );
+                }
+                "link" => assert_eq!(fs::read_link(&destination).unwrap(), victim),
+                _ => assert!(!destination.exists()),
+            }
+            assert!(!entries(&dir.join(".tog"))
+                .iter()
+                .any(|name| name.contains(".tog-tmp")));
+            assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        }
+    }
+
+    #[test]
+    fn publication_streams_generated_bytes_with_bounded_reads_and_write_lag() {
+        struct GeneratedReader {
+            emitted: usize,
+            total: usize,
+            temporary: PathBuf,
+            destination: PathBuf,
+        }
+        impl io::Read for GeneratedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                const MAX_BUFFER: usize = 64 << 10;
+                assert!(
+                    buffer.len() <= MAX_BUFFER,
+                    "unbounded read: {}",
+                    buffer.len()
+                );
+                assert_eq!(fs::read(&self.destination).unwrap(), b"old");
+                let written = self.temporary.metadata()?.len() as usize;
+                assert!(
+                    self.emitted.saturating_sub(written) <= MAX_BUFFER,
+                    "source is being buffered instead of streamed to the temporary"
+                );
+                let size = buffer.len().min(self.total - self.emitted);
+                for (offset, byte) in buffer[..size].iter_mut().enumerate() {
+                    *byte = ((self.emitted + offset) % 251) as u8;
+                }
+                self.emitted += size;
+                Ok(size)
+            }
+        }
+
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let destination = dir.join("app");
+        fs::write(&destination, b"old").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let total = (4 << 20) + 7;
+        let mut source = GeneratedReader {
+            emitted: 0,
+            total,
+            temporary: dir.join(OsStr::from_bytes(&fixed_temp_name(b"app", 0).unwrap())),
+            destination: destination.clone(),
+        };
+        root.publish_mode(
+            Path::new("app"),
+            &mut source,
+            None,
+            false,
+            &mut fixed_temp_name,
+        )
+        .unwrap();
+        assert_eq!(source.emitted, total);
+        let mut file = fs::File::open(&destination).unwrap();
+        let mut buffer = [0; 8192];
+        let mut checked = 0;
+        loop {
+            let size = io::Read::read(&mut file, &mut buffer).unwrap();
+            if size == 0 {
+                break;
+            }
+            for (offset, byte) in buffer[..size].iter().enumerate() {
+                assert_eq!(*byte, ((checked + offset) % 251) as u8);
+            }
+            checked += size;
+        }
+        assert_eq!(checked, total);
+        assert_eq!(entries(&dir), vec!["app"]);
+    }
+
+    #[test]
     fn remove_file_deletes_a_regular_file_and_tolerates_an_absent_one() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
@@ -1901,6 +1960,36 @@ mod tests {
         assert_eq!(listed, Some(vec!["inner".into(), "package.json".into()]));
         assert_eq!(entry, Entry::Regular);
         assert_eq!(fs::read(gate.join("pkg/inner/new/out.txt")).unwrap(), b"y");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_search_only_directory_cannot_be_listed_but_its_known_file_can_be_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid takes no arguments and only reads process state.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skip permission enforcement: root bypasses directory mode bits");
+            return;
+        }
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let gate = dir.join("gate");
+        fs::create_dir(&gate).unwrap();
+        fs::write(gate.join("known"), b"readable").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o111)).unwrap();
+        let os_listing = fs::read_dir(&gate);
+        let known = root.read_file(Path::new("gate/known"));
+        let held = root.subdir(Path::new("gate"));
+        let listing = root.read_dir(Path::new("gate"));
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            os_listing.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(known.unwrap().as_deref(), Some(&b"readable"[..]));
+        assert_eq!(held.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(listing.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     /// The walk from `/` holds ancestors without reading them, but never
@@ -2279,6 +2368,8 @@ mod tests {
         let file = temp.0.join("file");
         fs::write(&file, b"x").unwrap();
         let error = ProjectRoot::open(&file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(crate::kernel::error::class_of(&error), None);
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -2314,6 +2405,10 @@ mod tests {
         fs::write(dir.join("extra.json"), b"impostor").unwrap();
 
         let error = root.check_still_named().unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         assert!(
             error.to_string().contains("moved or replaced during sync"),
             "{error}"
@@ -2486,6 +2581,10 @@ mod tests {
         fs::rename(&parent, &real).unwrap();
         symlink(&real, &parent).unwrap();
         let error = root.check_still_named().unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         assert!(error.to_string().contains("moved"), "{error}");
     }
 

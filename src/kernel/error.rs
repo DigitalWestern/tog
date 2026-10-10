@@ -107,20 +107,62 @@ pub fn class_of(error: &io::Error) -> Option<Class> {
     {
         return Some(classified.class);
     }
+    if let Some(class) = inner(error).and_then(class_of) {
+        return Some(class);
+    }
     if crate::kernel::store::refusal_fix(error).is_some() {
         return Some(Class::Refused);
     }
     (error.kind() == io::ErrorKind::Unsupported).then_some(Class::Unsupported)
 }
 
+/// An error with added words and its original, owned failure payload.
+#[derive(Debug)]
+struct Contextual {
+    message: String,
+    original: io::Error,
+}
+
+impl fmt::Display for Contextual {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Contextual {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.original)
+    }
+}
+
+/// The retained error inside our context wrapper or another `io::Error`.
+/// Follow owned typed errors only, never parse messages to recover a class.
+pub(crate) fn inner(error: &io::Error) -> Option<&io::Error> {
+    let payload = error.get_ref()?;
+    payload
+        .downcast_ref::<Contextual>()
+        .map(|context| &context.original)
+        .or_else(|| payload.downcast_ref::<io::Error>())
+}
+
 /// `error` with `what` in front of its message (`what: message`), keeping
-/// its kind and its class.
+/// its kind, class and original payload, including recovery and interruption.
 pub fn context(error: io::Error, what: impl fmt::Display) -> io::Error {
     let message = format!("{what}: {error}");
-    match class_of(&error) {
-        Some(class) => new(class, error.kind(), message),
-        None => io::Error::new(error.kind(), message),
-    }
+    describe(error, message)
+}
+
+/// Add a complete diagnostic while retaining the owned original error.
+/// For callers with a recovery suffix or multiple reasons whose existing
+/// message order must remain intact.
+pub(crate) fn describe(error: io::Error, message: String) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        Contextual {
+            message,
+            original: error,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -145,6 +187,55 @@ mod tests {
         assert_eq!(class_of(&wrapped), Some(Class::Stale));
         let plain = context(io::Error::other("boom"), "sync");
         assert_eq!(class_of(&plain), None);
+    }
+
+    #[test]
+    fn retained_io_errors_keep_their_class_through_multiple_contexts() {
+        let nested = io::Error::other(refused(io::ErrorKind::InvalidData, "denied"));
+        let wrapped = context(context(nested, "tool"), "sync");
+        assert_eq!(class_of(&wrapped), Some(Class::Refused));
+        assert_eq!(wrapped.to_string(), "sync: tool: denied");
+        let unsupported = context(io::Error::new(io::ErrorKind::Unsupported, "absent"), "tool");
+        assert_eq!(class_of(&unsupported), Some(Class::Unsupported));
+    }
+
+    #[test]
+    fn context_keeps_the_exact_store_recovery_command() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let path = temp.0.join("old store");
+        std::fs::create_dir_all(path.join("objects")).unwrap();
+        let original = crate::kernel::store::Store::open_at(&path).unwrap_err();
+        let fix = crate::kernel::store::refusal_fix(&original)
+            .unwrap()
+            .to_owned();
+        assert!(fix.contains("old store"), "{fix}");
+        let nested = io::Error::new(original.kind(), original);
+        let wrapped = context(context(nested, "tool"), "sync");
+        assert_eq!(class_of(&wrapped), Some(Class::Refused));
+        assert_eq!(
+            crate::kernel::store::refusal_fix(&wrapped),
+            Some(fix.as_str())
+        );
+        assert!(std::error::Error::source(wrapped.get_ref().unwrap()).is_some());
+    }
+
+    #[test]
+    fn context_keeps_the_supervised_signal_and_child_status() {
+        use std::os::unix::process::ExitStatusExt;
+        let original = io::Error::new(
+            io::ErrorKind::Interrupted,
+            crate::kernel::supervise::Interrupted {
+                signal: libc::SIGTERM,
+                status: std::process::ExitStatus::from_raw(7 << 8),
+            },
+        );
+        let wrapped = context(context(original, "tool"), "sync");
+        assert_eq!(
+            crate::kernel::supervise::stop_signal(&wrapped),
+            Some(libc::SIGTERM)
+        );
+        let status = crate::kernel::supervise::child_status(Err(wrapped)).unwrap();
+        assert_eq!(status.code(), Some(7));
     }
 
     #[test]

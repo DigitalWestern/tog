@@ -616,6 +616,11 @@ mod host {
             skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
             return None;
         }
+        binary(test, "TOG_SANDBOX_TESTS")
+    }
+
+    /// Find the actual CLI without requiring a different isolation backend.
+    fn binary(test: &str, required: &str) -> Option<std::path::PathBuf> {
         let exe = std::env::current_exe().unwrap();
         let tog = exe
             .parent()
@@ -624,6 +629,10 @@ mod host {
         match tog {
             Some(tog) if tog.is_file() => Some(tog),
             _ => {
+                let reason = format!("no tog binary beside {} (run cargo test)", exe.display());
+                if matches!(std::env::var_os(required), Some(value) if !value.is_empty()) {
+                    panic!("required isolation test {test} unavailable: {reason}");
+                }
                 skip_or_panic(
                     test,
                     format!(
@@ -644,7 +653,17 @@ mod host {
         test: &str,
         activity: &crate::kernel::activity::StoreActivity,
     ) -> Option<std::path::PathBuf> {
-        let relay = relay(test)?;
+        if !matches!(
+            crate::kernel::platform::Platform::host(),
+            Ok(crate::kernel::platform::Platform::X86_64UnknownLinuxGnu)
+        ) {
+            if matches!(std::env::var_os("TOG_PODMAN_TESTS"), Some(value) if !value.is_empty()) {
+                panic!("required podman test {test} unavailable: unsupported platform");
+            }
+            eprintln!("skip {test}: unsupported platform");
+            return None;
+        }
+        let relay = binary(test, "TOG_PODMAN_TESTS")?;
         if let Err(error) = crate::kernel::resolve::container::preflight(activity) {
             let reason = format!("podman preflight failed: {error}");
             if matches!(std::env::var_os("TOG_PODMAN_TESTS"), Some(value) if !value.is_empty()) {

@@ -15,13 +15,20 @@ use std::path::{Path, PathBuf};
 /// The helper's file name in the run's scratch directory.
 const HELPER_FILE: &str = "helper.rb";
 
+/// Executable Gemfiles can load arbitrary project files. Bind all visible
+/// regular files until precise input discovery has a reviewed design.
+pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &OUTPUTS)
+}
+
 /// The Gemfile and Gemfile.lock, by digest: a closure's
 /// `resolution_basis`.
 pub(crate) fn resolution_basis(
     project: &ProjectRoot,
 ) -> io::Result<crate::comforter::join::Digests> {
-    let outputs: Vec<PathBuf> = OUTPUTS.iter().map(PathBuf::from).collect();
-    record::file_digests(project, &outputs)
+    let mut files: Vec<PathBuf> = OUTPUTS.iter().map(PathBuf::from).collect();
+    files.extend(resolution_inputs(project)?);
+    record::file_digests(project, &files)
 }
 
 /// `prepare`: Gemfile.lock, resolved by the store Bundler when there is
@@ -39,6 +46,7 @@ pub fn generate_lock(
         return Err(err("Gemfile not found"));
     }
     ui::note("no Gemfile.lock; resolving with the store bundler...");
+    let basis = resolution_basis(project)?;
     let args = ["bundle", "lock"];
     let spec =
         crate::tailors::record_spec(&super::tailor::Ruby, project, ruby_tool(selected)?, &args)?;
@@ -49,6 +57,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             online: true,
+            inputs: Some(&basis),
             frozen: false,
             files: Vec::new(),
             publish: RubyPublish::Project {
@@ -67,6 +76,7 @@ pub(super) fn helper(
     project: &ProjectRoot,
     ruby_obj: &Path,
     mode: &str,
+    basis: Option<&crate::comforter::join::Digests>,
 ) -> io::Result<DelegateReport> {
     let helper = format!("{SCRATCH}/{HELPER_FILE}");
     let mut args = vec!["ruby", helper.as_str(), mode];
@@ -81,6 +91,7 @@ pub(super) fn helper(
             lock_root: project.path(),
             args: &args,
             online: false,
+            inputs: basis,
             frozen: true,
             files: vec![(PathBuf::from(HELPER_FILE), HELPER.as_bytes().to_vec())],
             publish: RubyPublish::Detached,
@@ -105,6 +116,7 @@ pub fn attest_project(
         return Err(err("Gemfile not found"));
     }
     super::require_lock(project)?;
+    let basis = resolution_basis(project)?;
     let args = ["bundle", "lock"];
     let mut spec =
         crate::tailors::record_spec(&super::tailor::Ruby, project, ruby_tool(selected)?, &args)?;
@@ -118,6 +130,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             online: true,
+            inputs: Some(&basis),
             frozen: true,
             files: Vec::new(),
             publish: RubyPublish::Project {
@@ -151,6 +164,49 @@ mod tests {
     use crate::tailors::ruby::registry::{GEMS_HOST, INDEX_HOST};
     use sha2::{Digest as _, Sha256};
     use std::fs;
+
+    #[test]
+    fn basis_refuses_a_lock_or_manifest_replaced_after_consumption() {
+        let temp = TempDir::named("ruby-basis-race");
+        fs::write(temp.0.join("Gemfile"), "manifest A").unwrap();
+        fs::write(temp.0.join("Gemfile.lock"), "lock A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("Gemfile.lock"), "lock B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("Gemfile"), "manifest B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+    }
+
+    #[test]
+    fn an_included_manifest_change_or_new_file_invalidates_the_basis() {
+        let temp = TempDir::named("ruby-included-input");
+        fs::create_dir_all(temp.0.join("dependencies.rb").parent().unwrap()).unwrap();
+        fs::write(temp.0.join("Gemfile"), "manifest").unwrap();
+        fs::write(temp.0.join("Gemfile.lock"), "lock").unwrap();
+        fs::write(temp.0.join("dependencies.rb"), "included manifest A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let basis = resolution_basis(&held).unwrap();
+        assert!(basis.contains_key("dependencies.rb"));
+        fs::write(temp.0.join("dependencies.rb"), "included manifest B").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Ruby, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "ruby", &files, &basis).is_err()
+        );
+        let basis = resolution_basis(&held).unwrap();
+        fs::write(temp.0.join("new-data.txt"), "new input").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Ruby, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "ruby", &files, &basis).is_err()
+        );
+    }
 
     /// A harness whose upstream answers from the recorded RubyGems rows,
     /// and whose proxy every door in this thread uses while it lives. The
@@ -244,11 +300,51 @@ mod tests {
     #[test]
     #[ignore = "realizes the store Ruby over the network"]
     fn bundler_resolves_through_the_rubygems_mirror() {
+        let _env = policy::test_env_lock();
         let _serial = policy::attribution_test_lock();
         let label = "bundler_resolves_through_the_rubygems_mirror";
         let Some(harness) = ruby_harness(label) else {
             return;
         };
+        // Fetching a gem before /info supplied its checksum must never
+        // silently bypass the weak-integrity permission.
+        for denied in [false, true] {
+            let policy = crate::kernel::policy::Policy {
+                deny: if denied {
+                    std::collections::BTreeSet::from([policy::WEAK_INTEGRITY.into()])
+                } else {
+                    Default::default()
+                },
+                ..Default::default()
+            };
+            let mut config = harness.config(policy, crate::kernel::resolve::session::Mode::Online);
+            config.ecosystem = "ruby".into();
+            config.routes = vec![super::super::registry::route().unwrap()];
+            config.permitted = crate::kernel::resolve::routes::Permitted::compiled();
+            let (session, address) = harness.open(config);
+            let path = url::Url::parse(&format!(
+                "{}gems/rake-13.4.2.gem",
+                address.route_base("rubygems")
+            ))
+            .unwrap();
+            let reply = crate::kernel::resolve::testing::get(&address, path.path(), "");
+            assert_eq!(
+                reply.status,
+                if denied { 403 } else { 200 },
+                "{}",
+                reply.text()
+            );
+            let report = session.finish();
+            assert_eq!(
+                report
+                    .facts
+                    .exceptions
+                    .iter()
+                    .any(|fact| fact.kind == policy::WEAK_INTEGRITY),
+                !denied
+            );
+            assert_eq!(report.facts.failure().is_some(), denied);
+        }
         let selected = super::super::shipped_selection().unwrap();
         let ruby_obj = super::super::realize_runtime(
             &harness.store,
@@ -278,9 +374,52 @@ mod tests {
         assert!(lock.contains("rake (13.4.2)"), "{lock}");
         assert!(dir.join(".tog/resolution/ruby.json").is_file());
 
+        // Compare against Bundler talking directly to the recorded registry,
+        // through an opaque TLS forwarder rather than the tog mirror.
+        let direct = temp.0.join("direct");
+        let direct_home = temp.0.join("direct-home");
+        fs::create_dir_all(&direct).unwrap();
+        fs::create_dir_all(&direct_home).unwrap();
+        fs::copy(dir.join("Gemfile"), direct.join("Gemfile")).unwrap();
+        let ca = temp.0.join("fixture-ca.pem");
+        fs::write(&ca, harness.upstream_ca_pem()).unwrap();
+        let forwarder =
+            crate::kernel::resolve::testing::blind_forwarder(harness.upstream.address());
+        let direct_result = std::process::Command::new(ruby_obj.join("bin/bundle"))
+            .args(["lock"])
+            .current_dir(&direct)
+            .env_clear()
+            .envs(super::super::forced_env(
+                "Gemfile",
+                &direct_home.join("gems"),
+            ))
+            .env("BUNDLE_FROZEN", "false")
+            .env(
+                super::super::registry::MIRROR_VARIABLE,
+                "https://index.rubygems.org/",
+            )
+            .env("https_proxy", format!("http://{forwarder}"))
+            .env("SSL_CERT_FILE", &ca)
+            .env("HOME", &direct_home)
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            direct_result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&direct_result.stderr)
+        );
+        assert_eq!(
+            fs::read(direct.join("Gemfile.lock")).unwrap(),
+            lock.as_bytes()
+        );
+
         let ((check, plan), recorded) = through_door(harness, DoorKind::Planner, |door| {
-            let check = helper(door, &held, &ruby_obj, "check").unwrap();
-            let plan = helper(door, &held, &ruby_obj, "plan").unwrap();
+            let check = helper(door, &held, &ruby_obj, "check", None).unwrap();
+            let plan = helper(door, &held, &ruby_obj, "plan", None).unwrap();
             assert_eq!(door.take_kept_ledgers().len(), 2);
             (check, plan)
         });
@@ -315,6 +454,7 @@ mod tests {
                         lock_root: &dir,
                         args: &args,
                         online: true,
+                        inputs: None,
                         frozen: false,
                         files: Vec::new(),
                         publish: RubyPublish::Project {
@@ -360,6 +500,24 @@ mod tests {
         let why = drifted.unwrap_err().to_string();
         assert!(why.contains("would change Gemfile.lock"), "{why}");
         assert_eq!(fs::read(dir.join("Gemfile.lock")).unwrap(), before);
+        fs::write(
+            dir.join("Gemfile"),
+            "source \"https://private.example.invalid\"\ngem \"rake\", \"13.4.2\"\n",
+        )
+        .unwrap();
+        fs::remove_file(dir.join("Gemfile.lock")).unwrap();
+        let (refused, _) = through_door(harness, DoorKind::MissingLock, |door| {
+            generate_lock(door, &held, &ruby_obj, &selected)
+        });
+        let why = refused.unwrap_err().to_string();
+        assert!(
+            why.contains("refused") || why.contains("not permitted"),
+            "{why}"
+        );
+        assert!(
+            !dir.join("Gemfile.lock").exists(),
+            "refused source published a lock"
+        );
         done();
     }
 }
