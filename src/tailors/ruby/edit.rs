@@ -87,7 +87,7 @@ pub(crate) fn edit_manifest(
             &super::tailor::Ruby,
             &root,
             super::ruby_tool(&selected)?,
-            &args,
+            if args[0] == "ruby" { &args[1..] } else { &args },
         )?;
         run_ruby_checked(
             door,

@@ -53,7 +53,7 @@ pub fn generate_lock(
         &super::tailor::Elixir,
         project,
         elixir_tool(selected)?,
-        &args,
+        &args[1..],
     )?;
     run_mix_checked(
         door,
@@ -86,7 +86,7 @@ pub(crate) fn update(
         &super::tailor::Elixir,
         project,
         elixir_tool(selected)?,
-        args,
+        &args[1..],
     )?;
     run_mix_checked(
         door,
@@ -270,7 +270,7 @@ pub fn attest_project(
         &super::tailor::Elixir,
         project,
         elixir_tool(selected)?,
-        &args,
+        &args[1..],
     )?;
     spec.require_unchanged = true;
     spec.publish_receipt = false;
@@ -585,7 +585,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             receipt["command"],
-            serde_json::json!(["mix", "mix", "deps.update", "jason"])
+            serde_json::json!(["mix", "deps.update", "jason"])
         );
 
         fs::write(
