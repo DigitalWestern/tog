@@ -109,7 +109,10 @@ impl ProjectRoot {
         {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                format!("open project {}: not a directory", project_dir.display()),
+                format!(
+                    "open project {}: not a real directory",
+                    project_dir.display()
+                ),
             ));
         }
         let path = project_dir.canonicalize().map_err(|error| {
@@ -2253,6 +2256,8 @@ mod tests {
         let file = temp.0.join("file");
         fs::write(&file, b"x").unwrap();
         let error = ProjectRoot::open(&file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(crate::kernel::error::class_of(&error), None);
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
