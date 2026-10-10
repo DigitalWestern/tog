@@ -130,7 +130,7 @@ the program's status through. Which files tog reads per ecosystem:
   | 3 | refused by rule: a policy denial, a store tog will not open, a project path swapped under it, `pip install` inside `tog run` | change the policy or the input; rerunning changes nothing |
   | 4 | stale: a committed lock no longer matches its inputs, or is missing where `--frozen` or a strict policy never writes one | update the lock and commit it |
   | 5 | unsupported here: a pin no catalog has, a runtime too old for the file, no isolation on this machine | change the pin or the machine |
-  | 6 | network: offline, DNS, a refused or reset connection, a timeout, a download that broke off, or a server status a retry can change (408, 429, 5xx) | run it again; a 404 or a 403 is an answer and exits 1 |
+  | 6 | network: offline, DNS, a refused or reset connection, a timeout, a download that broke off, or a server status a retry can change (408, 429, 5xx) | run it again; HTTP 403/404, invalid request or proxy settings, and TLS certificate/protocol failures exit 1 |
   | 128 + n | stopped by signal n (130 for Ctrl-C) | |
 
   Under `--json` the failure object carries the same class as a key:

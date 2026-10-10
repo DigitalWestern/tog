@@ -393,7 +393,9 @@ fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
     let message = format!("{verb} {}: {}", shown_url(url), network_cause(&error));
     match error {
         ureq::Error::Status(code, _) => io::Error::other(StatusFailure { code, message }),
-        ureq::Error::Transport(transport) if retryable_transport(transport.kind()) => {
+        ureq::Error::Transport(transport)
+            if retryable_transport(transport.kind()) && !permanent_tls_cause(&transport) =>
+        {
             error::new(error::Class::Network, io::ErrorKind::Other, message)
         }
         // Invalid URLs, schemes, proxy credentials, HTTPS-only refusals,
@@ -410,6 +412,27 @@ fn retryable_transport(kind: ureq::ErrorKind) -> bool {
             | ureq::ErrorKind::Io
             | ureq::ErrorKind::ProxyConnect
     )
+}
+
+/// ureq uses connection/IO kinds for both socket failures and TLS errors.
+/// Keep certificate, protocol and TLS-name failures distinct using their
+/// retained types. A reset or timeout without a TLS cause stays retryable.
+fn permanent_tls_cause(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    for _ in 0..32 {
+        let Some(error) = cause else { return false };
+        if error.is::<rustls::Error>() || error.is::<rustls::pki_types::InvalidDnsNameError>() {
+            return true;
+        }
+        // io::Error::source may skip its immediate payload. Inspect that
+        // payload explicitly before walking any further source chain.
+        cause = error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+            .map(|payload| payload as &(dyn std::error::Error + 'static))
+            .or_else(|| error.source());
+    }
+    false
 }
 
 /// A response body that broke off while it was read: a `Network` failure,
@@ -2493,6 +2516,28 @@ mod integrity_tests {
             ureq::ErrorKind::BadHeader,
         ] {
             assert!(!retryable_transport(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn tls_failures_are_permanent_but_socket_failures_remain_retryable() {
+        let tls = io::Error::new(
+            io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+        );
+        let error = network_error("fetch", "https://x/a", ureq::Error::from(tls));
+        assert_eq!(crate::kernel::error::class_of(&error), None, "{error}");
+        for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::TimedOut] {
+            let error = network_error(
+                "fetch",
+                "https://x/a",
+                ureq::Error::from(io::Error::from(kind)),
+            );
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Network),
+                "{error}"
+            );
         }
     }
 
