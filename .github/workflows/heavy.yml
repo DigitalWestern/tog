@@ -262,7 +262,12 @@ jobs:
           case "$SHARD" in
             node) files=$SHARD_NODE ;;
             rust) files=$SHARD_RUST ;;
-            python) files=$SHARD_PYTHON; extra=(--lib --bins) ;;
+            python)
+              files=$SHARD_PYTHON; extra=(--lib --bins)
+              # Store OTP needs Fedora's glibc. Its library door tests run
+              # below in the Fedora job with the integration suite.
+              skip=(--skip tailors::elixir::resolve::tests)
+              ;;
             other)
               files=
               named=" $SHARD_NODE $SHARD_RUST $SHARD_PYTHON "
@@ -435,9 +440,15 @@ jobs:
           exe=$(cargo test --locked --test elixir_e2e --no-run --message-format=json \
             | jq -r 'select(.executable != null and .target.name == "elixir_e2e") | .executable')
           test -x "$exe"
+          libexe=$(cargo test --locked --lib --no-run --message-format=json \
+            | jq -r 'select(.executable != null and (.target.kind | index("lib"))) | .executable')
+          test -x "$libexe"
           useradd --create-home tester
           scratch="$RUNNER_TEMP/tog-elixir"
           mkdir -p "$scratch"
           chown tester: "$scratch"
           runuser -u tester -- env HOME=/home/tester TMPDIR="$scratch" \
             TOG_SANDBOX_TESTS=required "$exe" --ignored --test-threads=1
+          runuser -u tester -- env HOME=/home/tester TMPDIR="$scratch" \
+            TOG_SANDBOX_TESTS=required "$libexe" tailors::elixir::resolve::tests \
+            --ignored --test-threads=2
