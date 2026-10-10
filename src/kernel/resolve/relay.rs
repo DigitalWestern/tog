@@ -318,6 +318,12 @@ mod linux {
     }
 
     fn relay(args: &RelayArgs, log: &RelayLog) -> io::Result<i32> {
+        if std::process::id() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the resolution relay requires PID 1 in a private process namespace",
+            ));
+        }
         // SAFETY: prctl with integer arguments.
         if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
             return Err(io::Error::last_os_error());
