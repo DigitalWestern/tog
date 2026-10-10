@@ -2176,6 +2176,29 @@ exit 37
         // no PID reuse can send the fault to an unrelated process.
         use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
         let name = fs::read_to_string(marker.0.join("container")).unwrap();
+        // The tool can write ready before Podman records OCI startup in its
+        // database. Killing the client in that interval leaves an initialized
+        // database row even though the container is executing. Wait for the
+        // engine's startup acknowledgement before injecting this later fault.
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            let output = child
+                .config
+                .command(&child.podman)
+                .unwrap()
+                .args(["inspect", "--format", "{{.State.Running}}", &name])
+                .output()
+                .unwrap();
+            if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
+                break;
+            }
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(
+                Instant::now() < deadline,
+                "Podman did not acknowledge tool startup"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let mut killed = false;
         for task in fs::read_dir(format!("/proc/{}/task", child.id())).unwrap() {
             let task = task.unwrap();
@@ -2233,13 +2256,16 @@ exit 37
             std::thread::sleep(Duration::from_millis(10));
         }
         let name = fs::read_to_string(marker.0.join("container")).unwrap();
-        let mut command = child.config.command(&child.podman).unwrap();
-        let output = command
-            .args(["inspect", "--format", "{{.State.Running}}", &name])
+        let output = child
+            .config
+            .command(&child.podman)
+            .unwrap()
+            .args(["inspect", "--format", "{{json .State}}", &name])
             .output()
             .unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        let state: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(state["Running"], true, "{state}");
         fs::write(marker.0.join("inspection-done"), "done").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
