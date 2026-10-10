@@ -96,3 +96,7 @@ None open.
   sessions (#57; everything but the `/proc` cases runs there), and the
   resolution proxy's Mach allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
   clears this.
+
+- **#637: configurable Ruby and Elixir manifest inputs.** Design narrower explicit declarations with conservative coverage as the default.
+- **#638: authenticated Hex cache.** Keep private homes until a data-only persistent cache has reviewed integrity and tenant boundaries.
+- **#639: resolution publication concurrency.** Add deterministic full planner-to-closure race tests for Ruby and Elixir.
