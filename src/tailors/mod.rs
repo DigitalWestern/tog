@@ -641,7 +641,7 @@ pub fn resolution_files(
 }
 
 /// The record a door run of `tailor` leaves in `project`: the tailor's
-/// resolution files, the process signing key (`None` writes it unsigned),
+/// resolution files, the operation's signing key (`None` writes it unsigned),
 /// and the tool with the arguments it ran with. `tog attest`'s check sets
 /// `require_unchanged` and clears `publish_receipt`.
 pub fn record_spec(

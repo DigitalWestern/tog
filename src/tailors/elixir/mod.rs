@@ -2510,7 +2510,6 @@ exit 0
         impl Drop for Reset {
             fn drop(&mut self) {
                 join::set_resolution_files_for_test(None);
-                join::set_policy_for_test(None);
             }
         }
         let _reset = Reset;
@@ -2541,13 +2540,13 @@ exit 0
         };
         for changed in [false, true] {
             let basis = resolve::resolution_basis(&held).unwrap();
-            join::set_policy_for_test(Some(if changed {
+            let _policy = policy::PolicyScope::install(if changed {
                 fs::write(dir.join("mix.lock"), "lock B").unwrap();
                 Policy::default()
             } else {
                 policy::parse_file(Path::new("test-policy"), "deny = ['unrecorded-resolution']")
                     .unwrap()
-            }));
+            });
             let mut attribution = policy::Attribution::open("elixir").unwrap();
             let error = project_elixir_env(
                 &activity,

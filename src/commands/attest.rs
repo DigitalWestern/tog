@@ -51,7 +51,7 @@ pub fn run(command: Command) -> io::Result<i32> {
     };
     let platform = Platform::host()?;
     let project = ProjectRoot::open(&context::project_dir())?;
-    policy::init_in(&project)?;
+    let _policy = policy::init_in(&project)?;
     match ledger {
         Some(LedgerTransfer::Export { ecosystem, file }) => {
             export_ledger(platform, &project, &ecosystem, &file)
@@ -116,7 +116,7 @@ fn attest(
     named: &[String],
     record_out: Option<&Path>,
 ) -> io::Result<()> {
-    crate::comforter::init_signing()?;
+    let _signing = crate::comforter::init_signing()?;
     if record_out.is_some() && crate::comforter::signing_key().is_none() {
         // The CI flow hands this file to a later sync, which attests only a
         // signed record: an unsigned one would be written, uploaded, and

@@ -167,7 +167,7 @@ pub(crate) struct UvRun<'a> {
     /// watch it. The probe is always captured; when it is the last run, an
     /// uncaptured operation shows what it printed.
     pub capture: bool,
-    /// `None` is the process policy (tests set one).
+    /// `None` is the policy in force (tests set one).
     pub policy: Option<Policy>,
 }
 

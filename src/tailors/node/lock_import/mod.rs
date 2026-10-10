@@ -774,7 +774,7 @@ fn check_links_inside_packages(
     Ok(())
 }
 
-/// `build_plan_recording` through the process policy.
+/// `build_plan_recording` through the policy in force.
 #[cfg(test)]
 fn build_plan(
     platform: Platform,

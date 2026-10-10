@@ -761,7 +761,7 @@ pub struct RecordSpec {
     pub command: Vec<String>,
     /// The tailor's resolution files, which the record's paths must be.
     pub files: ResolutionFiles,
-    /// The process signing key. `None` writes the record unsigned, which no
+    /// The operation's signing key. `None` writes the record unsigned, which no
     /// sync attests.
     pub key: Option<Arc<SigningKey>>,
     /// A lock check (`tog attest`): the run must leave every output

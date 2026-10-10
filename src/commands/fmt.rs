@@ -26,7 +26,7 @@ pub fn run(
     frozen: bool,
 ) -> io::Result<i32> {
     let cwd = project_dir();
-    policy::init(&cwd)?;
+    let _policy = policy::init(&cwd)?;
 
     // `--eco` is tog's own ecosystem selector, not something a script can
     // read: when it is given explicitly it dispatches to that ecosystem and

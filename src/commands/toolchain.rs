@@ -15,9 +15,7 @@ use std::io;
 
 pub fn run(platform: Platform, update: &ToolchainUpdate, no_sync: bool) -> io::Result<()> {
     // The dispatcher has already recorded `--strict`, and the sync loads
-    // the policy chain in its preflight. Nothing here reads
-    // `policy::strict()` first: an early read fixes the process policy
-    // before the chain's files are loaded, and it stays that way.
+    // the policy chain in its preflight and holds it while it runs.
     sync::run_in_mode(
         platform,
         false,

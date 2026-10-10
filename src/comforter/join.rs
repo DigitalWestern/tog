@@ -182,32 +182,6 @@ pub(crate) fn set_supplied_for_test(records: Vec<SuppliedRecord>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = records;
 }
 
-/// The process policy is set once per process, so a unit test that needs a
-/// trusting, strict, or denying policy at the closure writer sets one here,
-/// under `attribution_test_lock`.
-#[cfg(test)]
-static POLICY_FOR_TEST: Mutex<Option<Policy>> = Mutex::new(None);
-
-#[cfg(test)]
-pub(crate) fn set_policy_for_test(policy: Option<Policy>) {
-    *POLICY_FOR_TEST
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
-}
-
-#[cfg(test)]
-fn policy_for_test() -> Option<Policy> {
-    POLICY_FOR_TEST
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-}
-
-#[cfg(not(test))]
-fn policy_for_test() -> Option<Policy> {
-    None
-}
-
 /// The trusted keys a record's signature is checked against: the policy's
 /// effective `[signing]` set (the machine's, narrowed by project files).
 /// With no `[signing]` table nobody is trusted, so every signed record is
@@ -252,17 +226,14 @@ pub(crate) fn join_for_closure(
     };
     let basis = read_basis(object, ecosystem)?;
     let supplied = supplied_for(ecosystem);
-    let joined = match policy_for_test() {
-        Some(policy) => join(&policy, project, ecosystem, &supplied, &files, &basis)?,
-        None => join(
-            &policy::effective(),
-            project,
-            ecosystem,
-            &supplied,
-            &files,
-            &basis,
-        )?,
-    };
+    let joined = join(
+        &policy::effective(),
+        project,
+        ecosystem,
+        &supplied,
+        &files,
+        &basis,
+    )?;
     let Some(attested) = joined else {
         return Ok(());
     };
@@ -1275,6 +1246,8 @@ mod tests {
     /// Everything the closure writer's side of the join needs: the lookup,
     /// the policy, and the supplied records, reset when the test ends.
     struct Writer {
+        // Restore the enclosing policy before releasing the attribution lock.
+        _policy: policy::PolicyScope,
         _attribution: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -1284,9 +1257,9 @@ mod tests {
             set_resolution_files_for_test(Some(Arc::new(|ecosystem: &str, _: &ProjectRoot| {
                 Ok((ecosystem == ECO).then(files))
             })));
-            set_policy_for_test(Some(policy));
             set_supplied_for_test(supplied);
             Self {
+                _policy: policy::PolicyScope::install(policy),
                 _attribution: attribution,
             }
         }
@@ -1295,7 +1268,6 @@ mod tests {
     impl Drop for Writer {
         fn drop(&mut self) {
             set_resolution_files_for_test(None);
-            set_policy_for_test(None);
             set_supplied_for_test(Vec::new());
         }
     }

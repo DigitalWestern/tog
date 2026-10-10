@@ -673,7 +673,7 @@ fn x_request_is_ready(
 /// strict `x` judges the tool under the policy a strict sync would apply.
 pub fn run(ctx: &Context, request: Request) -> io::Result<i32> {
     let cwd = ctx.project_dir();
-    policy::init(&cwd)?;
+    let _policy = policy::init(&cwd)?;
     launch(ctx.platform, &cwd, request, &ctx.activity)
 }
 

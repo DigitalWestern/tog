@@ -684,7 +684,18 @@ Sync records recoverable verification gaps in each closure and continues;
 `.tog/policy.toml` denies named kinds (`install-script-failed`,
 `git-dependency`, ...). User and project policies are unioned; deny entries
 are only added. `TOG_STRICT=1` or `tog --strict` denies every
-exception. Object-affecting exceptions are written into store metadata and
+exception. Each operation loads the chain and holds it as a
+`policy::PolicyScope` while it runs. A nested sync loads its own settings.
+Scopes belong to their creating thread and cannot be moved or shared with
+other threads. Dropping a scope restores the enclosing scope on that thread,
+and a read outside every scope on that thread sees the default policy plus
+the requested strictness. Workers receive an explicit policy snapshot.
+An early read never pins the policy for a later operation. Each dispatch
+holds its own thread-bound `--strict` guard, so a later dispatch and nested
+dispatch can choose their own flag. This supports synchronous scopes.
+Interleaved tasks on one thread and automatic worker inheritance need
+explicit operation Context settings. Attribution still serializes owners
+through its process-global frame stack. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
@@ -692,7 +703,8 @@ closures already record against the policy chain plus an optional
 outdated closure, and touches neither the store nor the network.
 
 Closure records are signed. With `TOG_SIGNING_KEY` set, `sync`
-and the other closure writers load an Ed25519 key once at preflight and the one closure writer
+and the other closure writers load an Ed25519 key once at preflight, held for that
+operation only (`comforter::SigningScope`), and the one closure writer
 (`comforter::write_closure_inner`) signs every envelope it publishes over the
 canonical bytes of the whole record (`src/kernel/signing.rs`: the parsed
 value minus its top-level `signature`, serialized compact with keys in byte

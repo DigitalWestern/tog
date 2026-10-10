@@ -309,7 +309,7 @@ fn network_access_during_install_script_fails() {
     let platform = Platform::host().expect("host platform");
     if let Ok(dir) = std::env::var("TOG_NPM_STRICT_CHILD") {
         let _attribution = policy::Attribution::open("node").expect("test attribution");
-        policy::init(std::path::Path::new(&dir)).unwrap();
+        let _scope = policy::init(std::path::Path::new(&dir)).unwrap();
         let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
         let sri = std::env::var("TOG_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
@@ -382,7 +382,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
     if let Ok(dir) = std::env::var("TOG_NPM_CACHED_CHILD") {
-        policy::init(std::path::Path::new(&dir)).unwrap();
+        let _scope = policy::init(std::path::Path::new(&dir)).unwrap();
         let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
         let sri = std::env::var("TOG_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
@@ -407,7 +407,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     let activity = &store
         .activity(tog::kernel::activity::ActivityMode::Shared)
         .unwrap();
-    policy::init(dir).unwrap();
+    let _scope = policy::init(dir).unwrap();
     let plan = plan_for(&tarball, &sri);
     let mut attribution = policy::Attribution::open("node").expect("test attribution");
     let env =
