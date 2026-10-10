@@ -308,7 +308,7 @@ pub(super) fn run(
     // The signing key never enters the stage, under any name (a hard link
     // in the project is the key too).
     let key_ids = confine::signing_key_ids();
-    let snapshot = Snapshot::build(
+    let mut snapshot = Snapshot::build(
         store,
         activity,
         &SnapshotSpec {
@@ -324,6 +324,9 @@ pub(super) fn run(
             "project files changed while planning executable-manifest resolution; \
              nothing was published; run `tog` again",
         ));
+    }
+    if confined.complete_inputs {
+        snapshot.normalize_executable_inputs()?;
     }
     let ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
@@ -1062,6 +1065,55 @@ mod tests {
         )
         .unwrap();
         assert!(with_link.project_file_digests().is_err());
+    }
+
+    #[test]
+    fn executable_snapshot_canonicalizes_permissions_and_removes_empty_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("canonical-project");
+        fs::create_dir_all(fx.project.join("empty/nested")).unwrap();
+        fs::set_permissions(
+            fx.project.join("package.json"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let mut snapshot = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        snapshot.normalize_executable_inputs().unwrap();
+        let staged = &snapshot.lock_root().staged;
+        assert!(!staged.join("empty").exists());
+        assert_eq!(
+            fs::metadata(staged.join("package.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::metadata(staged).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(snapshot.diff().unwrap().is_empty());
+        assert!(fx.project.join("empty/nested").is_dir());
+        assert_eq!(
+            fs::metadata(fx.project.join("package.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 
     /// Every file under `dir` with its bytes.

@@ -1139,7 +1139,12 @@ including Ruby `eval_gemfile` inputs, umbrella app manifests and nested
 configuration. Editing one of these files requires a fresh resolution or
 `tog attest`, even if the lock still agrees. `.git`, `.tog`, Ruby's `.bundle`
 and `vendor/bundle`, and Elixir's `deps` and `_build` are excluded from that
-snapshot. Other project symlinks are refused because the receipt cannot
+snapshot. During these Ruby and Elixir checks, project files have mode 0644,
+directories have mode 0755, and empty directories are absent. These rules
+apply only to the private resolver view. The checkout keeps its permissions
+and empty directories. Manifests must select dependencies from file names
+and contents. Invoke project helper scripts through their interpreter, since
+the resolver view removes their executable bit. Other project symlinks are refused because the receipt cannot
 cover them safely. Keep resolution inputs as regular files inside the project.
 Hex uses a fresh private home for every run, so executable configuration
 cannot persist between projects. Registry responses are reused through the

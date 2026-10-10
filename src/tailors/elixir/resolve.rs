@@ -200,7 +200,7 @@ pub fn plan_elixir(
     let lock = read_mix_lock(project)?;
     let bind = |input: String, basis: &crate::comforter::join::Digests| {
         format!(
-            "{input}:{}",
+            "canonical-project-v1:{input}:{}",
             hex::encode(Sha256::digest(
                 serde_json::to_vec(basis).expect("string map")
             ))
@@ -470,7 +470,13 @@ mod tests {
         let temp = TempDir::named("elixir-mirror");
         let dir = temp.0.join("project");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("mix.exs"), manifest("{:jason, \"1.4.5\"}")).unwrap();
+        fs::write(
+            dir.join("mix.exs"),
+            manifest(
+                "(if File.dir?(\"feature\"), do: {:telemetry, \"1.4.2\"}, else: {:jason, \"1.4.5\"})",
+            ),
+        )
+        .unwrap();
         let dir = dir.canonicalize().unwrap();
         let held = ProjectRoot::open(&dir).unwrap();
 
@@ -567,6 +573,29 @@ mod tests {
         let (record, _) = attested.unwrap();
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(record.outputs.len(), 2, "{:?}", record.outputs);
+
+        // Empty directory presence and host permissions must never change
+        // executable-manifest semantics in the canonical project view.
+        fs::create_dir(dir.join("feature")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.join("mix.exs"), fs::Permissions::from_mode(0o700)).unwrap();
+        let (replanned, _) = through_door(harness, DoorKind::Planner, |door| {
+            plan_elixir(door, &held, &beam, &selected)
+        });
+        assert_eq!(replanned.unwrap().0.deps[0].package, "jason");
+        let (reattested, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &beam, &selected)
+        });
+        reattested.unwrap();
+        assert!(dir.join("feature").is_dir());
+        assert_eq!(
+            fs::metadata(dir.join("mix.exs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
 
         let (updated, recorded) = through_door(harness, DoorKind::Edit, |door| {
             update(
