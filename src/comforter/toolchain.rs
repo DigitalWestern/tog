@@ -174,12 +174,12 @@ fn choose(
 /// lock describes the whole project, so a first `tog build cargo` still
 /// selects for a Python pin (#180).
 fn first_lock_needs_every(ecosystem: &str, error: io::Error) -> io::Error {
-    io::Error::new(
-        error.kind(),
-        format!(
-            "{error}\n(creating tog-toolchain.toml selects a toolchain for every ecosystem \
+    crate::kernel::error::context(
+        error,
+        format_args!(
+            "creating tog-toolchain.toml selects a toolchain for every ecosystem \
              in the project, {ecosystem} included, so every sync and build here waits on \
-             this; fix the {ecosystem} toolchain error above, then run `tog`)"
+             this; fix the {ecosystem} toolchain error, then run `tog`"
         ),
     )
 }

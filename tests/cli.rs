@@ -80,6 +80,31 @@ fn denied_setup_metadata_never_executes_on_sync_or_attest() {
     }
 }
 
+#[test]
+fn unsupported_plan_failure_reports_its_class_in_json() {
+    let home = TempDir::boundary("cli-unsupported-json-home");
+    let project = TempDir::boundary("cli-unsupported-json-project");
+    std::fs::write(
+        project.0.join("pyproject.toml"),
+        "[project]\nname = 'fixture'\nversion = '0.1.0'\nrequires-python = '==0.0.1'\n",
+    )
+    .unwrap();
+    let out = tog(&project.0, &home.0, &["plan", "--json"]);
+    let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
+    assert_eq!(out.status.code(), Some(5), "{failure}");
+    assert_eq!(failure["class"], "unsupported");
+    assert!(
+        failure["error"]
+            .as_str()
+            .unwrap()
+            .contains("no complete python release"),
+        "{failure}"
+    );
+    assert!(out.stdout.is_empty());
+    assert!(!project.0.join("tog-toolchain.toml").exists());
+}
+
 /// With a setup flag the bare `tog` is a sync, so a directory with no
 /// project fails and says so, rather than printing the help (a CI job
 /// pointed at the wrong directory must go red) or naming a missing
