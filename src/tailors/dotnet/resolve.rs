@@ -152,6 +152,45 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
     })
 }
 
+/// Build receipt filenames from the already validated generation. Re-listing
+/// the live project here could omit a temporarily removed input that is
+/// restored before staging (an ABA race).
+fn receipt_spec(
+    checked: &Preflight,
+    selected: &Selected,
+    args: &[&str],
+) -> io::Result<record::RecordSpec> {
+    let outputs = vec![
+        PathBuf::from(
+            checked
+                .csproj
+                .file_name()
+                .ok_or_else(|| err("checked .NET project has no filename"))?,
+        ),
+        PathBuf::from(LOCK_FILE),
+    ];
+    let inputs = checked
+        .basis
+        .keys()
+        .map(PathBuf::from)
+        .filter(|path| !outputs.contains(path))
+        .collect();
+    let tool = dotnet_tool(selected)?;
+    let mut command = vec![tool.name.clone()];
+    command.extend(args.iter().map(|arg| (*arg).to_string()));
+    let spec = record::RecordSpec {
+        tool,
+        command,
+        files: record::ResolutionFiles { outputs, inputs },
+        key: crate::comforter::signing_key(),
+        require_unchanged: false,
+        publish_receipt: true,
+    };
+    #[cfg(test)]
+    after_receipt_spec_for_test();
+    Ok(spec)
+}
+
 /// `prepare`: packages.lock.json, written by the store SDK's `restore
 /// --use-lock-file` when there is none. The one place the .NET tailor
 /// writes project inputs. Restore runs confined through `door` (a
@@ -169,19 +208,15 @@ pub fn generate_lock(
     after_preflight_for_test();
     ui::note("no packages.lock.json; resolving with the store SDK...");
     let args = ["--use-lock-file"];
-    let spec = crate::tailors::record_spec(
-        &super::tailor::Dotnet,
-        project,
-        dotnet_tool(selected)?,
-        &["restore", "--use-lock-file"],
-    )?;
+    let spec = receipt_spec(&checked, selected, &["restore", "--use-lock-file"])?;
+    let outputs = spec.files.outputs.clone();
     let report = run_restore(
         door,
         DotnetRun {
             sdk_obj,
             lock_root: project.path(),
             args: &args,
-            outputs: resolution_outputs(project)?,
+            outputs,
             inputs: Some(basis),
             receipt: Some(record::producer(spec, Default::default())),
         },
@@ -211,12 +246,8 @@ pub fn attest_project(
     after_preflight_for_test();
     require_lock(project)?;
     let args = ["--locked-mode"];
-    let mut spec = crate::tailors::record_spec(
-        &super::tailor::Dotnet,
-        project,
-        dotnet_tool(selected)?,
-        &["restore", "--locked-mode"],
-    )?;
+    let mut spec = receipt_spec(&checked, selected, &["restore", "--locked-mode"])?;
+    let outputs = spec.files.outputs.clone();
     spec.require_unchanged = true;
     spec.publish_receipt = false;
     let slot = record::RecordSlot::default();
@@ -226,7 +257,7 @@ pub fn attest_project(
             sdk_obj,
             lock_root: project.path(),
             args: &args,
-            outputs: resolution_outputs(project)?,
+            outputs,
             inputs: Some(basis),
             receipt: Some(record::producer(spec, slot.clone())),
         },
@@ -258,12 +289,21 @@ fn restore_failure(report: &crate::kernel::resolve::DelegateReport) -> String {
 
 #[cfg(test)]
 thread_local! {
+    static AFTER_RECEIPT_SPEC_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_PREFLIGHT_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 fn after_preflight_for_test() {
     let hook = AFTER_PREFLIGHT_FOR_TEST.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn after_receipt_spec_for_test() {
+    let hook = AFTER_RECEIPT_SPEC_FOR_TEST.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
@@ -513,8 +553,9 @@ mod tests {
         let dir = temp.0.join("project");
         fs::create_dir_all(&dir).unwrap();
         let reference =
-            "    <PackageReference Include=\"Tog.Fixture\" Version=\"$(FixtureVersion)\" Condition=\"!Exists('empty-switch')\" />\n";
+            "    <PackageReference Include=\"Tog.Fixture\" Version=\"$(FixtureVersion)\" Condition=\"!Exists('empty-switch') And Exists('feature.flag')\" />\n";
         fs::write(dir.join("app.csproj"), csproj(reference)).unwrap();
+        fs::write(dir.join("feature.flag"), "enabled").unwrap();
         fs::create_dir_all(dir.join("config")).unwrap();
         fs::write(dir.join("config/version.txt"), "1.0.0").unwrap();
         fs::write(dir.join("config/package.props"), r#"<Project><PropertyGroup>
@@ -617,6 +658,52 @@ mod tests {
         assert!(why.contains("changed while planning"), "{why}");
         assert!(!missing.join(LOCK_FILE).exists());
         assert!(!missing.join(".tog/resolution/dotnet.json").exists());
+
+        // Remove an input during receipt-spec creation, then restore it before
+        // staging. Receipt filenames must come from the captured generation.
+        let flag = dir.join("feature.flag");
+        let removed = flag.clone();
+        AFTER_PREFLIGHT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::remove_file(removed).unwrap();
+            }))
+        });
+        let restored = flag.clone();
+        AFTER_RECEIPT_SPEC_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::write(restored, "enabled").unwrap();
+            }))
+        });
+        let (aba, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        let (aba_record, _) = aba.unwrap();
+        assert!(
+            aba_record.inputs.contains_key("feature.flag"),
+            "{aba_record:?}"
+        );
+        let key_path = temp.0.join("receipt-test.key");
+        let public = crate::kernel::signing::generate(&key_path).unwrap();
+        let key = crate::kernel::signing::SigningKey::load(&key_path).unwrap();
+        let envelope = serde_json::to_vec(&aba_record.envelope(Some(&key)).unwrap()).unwrap();
+        let trusted = [public].into_iter().collect();
+        let judge = || {
+            record::judge(
+                "test",
+                &envelope,
+                "dotnet",
+                &trusted,
+                &crate::tailors::resolution_files(&super::super::tailor::Dotnet, &held)
+                    .unwrap()
+                    .unwrap(),
+                &held,
+            )
+            .unwrap()
+        };
+        assert!(matches!(judge(), record::Judgment::Attests(_)));
+        fs::remove_file(&flag).unwrap();
+        assert!(matches!(judge(), record::Judgment::Unrecorded(_)));
+        fs::write(flag, "enabled").unwrap();
 
         // Empty directories and host execute bits cannot select a different
         // dependency set in the canonical resolver view. The checkout stays intact.
