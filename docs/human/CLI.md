@@ -970,12 +970,23 @@ branch's cache.
 any repository: the action and its releases are public, and the job's own
 token reads them.
 
-The same job written out by hand, for a runner the action does not cover
-or a step that has to differ. Its install step uses the one-line installer.
+The signed-closure job below is for a trusted protected ref whose workflow,
+policy and project inputs the operator controls. It is not a pull-request
+candidate gate. For candidate verification with a separate signing job, use
+README.md's "Signing locks: who attests" recipe. Its keyless sync verifies
+resolution receipts and writes unsigned closures.
+
+The same trusted job written out by hand, for a runner the action does not
+cover or a step that has to differ. Its install step uses the one-line installer.
 
 ```yaml
 name: tog
-on: [pull_request]
+on:
+  push:
+    branches: [main]  # protect this ref and its workflow/policy files
+
+permissions:
+  contents: read
 
 jobs:
   audit:
@@ -1004,13 +1015,15 @@ jobs:
       - name: Sync
         env:
           TOG_SIGNING_KEY: ${{ runner.temp }}/tog.key
+          TOG_SIGNING_KEY_CONTENTS: ${{ secrets.TOG_SIGNING_KEY }}
         run: |
           # printf, not a herestring: no bash dependency, and no newline
           # appended to the key. umask before the write, so the file is
           # never briefly world-readable.
-          (umask 077; printf '%s' '${{ secrets.TOG_SIGNING_KEY }}' > "$TOG_SIGNING_KEY")
+          trap 'rm -f "$TOG_SIGNING_KEY"' EXIT
+          (umask 077; printf '%s' "$TOG_SIGNING_KEY_CONTENTS" > "$TOG_SIGNING_KEY")
+          unset TOG_SIGNING_KEY_CONTENTS
           tog --frozen
-          rm -f "$TOG_SIGNING_KEY"
 
       # Every closure signed by a trusted key, current for the inputs on
       # disk and tog-toolchain.toml, no denied or unknown exception. Exit 1 is a denied build,
@@ -1024,10 +1037,13 @@ jobs:
 
 **Which jobs may hold the key.** A sync executes project code while
 planning, and mode 0600 does not stop same-user code from reading a key, so
-the job above is only safe on a ref you control — a protected branch, or a
-`pull_request_target`-style job you have deliberately reviewed. For pull
-requests from forks, drop the key and the `audit` step and run the sync
-alone:
+the job above is only for an operator-controlled workflow on a trusted
+protected ref. Do not give signing credentials to a candidate-controlled
+workflow or use `pull_request_target` to execute unreviewed candidate code.
+For an unsigned fork build, drop the key and the signed-closure `audit` step.
+A policy that requires resolution provenance still needs trusted receipts,
+as in the README recipe. Omitting audit never bypasses that requirement:
+
 
 ```yaml
       - run: tog --frozen --strict    # or: tog --frozen, under ci/tog-policy.toml
@@ -1105,6 +1121,12 @@ concurrent sync cannot lose one. Sharp edges:
   using the store, takes `--dry-run` (which lists what it would remove and
   writes nothing) and no other option. A reset that is interrupted leaves
   a store with no marker, which is still refused: run it again.
+
+Resolution has no unsandboxed fallback. The former Legacy mode is removed.
+Dependency edits, missing-lock generation and executable-manifest planning
+require usable bubblewrap or rootless Podman. A host with neither refuses
+resolution and names the missing capability. Run `tog doctor --isolation`
+to check the host before migrating a CI runner.
 
 **attest** `[<ecosystem>...]` gives existing locks a signed resolution
 record without changing them. For each named ecosystem (all detected ones
