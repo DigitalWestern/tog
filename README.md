@@ -354,7 +354,15 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
             | sh -s -- --no-modify-path --no-completions
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: tog sync --frozen && tog run test
+      - uses: actions/download-artifact@v4
+        with: { name: resolution-records, path: "${{ runner.temp }}/resolution-records" }
+      - run: |
+          printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
+          export TOG_POLICY="$RUNNER_TEMP/policy.toml"
+          tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
+          tog run npm test
+        env:
+          TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
 ```
 
 The `attest` job runs only confined tools, so no project code runs outside
