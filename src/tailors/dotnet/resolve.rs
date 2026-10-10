@@ -163,8 +163,10 @@ pub fn generate_lock(
     sdk_obj: &Path,
     selected: &Selected,
 ) -> io::Result<()> {
-    preflight(project, selected.version("dotnet-sdk")?)?;
-    let basis = resolution_basis(project)?;
+    let checked = preflight(project, selected.version("dotnet-sdk")?)?;
+    let basis = &checked.basis;
+    #[cfg(test)]
+    after_preflight_for_test();
     ui::note("no packages.lock.json; resolving with the store SDK...");
     let args = ["--use-lock-file"];
     let spec = crate::tailors::record_spec(
@@ -180,7 +182,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             outputs: resolution_outputs(project)?,
-            inputs: Some(&basis),
+            inputs: Some(basis),
             receipt: Some(record::producer(spec, Default::default())),
         },
     )?;
@@ -203,8 +205,10 @@ pub fn attest_project(
     sdk_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(record::ResolutionRecord, Vec<u8>)> {
-    preflight(project, selected.version("dotnet-sdk")?)?;
-    let basis = resolution_basis(project)?;
+    let checked = preflight(project, selected.version("dotnet-sdk")?)?;
+    let basis = &checked.basis;
+    #[cfg(test)]
+    after_preflight_for_test();
     require_lock(project)?;
     let args = ["--locked-mode"];
     let mut spec = crate::tailors::record_spec(
@@ -223,7 +227,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             outputs: resolution_outputs(project)?,
-            inputs: Some(&basis),
+            inputs: Some(basis),
             receipt: Some(record::producer(spec, slot.clone())),
         },
     )?;
@@ -250,6 +254,19 @@ fn restore_failure(report: &crate::kernel::resolve::DelegateReport) -> String {
         text.push_str(line.trim());
     }
     text
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_PREFLIGHT_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_preflight_for_test() {
+    let hook = AFTER_PREFLIGHT_FOR_TEST.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 #[cfg(test)]
@@ -557,6 +574,49 @@ mod tests {
         assert!(changed_data.is_err());
         assert_eq!(fs::read(dir.join(LOCK_FILE)).unwrap(), before_lock);
         fs::write(dir.join("config/version.txt"), "1.0.0").unwrap();
+
+        // Deterministically replace validated input before staging. A fresh
+        // basis here would bypass the lock-control refusal scan.
+        let props = dir.join("Directory.Build.props");
+        let original_props = fs::read(&props).unwrap();
+        let replacement = props.clone();
+        AFTER_PREFLIGHT_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
+            fs::write(replacement, "<Project TreatAsLocalProperty=\"NuGetLockFilePath\"><PropertyGroup><NuGetLockFilePath>alternate.lock.json</NuGetLockFilePath></PropertyGroup></Project>").unwrap();
+        })));
+        let receipt_before = fs::read(dir.join(".tog/resolution/dotnet.json")).unwrap();
+        let (replaced, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        let why = replaced.unwrap_err().to_string();
+        assert!(why.contains("changed while planning"), "{why}");
+        assert_eq!(fs::read(dir.join(LOCK_FILE)).unwrap(), before_lock);
+        assert_eq!(
+            fs::read(dir.join(".tog/resolution/dotnet.json")).unwrap(),
+            receipt_before
+        );
+        fs::write(&props, original_props).unwrap();
+
+        let missing = temp.0.join("replaced-missing-lock");
+        fs::create_dir(&missing).unwrap();
+        fs::write(missing.join("app.csproj"), csproj("")).unwrap();
+        let inserted = missing.join("Directory.Build.props");
+        AFTER_PREFLIGHT_FOR_TEST.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                fs::write(
+                    inserted,
+                    "<Project TreatAsLocalProperty=\"RestoreLockedMode\" />",
+                )
+                .unwrap();
+            }))
+        });
+        let missing_held = ProjectRoot::open(&missing).unwrap();
+        let (replaced_missing, _) = through_door(harness, DoorKind::MissingLock, |door| {
+            generate_lock(door, &missing_held, &sdk, &selected)
+        });
+        let why = replaced_missing.unwrap_err().to_string();
+        assert!(why.contains("changed while planning"), "{why}");
+        assert!(!missing.join(LOCK_FILE).exists());
+        assert!(!missing.join(".tog/resolution/dotnet.json").exists());
 
         // Empty directories and host execute bits cannot select a different
         // dependency set in the canonical resolver view. The checkout stays intact.
