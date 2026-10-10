@@ -1059,14 +1059,12 @@ pub(crate) fn host_build_inputs() -> io::Result<String> {
 /// `host` with the tree at `dev` folded in, by the same stat-based walk.
 fn with_dev_files(host: &str, dev: &Path) -> io::Result<String> {
     use sha2::Digest as _;
-    let mut digest = Fingerprint {
-        host_root: Path::new("/"),
-        digest: sha2::Sha256::new(),
-    };
-    digest.digest.update(b"tog-host-build-inputs/3+dev-files");
-    digest.field(host.as_bytes());
-    if digest.entry(dev, dev)? {
-        digest.tree(dev, dev)?;
+    // The resolver starts at `/`. Preserve symlinks so a linked fixture
+    // root is still refused, while giving relative paths their real base.
+    let dev = std::path::absolute(dev)?;
+    let mut digest = Fingerprint::dev_files(host);
+    if digest.entry(&dev, &dev)? {
+        digest.tree(&dev, &dev)?;
     }
     Ok(hex::encode(digest.digest.finalize()))
 }
@@ -1076,6 +1074,7 @@ fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
     let mut digest = Fingerprint {
         host_root,
         digest: sha2::Sha256::new(),
+        refuse_directory_links: false,
     };
     digest.digest.update(b"tog-host-build-inputs/3");
     for (inside, host, curation) in curated_roots(host_root)? {
@@ -1107,9 +1106,22 @@ fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
 struct Fingerprint<'a> {
     host_root: &'a Path,
     digest: sha2::Sha256,
+    refuse_directory_links: bool,
 }
 
 impl Fingerprint<'_> {
+    fn dev_files(host: &str) -> Self {
+        use sha2::Digest as _;
+        let mut digest = Self {
+            host_root: Path::new("/"),
+            digest: sha2::Sha256::new(),
+            refuse_directory_links: true,
+        };
+        digest.digest.update(b"tog-host-build-inputs/3+dev-files");
+        digest.field(host.as_bytes());
+        digest
+    }
+
     /// The entries of a curated host directory the view drops or moves,
     /// and the `CURATED_NESTED` directories it curates in turn.
     fn dropped(&mut self, host: &Path, inside: &Path, curation: Curation) -> io::Result<()> {
@@ -1183,7 +1195,16 @@ impl Fingerprint<'_> {
         if metadata.file_type().is_symlink() {
             let target = fs::read_link(host).map_err(|error| fingerprint_error(host, error))?;
             self.field(target.as_os_str().as_bytes());
-            self.resolved(inside)?;
+            if self.resolved(inside)? && self.refuse_directory_links {
+                return Err(crate::kernel::error::refused(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} in TOG_TEST_HOST_DEV_FILES is a symlink to a directory; \
+                         the fingerprint does not walk through one, so copy the directory in",
+                        host.display()
+                    ),
+                ));
+            }
         }
         Ok(metadata.is_dir())
     }
@@ -1193,18 +1214,23 @@ impl Fingerprint<'_> {
     /// `liblzma.so -> liblzma.so.5 -> liblzma.so.5.8.1` covers the kept
     /// library a `-llzma` link reads. A dangling chain is recorded as
     /// missing; a loop is an error.
-    fn resolved(&mut self, inside: &Path) -> io::Result<()> {
+    fn resolved(&mut self, inside: &Path) -> io::Result<bool> {
         let resolved = crate::kernel::sandbox::resolve_host_path(self.host_root, inside)
             .map_err(|error| fingerprint_error(inside, error))?;
         let host = self
             .host_root
             .join(resolved.strip_prefix("/").unwrap_or(&resolved));
         match fs::symlink_metadata(&host) {
-            Ok(metadata) => self.stat(&metadata, true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => self.field(b"missing"),
-            Err(error) => return Err(fingerprint_error(&host, error)),
+            Ok(metadata) => {
+                self.stat(&metadata, true);
+                Ok(metadata.is_dir())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.field(b"missing");
+                Ok(false)
+            }
+            Err(error) => Err(fingerprint_error(&host, error)),
         }
-        Ok(())
     }
 
     /// Type, size and modification time; with `identity`, also the inode
@@ -1296,6 +1322,125 @@ mod tests {
         fs::write(dev.join("usr/include/probe.h"), "int probe, more;\n").unwrap();
         assert_ne!(with_dev_files(&host, &dev).unwrap(), with);
         assert_ne!(with_dev_files(&"1".repeat(64), &dev).unwrap(), with);
+    }
+
+    /// A symlinked directory in the stand-in, or the stand-in itself as a
+    /// symlink, is refused: the walk would not see a change behind it. A
+    /// symlink to a file is recorded as usual (#620).
+    #[test]
+    fn dev_files_refuse_a_symlinked_directory() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("dev-files-linked");
+        let dev = temp.0.join("dev");
+        let real = temp.0.join("real-include");
+        fs::create_dir_all(dev.join("usr")).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("probe.h"), "int probe;\n").unwrap();
+        symlink(real.join("probe.h"), dev.join("usr/probe.h")).unwrap();
+        let host = "0".repeat(64);
+        with_dev_files(&host, &dev).unwrap();
+        symlink(&real, dev.join("usr/include")).unwrap();
+        let error = with_dev_files(&host, &dev).unwrap_err();
+        assert!(
+            error.to_string().contains("symlink to a directory"),
+            "{error}"
+        );
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        fs::remove_file(dev.join("usr/include")).unwrap();
+        let linked = temp.0.join("dev-link");
+        symlink(&dev, &linked).unwrap();
+        let error = with_dev_files(&host, &linked).unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
+    }
+
+    #[test]
+    fn dev_files_refuse_a_directory_target_that_appears_during_the_walk() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("dev-files-target-swap");
+        let dev = temp.0.join("dev");
+        let real = temp.0.join("real-include");
+        let hidden = temp.0.join("hidden");
+        fs::create_dir_all(dev.join("usr")).unwrap();
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("probe.h"), b"int probe;\n").unwrap();
+        symlink(&real, dev.join("usr/include")).unwrap();
+        fs::rename(&real, &hidden).unwrap();
+        let mut digest = Fingerprint::dev_files(&"0".repeat(64));
+        assert!(digest.entry(&dev, &dev).unwrap());
+        // The root is already fingerprinted. A link that validation could
+        // have seen as dangling acquires a directory target before traversal.
+        fs::rename(&hidden, &real).unwrap();
+        let error = digest.tree(&dev, &dev).unwrap_err();
+        assert!(
+            error.to_string().contains("symlink to a directory"),
+            "{error}"
+        );
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
+    }
+
+    #[test]
+    fn dev_files_keep_file_and_dangling_links_but_refuse_loops() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("dev-files-link-kinds");
+        let dev = temp.0.join("dev");
+        fs::create_dir(&dev).unwrap();
+        let target = temp.0.join("probe.h");
+        fs::write(&target, b"int probe;\n").unwrap();
+        symlink(&target, dev.join("probe.h")).unwrap();
+        let host = "0".repeat(64);
+        let before = with_dev_files(&host, &dev).unwrap();
+        fs::write(&target, b"int probe;\nint changed;\n").unwrap();
+        assert_ne!(with_dev_files(&host, &dev).unwrap(), before);
+        symlink("missing.h", dev.join("dangling.h")).unwrap();
+        with_dev_files(&host, &dev).unwrap();
+        symlink("loop.h", dev.join("loop.h")).unwrap();
+        assert!(with_dev_files(&host, &dev).is_err());
+    }
+
+    #[test]
+    fn relative_dev_files_refuse_root_and_nested_directory_links() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("relative-dev-files");
+        let dev = temp.0.join("dev");
+        let real = temp.0.join("real");
+        fs::create_dir(&dev).unwrap();
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("probe.h"), b"int probe;\n").unwrap();
+        // Build a relative spelling without changing the process-wide cwd.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(temp.0.strip_prefix("/").unwrap());
+        let host = "0".repeat(64);
+        symlink("../real/probe.h", dev.join("probe.h")).unwrap();
+        let before = with_dev_files(&host, &relative.join("dev")).unwrap();
+        fs::write(real.join("probe.h"), b"int probe;\nint changed;\n").unwrap();
+        assert_ne!(
+            with_dev_files(&host, &relative.join("dev")).unwrap(),
+            before
+        );
+        symlink("../real", dev.join("include")).unwrap();
+        symlink("dev", temp.0.join("dev-link")).unwrap();
+        for fixture in [relative.join("dev"), relative.join("dev-link")] {
+            let error = with_dev_files(&host, &fixture).unwrap_err();
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Refused),
+                "{error}"
+            );
+            assert!(error.to_string().contains("symlink to a directory"));
+        }
     }
 
     /// A fake host with one of each entry the `RuntimeOnly` rules decide

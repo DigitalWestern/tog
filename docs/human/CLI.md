@@ -639,6 +639,11 @@ The next sync rebuilds affected environments or wheels once instead of reusing
 objects built under the older view. See [host-view limitations](LIMITATIONS.md)
 for the plugin allowlist and the remaining explicitly reachable host paths.
 
+Debug builds that use the `TOG_TEST_HOST_DEV_FILES` test fixture now refuse
+symlinked directories, including a symlinked fixture root, with refusal
+status 3. Copy those directories into the fixture. File symlinks remain
+recorded in its fingerprint. Release builds ignore this test variable.
+
 ## Inspect verbs
 
 **status** compares each closure's recorded inputs against the files on disk
