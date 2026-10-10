@@ -1951,6 +1951,62 @@ mod tests {
         assert!(fs::symlink_metadata(mirror.join("plugin-api.h")).is_err());
     }
 
+    /// A kept plugin link must load successfully in the sandbox, not
+    /// merely exist as a possibly dangling symlink in the skeleton.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Controlled fixture compiler and no-store sandbox.
+    fn a_curated_plugin_link_loads_in_the_sandbox() {
+        use std::process::Command;
+        if !crate::kernel::sandbox::linux_ready("a_curated_plugin_link_loads_in_the_sandbox") {
+            return;
+        }
+        let host = temp_dir("plugin-load");
+        let plugins = host.0.join("usr/lib64/bfd-plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let source = host.0.join("plugin.c");
+        fs::write(&source, "int tog_plugin_probe(void) { return 42; }\n").unwrap();
+        let compiled = Command::new("/usr/bin/cc")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", &host.0)
+            .args(["-shared", "-fPIC"])
+            .arg(&source)
+            .arg("-o")
+            .arg(plugins.join("libprobe.so.1"))
+            .output()
+            .unwrap();
+        assert!(compiled.status.success(), "{compiled:?}");
+        std::os::unix::fs::symlink("libprobe.so.1", plugins.join("libprobe.so")).unwrap();
+        fs::write(
+            plugins.join("plugin-api.h"),
+            "int tog_plugin_probe(void);\n",
+        )
+        .unwrap();
+        let skeleton = temp_dir("plugin-load-skeleton");
+        let (args, _) = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        let mirror = skeleton.0.join("usr/lib64/bfd-plugins");
+        assert!(fs::symlink_metadata(mirror.join("plugin-api.h")).is_err());
+        assert!(!ro_binds(&args)
+            .iter()
+            .any(|(_, to)| { to == Path::new("/usr/lib64/bfd-plugins") }));
+        let loaded = Command::new("bwrap")
+            .env_clear()
+            .args(["--die-with-parent", "--unshare-all", "--new-session"])
+            .args(crate::kernel::sandbox::system_root_args(Path::new("/")).unwrap())
+            .arg("--ro-bind")
+            .arg(host.0.join("usr/lib64"))
+            .arg(host_files_path(Path::new("/usr/lib64")))
+            .arg("--ro-bind")
+            .arg(&mirror)
+            .arg("/plugins")
+            .args(["--proc", "/proc", "--dev", "/dev", "--", "/usr/bin/python3", "-c"])
+            .arg("import ctypes; assert ctypes.CDLL('/plugins/libprobe.so').tog_plugin_probe() == 42")
+            .output()
+            .unwrap();
+        assert!(loaded.status.success(), "{loaded:?}");
+    }
+
     /// The host prefix is outside the sandbox path. A scratch ancestor
     /// named lib/plugins must not exempt ordinary link names or change
     /// which inputs the shared classifier fingerprints.
