@@ -2542,6 +2542,72 @@ mod integrity_tests {
     }
 
     #[test]
+    fn an_actual_untrusted_tls_handshake_is_not_retryable() {
+        // Exercise ureq's ConnectionFailed wrapper without a socket or
+        // external server. The server's self-signed certificate is untrusted.
+        #[derive(Debug)]
+        struct Wire {
+            server: rustls::ServerConnection,
+            response: Vec<u8>,
+        }
+        impl Read for Wire {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = buf.len().min(self.response.len());
+                buf[..n].copy_from_slice(&self.response[..n]);
+                self.response.drain(..n);
+                Ok(n)
+            }
+        }
+        impl Write for Wire {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let n = self.server.read_tls(&mut &buf[..])?;
+                self.server
+                    .process_new_packets()
+                    .map_err(io::Error::other)?;
+                while self.server.wants_write() {
+                    self.server.write_tls(&mut self.response)?;
+                }
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl ureq::ReadWrite for Wire {
+            fn socket(&self) -> Option<&std::net::TcpStream> {
+                None
+            }
+        }
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der())
+            .into();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.cert.der().clone()], key)
+            .unwrap();
+        let client = std::sync::Arc::new(
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        );
+        let wire = Wire {
+            server: rustls::ServerConnection::new(std::sync::Arc::new(server)).unwrap(),
+            response: Vec::new(),
+        };
+        let rejected =
+            ureq::TlsConnector::connect(&client, "localhost", Box::new(wire)).unwrap_err();
+        assert_eq!(rejected.kind(), ureq::ErrorKind::ConnectionFailed);
+        let error = network_error("fetch", "https://localhost/x", rejected);
+        assert!(error.to_string().contains("UnknownIssuer"), "{error}");
+        assert_eq!(crate::kernel::error::class_of(&error), None, "{error}");
+    }
+
+    #[test]
     fn an_unpinned_download_keeps_local_write_failures_ordinary() {
         struct Full;
         impl Write for Full {
