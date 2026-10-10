@@ -336,13 +336,27 @@ pub(super) fn run(
             ),
         ));
     }
+    let facts = record_facts(&confined, &policy, &ran)?;
     if !status.success() {
         // The call site words a failing tool, as it does for `Legacy`.
         // Nothing was published and no ledger is kept.
-        return Ok(report(status, ran.outcome, None));
+        let mut failed = report(status, ran.outcome, None);
+        // Clients such as Bundler discard the body of a refused CONNECT.
+        // Keep the proxy's redacted reason visible at the command boundary.
+        for refusal in ran
+            .session
+            .diagnostics
+            .refusals
+            .iter()
+            .collect::<BTreeSet<_>>()
+        {
+            failed
+                .stderr
+                .extend_from_slice(format!("\ntog: {refusal}\n").as_bytes());
+        }
+        return Ok(failed);
     }
     let outputs = check_outputs(store, activity, &confined, &snapshot, &ran)?;
-    let facts = record_facts(&confined, &policy, &ran)?;
     let diagnostics = diagnostics(
         store,
         door,
@@ -1163,6 +1177,38 @@ get() {
     fn assert_untouched(fx: &Fixture, before: &BTreeMap<PathBuf, Vec<u8>>) {
         assert_eq!(&tree(&fx.project), before, "the project changed");
         assert!(rooted(fx).is_empty(), "{:?}", rooted(fx));
+    }
+
+    #[test]
+    fn failed_tool_keeps_the_proxy_refusal_reason_and_source_fact() {
+        let Some(relay) = relay("failed_tool_keeps_the_proxy_refusal_reason_and_source_fact")
+        else {
+            return;
+        };
+        let fx = fixture("failed-tool-refusal");
+        let before = tree(&fx.project);
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            r#"send "$(printf 'CONNECT private.example:443 HTTP/1.1\r\nHost: private.example:443\r\nProxy-Authorization: Basic %s\r\n\r\n' "$AUTH")" >/dev/null
+exit 37
+"#,
+            Policy::default(),
+            |_| {},
+        );
+        let report = outcome.result.unwrap();
+        assert_eq!(report.status.code(), Some(37));
+        assert!(report.ledger.is_none());
+        let stderr = String::from_utf8_lossy(&report.stderr);
+        assert!(
+            stderr.contains("refused CONNECT private.example:443"),
+            "{stderr}"
+        );
+        assert!(outcome
+            .recorded
+            .iter()
+            .any(|fact| fact.kind == policy::UNATTESTED_INDEX));
+        assert_untouched(&fx, &before);
     }
 
     #[test]
