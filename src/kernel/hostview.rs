@@ -1059,47 +1059,11 @@ pub(crate) fn host_build_inputs() -> io::Result<String> {
 /// `host` with the tree at `dev` folded in, by the same stat-based walk.
 fn with_dev_files(host: &str, dev: &Path) -> io::Result<String> {
     use sha2::Digest as _;
-    let mut digest = Fingerprint {
-        host_root: Path::new("/"),
-        digest: sha2::Sha256::new(),
-    };
-    digest.digest.update(b"tog-host-build-inputs/3+dev-files");
-    digest.field(host.as_bytes());
-    refuse_linked_dirs(dev)?;
+    let mut digest = Fingerprint::dev_files(host);
     if digest.entry(dev, dev)? {
         digest.tree(dev, dev)?;
     }
     Ok(hex::encode(digest.digest.finalize()))
-}
-
-/// The fingerprint walk records a symlink and what it resolves to, never
-/// the tree behind a symlinked directory, so a file changed there would
-/// leave the fingerprint stale. The stand-in refuses one, loudly, rather
-/// than miss a change (#620).
-fn refuse_linked_dirs(path: &Path) -> io::Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(fingerprint_error(path, error)),
-    };
-    if metadata.file_type().is_symlink() {
-        if fs::metadata(path).is_ok_and(|target| target.is_dir()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{} in TOG_TEST_HOST_DEV_FILES is a symlink to a directory; \
-                     the fingerprint does not walk through one, so copy the directory in",
-                    path.display()
-                ),
-            ));
-        }
-    } else if metadata.is_dir() {
-        for entry in fs::read_dir(path).map_err(|error| fingerprint_error(path, error))? {
-            let entry = entry.map_err(|error| fingerprint_error(path, error))?;
-            refuse_linked_dirs(&entry.path())?;
-        }
-    }
-    Ok(())
 }
 
 fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
@@ -1107,6 +1071,7 @@ fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
     let mut digest = Fingerprint {
         host_root,
         digest: sha2::Sha256::new(),
+        refuse_directory_links: false,
     };
     digest.digest.update(b"tog-host-build-inputs/3");
     for (inside, host, curation) in curated_roots(host_root)? {
@@ -1138,9 +1103,22 @@ fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
 struct Fingerprint<'a> {
     host_root: &'a Path,
     digest: sha2::Sha256,
+    refuse_directory_links: bool,
 }
 
 impl Fingerprint<'_> {
+    fn dev_files(host: &str) -> Self {
+        use sha2::Digest as _;
+        let mut digest = Self {
+            host_root: Path::new("/"),
+            digest: sha2::Sha256::new(),
+            refuse_directory_links: true,
+        };
+        digest.digest.update(b"tog-host-build-inputs/3+dev-files");
+        digest.field(host.as_bytes());
+        digest
+    }
+
     /// The entries of a curated host directory the view drops or moves,
     /// and the `CURATED_NESTED` directories it curates in turn.
     fn dropped(&mut self, host: &Path, inside: &Path, curation: Curation) -> io::Result<()> {
@@ -1214,7 +1192,16 @@ impl Fingerprint<'_> {
         if metadata.file_type().is_symlink() {
             let target = fs::read_link(host).map_err(|error| fingerprint_error(host, error))?;
             self.field(target.as_os_str().as_bytes());
-            self.resolved(inside)?;
+            if self.resolved(inside)? && self.refuse_directory_links {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} in TOG_TEST_HOST_DEV_FILES is a symlink to a directory; \
+                         the fingerprint does not walk through one, so copy the directory in",
+                        host.display()
+                    ),
+                ));
+            }
         }
         Ok(metadata.is_dir())
     }
@@ -1224,18 +1211,23 @@ impl Fingerprint<'_> {
     /// `liblzma.so -> liblzma.so.5 -> liblzma.so.5.8.1` covers the kept
     /// library a `-llzma` link reads. A dangling chain is recorded as
     /// missing; a loop is an error.
-    fn resolved(&mut self, inside: &Path) -> io::Result<()> {
+    fn resolved(&mut self, inside: &Path) -> io::Result<bool> {
         let resolved = crate::kernel::sandbox::resolve_host_path(self.host_root, inside)
             .map_err(|error| fingerprint_error(inside, error))?;
         let host = self
             .host_root
             .join(resolved.strip_prefix("/").unwrap_or(&resolved));
         match fs::symlink_metadata(&host) {
-            Ok(metadata) => self.stat(&metadata, true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => self.field(b"missing"),
-            Err(error) => return Err(fingerprint_error(&host, error)),
+            Ok(metadata) => {
+                self.stat(&metadata, true);
+                Ok(metadata.is_dir())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.field(b"missing");
+                Ok(false)
+            }
+            Err(error) => Err(fingerprint_error(&host, error)),
         }
-        Ok(())
     }
 
     /// Type, size and modification time; with `identity`, also the inode
@@ -1354,6 +1346,49 @@ mod tests {
         let linked = temp.0.join("dev-link");
         symlink(&dev, &linked).unwrap();
         assert!(with_dev_files(&host, &linked).is_err());
+    }
+
+    #[test]
+    fn dev_files_refuse_a_directory_target_that_appears_during_the_walk() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("dev-files-target-swap");
+        let dev = temp.0.join("dev");
+        let real = temp.0.join("real-include");
+        let hidden = temp.0.join("hidden");
+        fs::create_dir_all(dev.join("usr")).unwrap();
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("probe.h"), b"int probe;\n").unwrap();
+        symlink(&real, dev.join("usr/include")).unwrap();
+        fs::rename(&real, &hidden).unwrap();
+        let mut digest = Fingerprint::dev_files(&"0".repeat(64));
+        assert!(digest.entry(&dev, &dev).unwrap());
+        // The root is already fingerprinted. A link that validation could
+        // have seen as dangling acquires a directory target before traversal.
+        fs::rename(&hidden, &real).unwrap();
+        let error = digest.tree(&dev, &dev).unwrap_err();
+        assert!(
+            error.to_string().contains("symlink to a directory"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn dev_files_keep_file_and_dangling_links_but_refuse_loops() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("dev-files-link-kinds");
+        let dev = temp.0.join("dev");
+        fs::create_dir(&dev).unwrap();
+        let target = temp.0.join("probe.h");
+        fs::write(&target, b"int probe;\n").unwrap();
+        symlink(&target, dev.join("probe.h")).unwrap();
+        let host = "0".repeat(64);
+        let before = with_dev_files(&host, &dev).unwrap();
+        fs::write(&target, b"int probe;\nint changed;\n").unwrap();
+        assert_ne!(with_dev_files(&host, &dev).unwrap(), before);
+        symlink("missing.h", dev.join("dangling.h")).unwrap();
+        with_dev_files(&host, &dev).unwrap();
+        symlink("loop.h", dev.join("loop.h")).unwrap();
+        assert!(with_dev_files(&host, &dev).is_err());
     }
 
     /// A fake host with one of each entry the `RuntimeOnly` rules decide
