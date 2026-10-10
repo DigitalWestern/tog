@@ -1820,9 +1820,9 @@ strict requires a signed resolution record for every lock and names the
 remedy.
 
 **Signing on CI: the record artifact.** The default setup (see
-"Decisions") keeps the signing key in one CI job that runs no project
-code, and passes that job's records to the gate as a build artifact, so
-nothing is committed by a bot:
+"Decisions") keeps the signing key in an operator-controlled CI job.
+Project code runs only inside confined resolution tools there. Its records
+reach the keyless gate as a build artifact, so nothing is committed by a bot:
 
 - `tog attest [<eco>] --record-out <path>` runs the verification doors
   as above but writes each signed record to `<path>` (a file when one
@@ -1836,85 +1836,28 @@ nothing is committed by a bot:
   digests against the checkout. A supplied record is only ever evidence.
   It is never written into the project.
 
-A worked GitHub Actions example. The public half of the attest key is in
-the repository variable `TOG_ATTEST_PUBKEY`, and the gate writes its
-machine policy from that variable, never from the checkout, because
-project policy files can only narrow trust:
+The reviewed worked example is in README.md, "Signing locks: who attests".
+It runs from a protected workflow definition and pins one immutable candidate
+commit across signing, verification and testing. The signing key lives in a
+protected environment, is passed only to the confined attestation command,
+and is removed before upload. Artifacts are in fresh runner-owned paths
+outside the candidate checkout. Each fresh gate/test job reconstructs machine
+trust from an operator-owned public key and supplies the same receipts.
 
-```yaml
-jobs:
-  attest:                      # holds the key, runs no project code
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
-            | sh -s -- --no-modify-path --no-completions
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: |
-          umask 077
-          trap 'rm -f "$RUNNER_TEMP/attest.key"' EXIT
-          printf '%s\n' "$TOG_ATTEST_KEY" > "$RUNNER_TEMP/attest.key"
-          unset TOG_ATTEST_KEY
-          TOG_SIGNING_KEY="$RUNNER_TEMP/attest.key" tog attest --record-out "$RUNNER_TEMP/resolution-records"
-        env:
-          TOG_ATTEST_KEY: ${{ secrets.TOG_ATTEST_KEY }}
-      - uses: actions/upload-artifact@v4
-        with: { name: resolution-records, path: "${{ runner.temp }}/resolution-records" }
+The resolution gate is the fresh policy-enforced sync. That keyless sync
+writes unsigned closures, so adding `tog audit` under its trusted-key policy
+would fail. Strict policy rejects every exception, including kinds the
+company template intentionally permits. Teams can use an operator-owned
+machine deny policy instead. `tog run` executes tests on the host in a separate
+disposable job without signing credentials.
 
-  gate:                        # no key, verifies the records
-    needs: attest
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
-            | sh -s -- --no-modify-path --no-completions
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
-        with: { name: resolution-records, path: "${{ runner.temp }}/resolution-records" }
-      - run: |
-          printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
-          export TOG_POLICY="$RUNNER_TEMP/policy.toml"
-          tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
-        env:
-          TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
-
-  test:                        # runs project code, holds no key
-    needs: gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
-            | sh -s -- --no-modify-path --no-completions
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v4
-        with: { name: resolution-records, path: "${{ runner.temp }}/resolution-records" }
-      - run: |
-          printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
-          export TOG_POLICY="$RUNNER_TEMP/policy.toml"
-          tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
-          tog run npm test
-        env:
-          TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
-```
-
-The `attest` job runs only confined tools (every door is `confined` or
-`isolated`), so no project code runs outside a sandbox in the job that
-holds the key. The `test` job, which does run project code unsandboxed,
-never sees the key. GitHub withholds secrets from pull requests opened
-from forks, so a fork's `attest` job fails and its gate reports
-`unrecorded-resolution`. That is the fail-closed result: the lock is
-attested when a maintainer's run of the same commit signs it. The gate
-should be a required check whose workflow file is protected by branch
-rules, as with any CI gate. PR 10 puts this example in the README.
-
-This gate verifies signed resolution records during a fresh policy-enforced
-sync. The keyless sync writes unsigned closure records. `tog audit` under
-its trusted-key policy would refuse those closures, so it is not a step in
-this flow. A gate that requires signed closures needs a separate trusted
-closure-producing setup. Signed resolution receipts do not sign closures.
+The example uses manual candidate verification from the protected default
+branch. Its workflow check does not automatically attach to the candidate
+PR. Automated required checks need a reviewed result-publishing flow bound
+to that exact SHA. Branch protection of a workflow file does not stop a
+same-repository PR from running its modified workflow before merge. An
+ordinary fork PR receives no signing secret, and its skipped dependent job
+is not a successful gate.
 
 **The bot-commit alternative.** A team that prefers committed records
 runs `tog attest` without `--record-out` in the same key-holding job and
