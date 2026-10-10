@@ -764,7 +764,10 @@ pub fn plan_ruby(
     if !project.is_input_file(Path::new("Gemfile")) {
         return Err(err("Gemfile not found"));
     }
+    let observed = project.observing_inputs()?;
+    let project = &observed;
     require_lock(project)?;
+    let basis = resolve::resolution_basis(project)?;
     let lock = read_gemfile_lock(project)?;
     // No plan cache in the project: an editable cache with a predictable
     // key is forgeable authority. Planning re-derives from the lock every
@@ -774,7 +777,7 @@ pub fn plan_ruby(
     // Both gates run confined with no route: full network denial.
     // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
     // (delegated resolver trust) — exit status only, stdout untrusted.
-    let out = resolve::helper(door, project, ruby_obj, "check")?;
+    let out = resolve::helper(door, project, ruby_obj, "check", Some(&basis))?;
     if !out.status.success() {
         return Err(err(format!(
             "Gemfile/Gemfile.lock validation failed: {}",
@@ -782,7 +785,7 @@ pub fn plan_ruby(
         )));
     }
     // Gate 2: LOCK-ONLY closure derivation (never evaluates the Gemfile).
-    let out = resolve::helper(door, project, ruby_obj, "plan")?;
+    let out = resolve::helper(door, project, ruby_obj, "plan", Some(&basis))?;
     if !out.status.success() {
         return Err(err(format!(
             "bundler lock analysis failed: {}{}",
@@ -867,7 +870,12 @@ pub fn plan_ruby(
     }
     // The resolution files this plan was built from, so the resolution
     // join binds a record to this generation of the Gemfile and its lock.
-    let basis = resolve::resolution_basis(project)?;
+    project.verify_observed_inputs()?;
+    if resolve::resolution_basis(project)? != basis {
+        return Err(err(
+            "Ruby resolution inputs changed while planning; run `tog` again",
+        ));
+    }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
 }
 

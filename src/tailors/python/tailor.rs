@@ -165,11 +165,13 @@ impl Tailor for Python {
         // through one door on this sync's scope.
         let mut door =
             ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?;
-        let (plan, selection, inputs) = inputs::read_plan(project, selected, &mut door)?;
+        let observed = project.observing_inputs()?;
+        let (plan, selection, inputs) = inputs::read_plan(&observed, selected, &mut door)?;
         // The resolution files this plan was built from, by digest, taken
         // before realization so a lock another writer swaps in meanwhile
         // is not the basis of a closure planned from the old one.
-        let basis = super::resolve::resolution_basis(project)?;
+        let basis = super::resolve::resolution_basis(&observed)?;
+        observed.verify_observed_inputs()?;
         let runtime = python::realize_runtime(store, activity, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.

@@ -44,6 +44,9 @@ None open.
 
 ## Open work, each its own pull request
 
+- **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
+- **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
+- **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
   - #615 design questions: SRI candidate choice, cargo's symlinked members, the ecosystem-arm check in `kernel/provider`, the `hard_link_target` doc.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:

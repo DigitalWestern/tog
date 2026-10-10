@@ -330,7 +330,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
   **Resolving can build a source distribution that has no wheel** (its build backend runs,
   confined, through the resolution door): it is recorded as `resolution-build`, which a
-  policy can deny to refuse it. sdist build-requirement resolution never builds.
+  policy can deny to refuse it. This also covers metadata preparation by
+  the project's own backend because it can request third-party source builds.
+  sdist build-requirement resolution never builds.
 - **Lock markers are read as PEP 508 and `packaging` 25 read them, with these
   refusals.** Each is a marker tog will not guess at, so a lock that uses one fails
   to import, naming it:

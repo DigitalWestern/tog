@@ -280,6 +280,65 @@ impl Snapshot {
         self.baseline.get(real)
     }
 
+    /// Executable manifests get canonical permissions and no empty project
+    /// directories. Their only variable project state is the covered file
+    /// names and bytes. Change the private stage and its comparison baseline,
+    /// never the checkout. Parent directories are determined by file names.
+    pub(super) fn normalize_executable_inputs(&mut self) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut directories = Vec::new();
+        let root = self.lock_root().real.clone();
+        for (real, state) in &mut self.baseline {
+            let Ok(relative) = real.strip_prefix(&root) else {
+                continue;
+            };
+            let staged = self.roots[self.lock_root].staged.join(relative);
+            match state {
+                EntryState::File { mode, .. } => {
+                    fs::set_permissions(staged, fs::Permissions::from_mode(0o644))?;
+                    *mode = 0o644;
+                }
+                EntryState::Dir { mode } => {
+                    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+                    *mode = 0o755;
+                    if !relative.as_os_str().is_empty() {
+                        directories.push((real.clone(), staged));
+                    }
+                }
+                _ => {}
+            }
+        }
+        directories.sort_by_key(|(real, _)| std::cmp::Reverse(real.components().count()));
+        for (real, staged) in directories {
+            if fs::read_dir(&staged)?.next().is_none() {
+                fs::remove_dir(staged)?;
+                self.baseline.remove(&real);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every regular project file in the immutable pre-run snapshot.
+    pub(super) fn project_file_digests(&self) -> io::Result<BTreeMap<String, String>> {
+        self.baseline
+            .iter()
+            .filter_map(|(path, state)| {
+                let relative = path.strip_prefix(&self.lock_root().real).ok()?;
+                match state {
+                    EntryState::File { sha256, .. } => Some(Ok((
+                        relative.to_string_lossy().into_owned(),
+                        hex::encode(sha256),
+                    ))),
+                    EntryState::Symlink { .. } => Some(Err(io::Error::other(format!(
+                        "{} is a symlink in the staged resolution inputs; nothing was published",
+                        relative.display()
+                    )))),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Walk the stage again and compare it with the baseline by content.
     /// Call only after the tool's whole process tree has stopped.
     pub fn diff(&self) -> io::Result<Vec<Change>> {
