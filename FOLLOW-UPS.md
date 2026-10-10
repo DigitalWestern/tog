@@ -109,3 +109,5 @@ None open.
 - #651: carry explicit operation Context settings and independently owned attribution through the CLI, completing #257.
 
 - **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.
+
+- #653: detect ecosystem comparisons across Rust line boundaries with a bounded token scan and adversarial fixtures.
