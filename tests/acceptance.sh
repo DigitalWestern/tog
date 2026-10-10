@@ -255,14 +255,14 @@ fi
 
 echo "== 11. polyglot project: python + node from one sync, one kernel"
 cp -R "$FIXTURES/proj-poly" "$WORK/p"
-# The hand-hashed Python fixture has no resolver provenance. Make it a
+# The Python fixture has no resolver provenance. Make it a
 # pip-compile pair and resolve through tog before requiring an attested
 # closure at the company-policy gate. Hashes alone are not a receipt.
 cp "$WORK/p/requirements.txt" "$WORK/p/requirements.in"
 (cd "$WORK/p" && "$TOG" update --no-sync py:six)
 (cd "$WORK/p" && "$TOG" sync)
-# The fixture's requirements.txt is unhashed, so the sync compiles
-# requirements.lock.txt through the door with a signed record. Its
+# The update compiles requirements.txt from requirements.in through the
+# door with a signed record. The fixture's
 # package-lock.json is shipped, so no sync resolved it and the first sync
 # records unrecorded-resolution, which the company policy audited in 13
 # denies. attest gives the lock a signed resolution record
