@@ -532,10 +532,7 @@ pub(crate) fn clear_cache_roots_for_test() {
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
     let path = project_dir.join(closure_relative(ecosystem));
     let text = fs::read_to_string(&path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("read {}: {e}; run `tog` first", path.display()),
-        )
+        crate::kernel::error::context(e, format_args!("read {}; run `tog` first", path.display()))
     })?;
     closure_body(&path, &text, ecosystem)
 }

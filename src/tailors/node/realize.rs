@@ -764,7 +764,7 @@ fn commit_env_object(
     let candidate = crate::kernel::policy::object_exceptions();
     let (object, applied) = store
         .commit_with_activity_and_deps(activity, identity, staged, &candidate, deps)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit env: {e}")))?;
+        .map_err(|e| crate::kernel::error::context(e, "commit env"))?;
     for exception in applied {
         if !candidate.contains(&exception) {
             crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
@@ -1051,7 +1051,7 @@ fn ensure_gyp_python(
     }
     let p =
         crate::kernel::provider::cpython::realize_runtime(store, activity, platform, gyp_python)
-            .map_err(|e| io::Error::new(e.kind(), format!("ensure python for node-gyp: {e}")))?;
+            .map_err(|e| crate::kernel::error::context(e, "ensure python for node-gyp"))?;
     Ok(python_obj.insert(p).clone())
 }
 

@@ -153,9 +153,9 @@ pub(crate) fn run_restore(
     let spec = spec(&run);
     let confined = dotnet_confined(&mut run)?;
     door.run_confined(spec, confined).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("store dotnet restore {}: {e}", run.args.join(" ")),
+        crate::kernel::error::context(
+            e,
+            format_args!("store dotnet restore {}", run.args.join(" ")),
         )
     })
 }

@@ -1,6 +1,6 @@
 //! The command surface, exercised through the real binary and offline: no
 //! store objects are realized, no network is touched. Every case here is a
-//! contract from CLI.md (exit status 0/1/2, help on stdout, errors on stderr
+//! contract from CLI.md (exit statuses 0 through 5, help on stdout, errors on stderr
 //! with a next step, pass-through for `run`). The one exception is ignored:
 //! `run_refuses_a_runtime_its_synced_environment_lost` downloads CPython,
 //! and the heavy workflow runs it (`cargo test --test cli -- --ignored`).
@@ -68,7 +68,7 @@ fn denied_setup_metadata_never_executes_on_sync_or_attest() {
             .output()
             .unwrap();
         let stderr = text(&out.stderr);
-        assert!(!out.status.success());
+        assert_eq!(out.status.code(), Some(3), "{stderr}");
         assert!(
             stderr.contains("policy denies resolution-build: setup.py"),
             "{stderr}"
