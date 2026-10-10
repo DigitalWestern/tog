@@ -21,7 +21,7 @@ pub(crate) const OUTPUTS: [&str; 2] = ["Gemfile", "Gemfile.lock"];
 /// Installed gems and Bundler's own state in the project: never copied
 /// into the snapshot, never diffed. A lock-only Bundler reads neither
 /// (`BUNDLE_IGNORE_CONFIG=1`, gems in the run's scratch).
-const EXCLUDE: [&str; 2] = ["vendor/bundle", ".bundle"];
+pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".tog"];
 
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there, the one tog-written
@@ -104,6 +104,7 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     let mut confined = ConfinedSpec::new("ruby", "bundler", WHY);
     confined.name = "bundler";
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
+    confined.complete_inputs = true;
     confined.store_reads = vec![run.ruby_obj.to_path_buf()];
     confined.exclude = EXCLUDE
         .iter()
@@ -165,8 +166,17 @@ pub(crate) fn run_ruby(
     mut run: RubyRun<'_>,
 ) -> io::Result<DelegateReport> {
     let detached = matches!(run.publish, RubyPublish::Detached);
+    let held = crate::kernel::fsroot::ProjectRoot::held_at(run.lock_root)?
+        .map(Ok)
+        .unwrap_or_else(|| crate::kernel::fsroot::ProjectRoot::open(run.lock_root))?;
+    let captured = run
+        .inputs
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| super::resolve::resolution_basis(&held))?;
     let spec = spec(&run);
-    let confined = ruby_confined(&mut run)?;
+    let mut confined = ruby_confined(&mut run)?;
+    confined.expected_inputs = captured;
     let report = door.run_confined(spec, confined).map_err(|e| {
         io::Error::new(
             e.kind(),

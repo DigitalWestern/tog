@@ -21,7 +21,7 @@ pub(crate) const OUTPUTS: [&str; 2] = ["mix.exs", "mix.lock"];
 /// Fetched dependency sources and build output in the project: never
 /// copied into the snapshot, never diffed. A confined mix fetches into the
 /// run's scratch (`MIX_DEPS_PATH`) and builds nothing.
-const EXCLUDE: [&str; 2] = ["deps", "_build"];
+pub(super) const EXCLUDE: [&str; 4] = ["deps", "_build", ".git", ".tog"];
 
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there.
@@ -103,6 +103,7 @@ fn in_scratch(arg: &OsString, scratch: &Path) -> OsString {
 fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     let mut confined = ConfinedSpec::new("elixir", "mix", WHY);
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
+    confined.complete_inputs = true;
     confined.store_reads = vec![run.beam_obj.to_path_buf()];
     confined.exclude = EXCLUDE
         .iter()
@@ -163,8 +164,17 @@ pub(crate) fn run_mix(
     mut run: MixRun<'_>,
 ) -> io::Result<DelegateReport> {
     let detached = matches!(run.publish, MixPublish::Detached);
+    let held = crate::kernel::fsroot::ProjectRoot::held_at(run.lock_root)?
+        .map(Ok)
+        .unwrap_or_else(|| crate::kernel::fsroot::ProjectRoot::open(run.lock_root))?;
+    let captured = run
+        .inputs
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| super::resolve::resolution_basis(&held))?;
     let spec = spec(&run);
-    let confined = mix_confined(&mut run)?;
+    let mut confined = mix_confined(&mut run)?;
+    confined.expected_inputs = captured;
     let report = door.run_confined(spec, confined).map_err(|e| {
         io::Error::new(
             e.kind(),

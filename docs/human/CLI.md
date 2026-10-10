@@ -1126,7 +1126,18 @@ tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
 file that includes one outside the project.
 Ruby's is `bundle lock` with `BUNDLE_FROZEN=true`, which must leave the
-Gemfile and Gemfile.lock byte for byte the same. Bundler reaches
+Gemfile and Gemfile.lock byte for byte the same. Ruby and Elixir manifests
+execute code that can load other project files. Their resolution records
+therefore cover every regular file visible in the resolver's project snapshot,
+including Ruby `eval_gemfile` inputs, umbrella app manifests and nested
+configuration. Editing one of these files requires a fresh resolution or
+`tog attest`, even if the lock still agrees. `.git`, `.tog`, Ruby's `.bundle`
+and `vendor/bundle`, and Elixir's `deps` and `_build` are excluded from that
+snapshot. Other project symlinks are refused because the receipt cannot
+cover them safely. Keep resolution inputs as regular files inside the project.
+Hex uses a fresh private home for every run, so executable configuration
+cannot persist between projects. Registry responses are reused through the
+proxy cache. Bundler reaches
 rubygems.org only through the session's RubyGems mirror
 (`BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/`), so the lock keeps naming
 rubygems.org. Elixir's is `mix deps.get --check-locked`, with Hex pointed

@@ -280,6 +280,22 @@ impl Snapshot {
         self.baseline.get(real)
     }
 
+    /// Every regular project file in the immutable pre-run snapshot.
+    pub(super) fn project_file_digests(&self) -> BTreeMap<String, String> {
+        self.baseline
+            .iter()
+            .filter_map(|(path, state)| {
+                let relative = path.strip_prefix(&self.lock_root().real).ok()?;
+                match state {
+                    EntryState::File { sha256, .. } => {
+                        Some((relative.to_string_lossy().into_owned(), hex::encode(sha256)))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Walk the stage again and compare it with the baseline by content.
     /// Call only after the tool's whole process tree has stopped.
     pub fn diff(&self) -> io::Result<Vec<Change>> {

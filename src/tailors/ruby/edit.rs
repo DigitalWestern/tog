@@ -82,6 +82,7 @@ pub(crate) fn edit_manifest(
     // Every run publishes the Gemfile and Gemfile.lock with a record of its
     // own, so no state between two runs sits under an older record.
     for args in bundler_runs(edit.verb, texts, dev) {
+        let basis = super::resolve::resolution_basis(&root)?;
         let spec = crate::tailors::record_spec(
             &super::tailor::Ruby,
             &root,
@@ -96,7 +97,7 @@ pub(crate) fn edit_manifest(
                 args: &args,
                 // Bundler's Gemfile editor needs no network; the lock runs do.
                 online: args[0] == "bundle",
-                inputs: None,
+                inputs: Some(&basis),
                 frozen: false,
                 files: Vec::new(),
                 publish: RubyPublish::Project {

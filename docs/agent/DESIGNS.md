@@ -3702,10 +3702,14 @@ Bundler and mix onto the door:
   inputs hash as they did at the last pass.
 - **Attest.** Ruby: `bundle lock` with `BUNDLE_FROZEN=true`. Elixir:
   `mix deps.get --check-locked`. Both with `require_unchanged`.
-- **Resolution files.** Ruby: outputs `Gemfile`, `Gemfile.lock`, no
-  inputs (`BUNDLE_IGNORE_CONFIG=1`). Elixir: outputs `mix.exs`,
-  `mix.lock`, inputs every `config/*.exs`. An umbrella's app manifests
-  are not listed.
+- **Resolution files.** Ruby: outputs `Gemfile`, `Gemfile.lock`;
+  inputs are every other regular file visible in the project snapshot.
+  Elixir: outputs `mix.exs`, `mix.lock`, with the same conservative input
+  coverage. This includes `eval_gemfile`, umbrella app manifests, nested
+  configuration and data loaded by project code. The snapshot excludes
+  `.git`, `.tog` and each tailor's dependency/build caches. Symlinked inputs
+  cannot be represented by regular-file digests and are refused. Precise
+  discovery is a separate follow-up.
 - **Edits.** Every Bundler run of `tog add`/`remove`/`update` publishes
   through the edit door with its own record, and `mix deps.update` does
   the same.

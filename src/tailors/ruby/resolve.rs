@@ -15,13 +15,20 @@ use std::path::{Path, PathBuf};
 /// The helper's file name in the run's scratch directory.
 const HELPER_FILE: &str = "helper.rb";
 
+/// Executable Gemfiles can load arbitrary project files. Bind all visible
+/// regular files until precise input discovery has a reviewed design.
+pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &OUTPUTS)
+}
+
 /// The Gemfile and Gemfile.lock, by digest: a closure's
 /// `resolution_basis`.
 pub(crate) fn resolution_basis(
     project: &ProjectRoot,
 ) -> io::Result<crate::comforter::join::Digests> {
-    let outputs: Vec<PathBuf> = OUTPUTS.iter().map(PathBuf::from).collect();
-    record::file_digests(project, &outputs)
+    let mut files: Vec<PathBuf> = OUTPUTS.iter().map(PathBuf::from).collect();
+    files.extend(resolution_inputs(project)?);
+    record::file_digests(project, &files)
 }
 
 /// `prepare`: Gemfile.lock, resolved by the store Bundler when there is
@@ -39,6 +46,7 @@ pub fn generate_lock(
         return Err(err("Gemfile not found"));
     }
     ui::note("no Gemfile.lock; resolving with the store bundler...");
+    let basis = resolution_basis(project)?;
     let args = ["bundle", "lock"];
     let spec =
         crate::tailors::record_spec(&super::tailor::Ruby, project, ruby_tool(selected)?, &args)?;
@@ -49,7 +57,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             online: true,
-            inputs: None,
+            inputs: Some(&basis),
             frozen: false,
             files: Vec::new(),
             publish: RubyPublish::Project {
@@ -108,6 +116,7 @@ pub fn attest_project(
         return Err(err("Gemfile not found"));
     }
     super::require_lock(project)?;
+    let basis = resolution_basis(project)?;
     let args = ["bundle", "lock"];
     let mut spec =
         crate::tailors::record_spec(&super::tailor::Ruby, project, ruby_tool(selected)?, &args)?;
@@ -121,7 +130,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             online: true,
-            inputs: None,
+            inputs: Some(&basis),
             frozen: true,
             files: Vec::new(),
             publish: RubyPublish::Project {
@@ -170,6 +179,33 @@ mod tests {
         resolution_basis(&observed).unwrap();
         fs::write(temp.0.join("Gemfile"), "manifest B").unwrap();
         assert!(resolution_basis(&observed).is_err());
+    }
+
+    #[test]
+    fn an_included_manifest_change_or_new_file_invalidates_the_basis() {
+        let temp = TempDir::named("ruby-included-input");
+        fs::create_dir_all(temp.0.join("dependencies.rb").parent().unwrap()).unwrap();
+        fs::write(temp.0.join("Gemfile"), "manifest").unwrap();
+        fs::write(temp.0.join("Gemfile.lock"), "lock").unwrap();
+        fs::write(temp.0.join("dependencies.rb"), "included manifest A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let basis = resolution_basis(&held).unwrap();
+        assert!(basis.contains_key("dependencies.rb"));
+        fs::write(temp.0.join("dependencies.rb"), "included manifest B").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Ruby, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "ruby", &files, &basis).is_err()
+        );
+        let basis = resolution_basis(&held).unwrap();
+        fs::write(temp.0.join("new-data.txt"), "new input").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Ruby, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "ruby", &files, &basis).is_err()
+        );
     }
 
     /// A harness whose upstream answers from the recorded RubyGems rows,

@@ -16,22 +16,10 @@ use sha2::{Digest as _, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The `config/*.exs` files mix evaluates before it reads the deps: what
-/// a resolution reads beside mix.exs and mix.lock. An umbrella's apps'
-/// manifests are not listed; a record of an umbrella names its root files.
+/// Executable mix manifests can load app manifests, nested configuration,
+/// and arbitrary data. Cover every visible regular project file.
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    let config = Path::new("config");
-    let Some(names) = project.read_input_dir(config)? else {
-        return Ok(Vec::new());
-    };
-    let mut inputs: Vec<PathBuf> = names
-        .into_iter()
-        .filter(|name| name.to_string_lossy().ends_with(".exs"))
-        .map(|name| config.join(name))
-        .filter(|path| project.is_input_file(path))
-        .collect();
-    inputs.sort();
-    Ok(inputs)
+    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &OUTPUTS)
 }
 
 /// mix.exs, mix.lock and the config files, by digest: a closure's
@@ -59,6 +47,7 @@ pub fn generate_lock(
         return Err(err("mix.exs not found"));
     }
     ui::note("no mix.lock; resolving with the store mix...");
+    let basis = resolution_basis(project)?;
     let args = ["mix", "deps.get"];
     let spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
@@ -73,7 +62,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             online: true,
-            inputs: None,
+            inputs: Some(&basis),
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -92,6 +81,7 @@ pub(crate) fn update(
     selected: &Selected,
     args: &[&str],
 ) -> io::Result<()> {
+    let basis = resolution_basis(project)?;
     let spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
         project,
@@ -105,7 +95,7 @@ pub(crate) fn update(
             lock_root: project.path(),
             args,
             online: true,
-            inputs: None,
+            inputs: Some(&basis),
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -208,7 +198,15 @@ pub fn plan_elixir(
     }
     require_lock(project)?;
     let lock = read_mix_lock(project)?;
-    let inputs = check_locked_inputs(project, beam_obj, &lock)?;
+    let bind = |input: String, basis: &crate::comforter::join::Digests| {
+        format!(
+            "{input}:{}",
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(basis).expect("string map")
+            ))
+        )
+    };
+    let inputs = check_locked_inputs(project, beam_obj, &lock)?.map(|input| bind(input, &basis));
     let unchanged = match &inputs {
         Some(inputs) => check_locked_passed(door.store(), project, inputs)?,
         None => false,
@@ -219,7 +217,9 @@ pub fn plan_elixir(
         check_locked(door, project, beam_obj, &basis)?;
         // Recorded only when the inputs still hash the same after the
         // check, so the record names the bytes the check actually read.
-        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?;
+        let after_basis = resolution_basis(project)?;
+        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?
+            .map(|input| bind(input, &after_basis));
         if let (Some(before), Some(after)) = (&inputs, &after) {
             if before == after {
                 record_check_locked(door.store(), door.lease(), project, before);
@@ -264,6 +264,7 @@ pub fn attest_project(
         return Err(err("mix.exs not found"));
     }
     require_lock(project)?;
+    let basis = resolution_basis(project)?;
     let args = ["mix", "deps.get", "--check-locked"];
     let mut spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
@@ -281,7 +282,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             online: true,
-            inputs: None,
+            inputs: Some(&basis),
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, slot.clone())),
@@ -327,6 +328,33 @@ mod tests {
         resolution_basis(&observed).unwrap();
         fs::write(temp.0.join("mix.exs"), "manifest B").unwrap();
         assert!(resolution_basis(&observed).is_err());
+    }
+
+    #[test]
+    fn an_included_manifest_change_or_new_file_invalidates_the_basis() {
+        let temp = TempDir::named("elixir-included-input");
+        fs::create_dir_all(temp.0.join("apps/web/mix.exs").parent().unwrap()).unwrap();
+        fs::write(temp.0.join("mix.exs"), "manifest").unwrap();
+        fs::write(temp.0.join("mix.lock"), "lock").unwrap();
+        fs::write(temp.0.join("apps/web/mix.exs"), "included manifest A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let basis = resolution_basis(&held).unwrap();
+        assert!(basis.contains_key("apps/web/mix.exs"));
+        fs::write(temp.0.join("apps/web/mix.exs"), "included manifest B").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Elixir, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "elixir", &files, &basis).is_err()
+        );
+        let basis = resolution_basis(&held).unwrap();
+        fs::write(temp.0.join("new-data.txt"), "new input").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Elixir, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "elixir", &files, &basis).is_err()
+        );
     }
 
     /// A harness whose upstream answers repo.hex.pm from the recorded Hex

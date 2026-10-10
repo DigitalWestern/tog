@@ -142,6 +142,8 @@ pub struct ConfinedSpec<'a> {
     /// Digests a planner already consumed. The staged bytes must match
     /// before project code runs, even if the live files change back later.
     pub expected_inputs: BTreeMap<String, String>,
+    /// Also refuse newly added project files outside the consumed generation.
+    pub complete_inputs: bool,
 }
 
 impl<'a> ConfinedSpec<'a> {
@@ -171,6 +173,7 @@ impl<'a> ConfinedSpec<'a> {
             policy: None,
             facts: Vec::new(),
             expected_inputs: BTreeMap::new(),
+            complete_inputs: false,
         }
     }
 
@@ -316,6 +319,12 @@ pub(super) fn run(
         },
     )?;
     check_planning_inputs(&snapshot, &confined.expected_inputs)?;
+    if confined.complete_inputs && snapshot.project_file_digests() != confined.expected_inputs {
+        return Err(io::Error::other(
+            "project files changed while planning executable-manifest resolution; \
+             nothing was published; run `tog` again",
+        ));
+    }
     let ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
     if let Some(failure) = ran.session.facts.failure() {
