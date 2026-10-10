@@ -78,7 +78,11 @@ directory descriptor, and hands it to every `Tailor` method it calls
 (`detect`, `check_inputs`, `preflight`, `prepare`, `plan`, `sync`). Every
 project read and write goes through it, never through the project's path, so
 a project renamed or replaced mid-sync cannot substitute another project's
-files. Manifests and dependency locks the user authors are read with
+files. On Linux, strict walks require only search permission on intermediate
+directories. A directory that is actually listed or fsynced still needs
+read permission. Build outputs moved from another filesystem stream into a
+temporary file before atomic publication, preserving the destination if
+reading the source fails. Manifests and dependency locks the user authors are read with
 `read_input`, which resolves from the descriptor but follows a symlink the
 project contains. tog's own state is walked one component at a time with
 `O_NOFOLLOW`, so a `.tog`, `.venv` parent or `cargo-home` swapped for a
