@@ -1614,6 +1614,149 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_stream_preserves_the_destination_and_removes_its_partial_temporary() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        struct FailingReader {
+            temporary: PathBuf,
+            emitted: usize,
+        }
+        impl io::Read for FailingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if buffer.is_empty() {
+                    return Ok(0);
+                }
+                if self.emitted == 7 {
+                    assert_eq!(fs::read(&self.temporary).unwrap(), b"partial");
+                    return Err(io::Error::other("source read failed"));
+                }
+                let size = buffer.len().min(7 - self.emitted);
+                buffer[..size].copy_from_slice(&b"partial"[self.emitted..self.emitted + size]);
+                self.emitted += size;
+                Ok(size)
+            }
+        }
+
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        fs::create_dir(dir.join(".tog")).unwrap();
+        let victim = temp.0.join("victim");
+        fs::write(&victim, b"keep").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        for name in ["regular", "link", "absent"] {
+            let destination = dir.join(".tog").join(name);
+            match name {
+                "regular" => {
+                    fs::write(&destination, b"old").unwrap();
+                    fs::set_permissions(&destination, fs::Permissions::from_mode(0o740)).unwrap();
+                }
+                "link" => symlink(&victim, &destination).unwrap(),
+                _ => {}
+            }
+            let temporary = dir.join(".tog").join(OsStr::from_bytes(
+                &fixed_temp_name(name.as_bytes(), 0).unwrap(),
+            ));
+            let error = root
+                .publish_mode(
+                    &Path::new(".tog").join(name),
+                    &mut FailingReader {
+                        temporary,
+                        emitted: 0,
+                    },
+                    Some(0o750),
+                    true,
+                    &mut fixed_temp_name,
+                )
+                .unwrap_err();
+            assert_eq!(error.to_string(), "source read failed");
+            match name {
+                "regular" => {
+                    assert_eq!(fs::read(&destination).unwrap(), b"old");
+                    assert_eq!(
+                        destination.metadata().unwrap().permissions().mode() & 0o777,
+                        0o740
+                    );
+                }
+                "link" => assert_eq!(fs::read_link(&destination).unwrap(), victim),
+                _ => assert!(!destination.exists()),
+            }
+            assert!(!entries(&dir.join(".tog"))
+                .iter()
+                .any(|name| name.contains(".tog-tmp")));
+            assert_eq!(fs::read(&victim).unwrap(), b"keep");
+        }
+    }
+
+    #[test]
+    fn publication_streams_generated_bytes_with_bounded_reads_and_write_lag() {
+        struct GeneratedReader {
+            emitted: usize,
+            total: usize,
+            temporary: PathBuf,
+            destination: PathBuf,
+        }
+        impl io::Read for GeneratedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                const MAX_BUFFER: usize = 64 << 10;
+                assert!(
+                    buffer.len() <= MAX_BUFFER,
+                    "unbounded read: {}",
+                    buffer.len()
+                );
+                assert_eq!(fs::read(&self.destination).unwrap(), b"old");
+                let written = self.temporary.metadata()?.len() as usize;
+                assert!(
+                    self.emitted.saturating_sub(written) <= MAX_BUFFER,
+                    "source is being buffered instead of streamed to the temporary"
+                );
+                let size = buffer.len().min(self.total - self.emitted);
+                for (offset, byte) in buffer[..size].iter_mut().enumerate() {
+                    *byte = ((self.emitted + offset) % 251) as u8;
+                }
+                self.emitted += size;
+                Ok(size)
+            }
+        }
+
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let destination = dir.join("app");
+        fs::write(&destination, b"old").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let total = (4 << 20) + 7;
+        let mut source = GeneratedReader {
+            emitted: 0,
+            total,
+            temporary: dir.join(OsStr::from_bytes(&fixed_temp_name(b"app", 0).unwrap())),
+            destination: destination.clone(),
+        };
+        root.publish_mode(
+            Path::new("app"),
+            &mut source,
+            None,
+            false,
+            &mut fixed_temp_name,
+        )
+        .unwrap();
+        assert_eq!(source.emitted, total);
+        let mut file = fs::File::open(&destination).unwrap();
+        let mut buffer = [0; 8192];
+        let mut checked = 0;
+        loop {
+            let size = io::Read::read(&mut file, &mut buffer).unwrap();
+            if size == 0 {
+                break;
+            }
+            for (offset, byte) in buffer[..size].iter().enumerate() {
+                assert_eq!(*byte, ((checked + offset) % 251) as u8);
+            }
+            checked += size;
+        }
+        assert_eq!(checked, total);
+        assert_eq!(entries(&dir), vec!["app"]);
+    }
+
+    #[test]
     fn remove_file_deletes_a_regular_file_and_tolerates_an_absent_one() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
