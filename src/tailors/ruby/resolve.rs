@@ -306,6 +306,42 @@ mod tests {
         let Some(harness) = ruby_harness(label) else {
             return;
         };
+        // Fetching a gem before /info supplied its checksum must never
+        // silently bypass the weak-integrity permission.
+        for denied in [false, true] {
+            let policy = crate::kernel::policy::Policy {
+                deny: if denied {
+                    std::collections::BTreeSet::from([policy::WEAK_INTEGRITY.into()])
+                } else {
+                    Default::default()
+                },
+                ..Default::default()
+            };
+            let mut config = harness.config(policy, crate::kernel::resolve::session::Mode::Online);
+            config.ecosystem = "ruby".into();
+            config.routes = vec![super::super::registry::route().unwrap()];
+            config.permitted = crate::kernel::resolve::routes::Permitted::compiled();
+            let (session, address) = harness.open(config);
+            let path = url::Url::parse(&format!(
+                "{}gems/rake-13.4.2.gem",
+                address.route_base("rubygems")
+            ))
+            .unwrap();
+            let reply = crate::kernel::resolve::testing::get(&address, path.path(), "");
+            assert_eq!(
+                reply.status,
+                if denied { 403 } else { 200 },
+                "{}",
+                reply.text()
+            );
+            let report = session.finish();
+            assert!(report
+                .facts
+                .exceptions
+                .iter()
+                .any(|fact| fact.kind == policy::WEAK_INTEGRITY));
+            assert_eq!(report.facts.failure().is_some(), denied);
+        }
         let selected = super::super::shipped_selection().unwrap();
         let ruby_obj = super::super::realize_runtime(
             &harness.store,
