@@ -148,10 +148,18 @@ pub(crate) fn inner(error: &io::Error) -> Option<&io::Error> {
 /// `error` with `what` in front of its message (`what: message`), keeping
 /// its kind, class and original payload, including recovery and interruption.
 pub fn context(error: io::Error, what: impl fmt::Display) -> io::Error {
+    let message = format!("{what}: {error}");
+    describe(error, message)
+}
+
+/// Add a complete diagnostic while retaining the owned original error.
+/// For callers with a recovery suffix or multiple reasons whose existing
+/// message order must remain intact.
+pub(crate) fn describe(error: io::Error, message: String) -> io::Error {
     io::Error::new(
         error.kind(),
         Contextual {
-            message: format!("{what}: {error}"),
+            message,
             original: error,
         },
     )

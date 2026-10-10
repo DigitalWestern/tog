@@ -532,7 +532,8 @@ pub(crate) fn clear_cache_roots_for_test() {
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
     let path = project_dir.join(closure_relative(ecosystem));
     let text = fs::read_to_string(&path).map_err(|e| {
-        crate::kernel::error::context(e, format_args!("read {}; run `tog` first", path.display()))
+        let message = format!("read {}: {e}; run `tog` first", path.display());
+        crate::kernel::error::describe(e, message)
     })?;
     closure_body(&path, &text, ecosystem)
 }
@@ -566,10 +567,8 @@ pub fn read_closure_if_present(
     let relative = closure_relative(ecosystem);
     let path = project.path().join(&relative);
     let Some(bytes) = project.read_file(&relative).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("read {}: {e}; run `tog` first", path.display()),
-        )
+        let message = format!("read {}: {e}; run `tog` first", path.display());
+        crate::kernel::error::describe(e, message)
     })?
     else {
         return Ok(None);
@@ -2151,6 +2150,36 @@ mod closure_object_tests {
                 && error.to_string().ends_with("; run `tog` first"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_symlinked_closure_retains_the_held_read_refusal() {
+        let temp = TempDir::named("closure-refusal-class");
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let relative = Path::new(".tog/closures/node.json");
+        fs::create_dir_all(temp.0.join(".tog/closures")).unwrap();
+        let outside = temp.0.join("outside.json");
+        fs::write(&outside, b"original").unwrap();
+        std::os::unix::fs::symlink(&outside, temp.0.join(relative)).unwrap();
+        let direct = project.read_file(relative).unwrap_err();
+        let wrapped = read_closure_if_present(&project, "node").unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&direct),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        assert_eq!(
+            crate::kernel::error::class_of(&wrapped),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        assert_eq!(wrapped.kind(), direct.kind());
+        assert_eq!(
+            wrapped.to_string(),
+            format!(
+                "read {}: {direct}; run `tog` first",
+                temp.0.join(relative).display()
+            )
+        );
+        assert_eq!(fs::read(outside).unwrap(), b"original");
     }
 
     #[test]
