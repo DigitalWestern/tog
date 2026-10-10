@@ -98,8 +98,9 @@ pub fn stale(kind: io::ErrorKind, message: impl Into<String>) -> io::Error {
 }
 
 /// The class of `error`, if it has one. Besides a carried [`Classified`],
-/// a refused store is `Refused` and an `Unsupported` kind is
-/// `Unsupported`: both already say exactly that.
+/// a refused store is `Refused`, an `Unsupported` kind is `Unsupported`,
+/// and a server status a retry can change (`fetch::retry_may_help`) is
+/// `Network`: each already says exactly that.
 pub fn class_of(error: &io::Error) -> Option<Class> {
     if let Some(classified) = error
         .get_ref()
@@ -112,6 +113,9 @@ pub fn class_of(error: &io::Error) -> Option<Class> {
     }
     if crate::kernel::store::refusal_fix(error).is_some() {
         return Some(Class::Refused);
+    }
+    if crate::kernel::fetch::retry_may_help(error) {
+        return Some(Class::Network);
     }
     (error.kind() == io::ErrorKind::Unsupported).then_some(Class::Unsupported)
 }

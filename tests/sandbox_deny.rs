@@ -1,7 +1,17 @@
-//! Acceptance: a build that attempts undeclared network access MUST fail.
+//! Acceptance tests of the sandbox itself, end to end:
 //!
-//! Heavy (realizes CPython + build toolchain on first run), so #[ignore]d;
-//! the heavy workflow (.github/workflows/heavy.yml) runs it:
+//! - a build that attempts undeclared network access fails, and the build
+//!   toolchain works offline (`network_access_during_build_fails`);
+//! - the bubblewrap command line keeps its contract (`bwrap_contract`);
+//! - the no-store relay scrubs the signing key `TOG_SIGNING_KEY` names;
+//! - the runtime-only host view keeps a real LLVM tree's compiler whole;
+//! - the resolution door's Linux confinement (`door`): bubblewrap in the
+//!   proxy network mode, the relay, the seccomp filter, the socket scan,
+//!   quiescence and publication.
+//!
+//! The heavy ones (CPython and a build toolchain on first run, or a host
+//! tree only the CI runner has) are #[ignore]d, and the heavy workflow
+//! (.github/workflows/heavy.yml) runs them:
 //!     cargo test --test sandbox_deny -- --ignored
 //! Without TOG_STORE the store is a scratch one, never the developer's own.
 

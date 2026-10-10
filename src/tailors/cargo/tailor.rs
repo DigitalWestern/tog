@@ -480,8 +480,8 @@ impl Formatter for Rustfmt {
 /// Then the configuration cargo-fmt's cargo reads, from the invocation
 /// directory up to the workspace root (nothing above it is mounted): a
 /// file there (or one it includes) that is the key, or a symlink out of
-/// the workspace, is refused by name. These are read at the names the two
-/// held directories have now, each checked against its descriptor.
+/// the workspace, is refused by name. Reads start from the held workspace,
+/// and each opened file's ancestry must reach that directory's identity.
 fn fmt_preflight(
     invocation: &ProjectRoot,
     workspace: &ProjectRoot,
@@ -489,7 +489,8 @@ fn fmt_preflight(
 ) -> io::Result<()> {
     use crate::kernel::provider::cargo_door;
     use crate::kernel::resolve::confine;
-    confine::refuse_key_links_in(workspace, &confine::key_ids(keys), &[])?;
+    let key_ids = confine::key_ids(keys);
+    confine::refuse_key_links_in(workspace, &key_ids, &[])?;
     let workspace_now = workspace.current_name()?;
     let invocation_now = invocation.current_name()?;
     if !invocation_now.starts_with(&workspace_now) {
@@ -499,12 +500,13 @@ fn fmt_preflight(
             workspace.path().display()
         )));
     }
-    let bound = cargo_door::Bound::with_keys(&workspace_now, keys)?;
-    for dir in invocation_now.ancestors() {
-        if !dir.starts_with(&workspace_now) {
-            break;
-        }
-        cargo_door::config_files(dir, &bound)?;
+    // Each config is read from the held workspace, at the invocation's
+    // place inside it and each directory above, up to the workspace root.
+    let below = invocation_now
+        .strip_prefix(&workspace_now)
+        .unwrap_or(Path::new(""));
+    for dir in below.ancestors() {
+        cargo_door::held_config_files(workspace, dir, &key_ids)?;
     }
     Ok(())
 }
@@ -627,10 +629,34 @@ mod tests {
         assert!(error.to_string().contains("outside"), "{error}");
         fs::remove_file(moved.join("member/.cargo/config.toml")).unwrap();
 
+        // An include in the held workspace is read from it too: one that
+        // reaches the key through a symlink is refused, by the name the
+        // workspace was opened at.
+        fs::create_dir_all(moved.join(".cargo")).unwrap();
+        fs::write(
+            moved.join(".cargo/config.toml"),
+            "include = [\"../shared.toml\"]\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&key, moved.join("shared.toml")).unwrap();
+        let error = fmt_preflight(&invocation, &workspace, &keys).unwrap_err();
+        assert!(error.to_string().contains("is the signing key"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(&original.join(".cargo/../shared.toml").display().to_string()),
+            "{error}"
+        );
+        fs::remove_file(moved.join("shared.toml")).unwrap();
+        fs::write(moved.join("shared.toml"), "[net]\n").unwrap();
+
         // The held tree is clean now, and what sits at the old path is not
-        // looked at: a key link there does not refuse the run.
+        // looked at: a key link or a config leading out there does not
+        // refuse the run.
         fs::create_dir_all(original.join("target")).unwrap();
         fs::hard_link(&key, original.join("target/k")).unwrap();
+        fs::create_dir_all(original.join("member/.cargo")).unwrap();
+        std::os::unix::fs::symlink(&outside, original.join("member/.cargo/config.toml")).unwrap();
         fmt_preflight(&invocation, &workspace, &keys).unwrap();
     }
 

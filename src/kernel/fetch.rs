@@ -6,6 +6,7 @@
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 pub use crate::kernel::digest::Digest;
+use crate::kernel::error;
 use crate::kernel::store::{self, Store};
 use crate::kernel::toolchain::SourcePolicy;
 use sha1::Sha1;
@@ -384,12 +385,73 @@ fn network_cause(error: &ureq::Error) -> String {
     }
 }
 
+/// A transport failure (offline, DNS, a refused or reset connection, a
+/// timeout) is the `Network` failure class, exit 6: running it again may
+/// work. A status keeps its code for [`http_status`], and only a status a
+/// retry can change (408, 429, 5xx) is `Network`, by [`retry_may_help`].
 fn network_error(verb: &str, url: &str, error: ureq::Error) -> io::Error {
     let message = format!("{verb} {}: {}", shown_url(url), network_cause(&error));
     match error {
         ureq::Error::Status(code, _) => io::Error::other(StatusFailure { code, message }),
+        ureq::Error::Transport(transport)
+            if retryable_transport(transport.kind()) && !permanent_tls_cause(&transport) =>
+        {
+            error::new(error::Class::Network, io::ErrorKind::Other, message)
+        }
+        // Invalid URLs, schemes, proxy credentials, HTTPS-only refusals,
+        // redirect loops and malformed responses need an input or server fix.
         ureq::Error::Transport(_) => io::Error::other(message),
     }
+}
+
+fn retryable_transport(kind: ureq::ErrorKind) -> bool {
+    matches!(
+        kind,
+        ureq::ErrorKind::Dns
+            | ureq::ErrorKind::ConnectionFailed
+            | ureq::ErrorKind::Io
+            | ureq::ErrorKind::ProxyConnect
+    )
+}
+
+/// ureq uses connection/IO kinds for both socket failures and TLS errors.
+/// Keep certificate, protocol and TLS-name failures distinct using their
+/// retained types. A reset or timeout without a TLS cause stays retryable.
+fn permanent_tls_cause(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cause = Some(error);
+    for _ in 0..32 {
+        let Some(error) = cause else { return false };
+        if error.is::<rustls::Error>() || error.is::<rustls::pki_types::InvalidDnsNameError>() {
+            return true;
+        }
+        // io::Error::source may skip its immediate payload. Inspect that
+        // payload explicitly before walking any further source chain.
+        cause = error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+            .map(|payload| payload as &(dyn std::error::Error + 'static))
+            .or_else(|| error.source());
+    }
+    false
+}
+
+/// A response body that broke off while it was read: a `Network` failure,
+/// since a retry may finish it. Local file errors and typed TLS protocol
+/// failures remain ordinary errors with their original cause retained.
+fn read_failure(url: &str, e: io::Error) -> io::Error {
+    let message = format!("read {}: {e}", shown_url(url));
+    if url.starts_with("file:") || permanent_tls_cause(&e) {
+        error::describe(e, message)
+    } else {
+        error::new(error::Class::Network, e.kind(), message)
+    }
+}
+
+/// Whether `error` is a server status a later retry can change: a timeout
+/// (408), a rate limit (429), or a server error (5xx). A 404 or a 403 is
+/// an answer and stays an ordinary failure.
+pub(crate) fn retry_may_help(error: &io::Error) -> bool {
+    http_status(error).is_some_and(|code| code == 408 || code == 429 || (500..600).contains(&code))
 }
 
 /// A request the server answered with an error status. It prints as the
@@ -510,7 +572,7 @@ fn read_text_capped(reader: impl Read, max: u64, url: &str) -> io::Result<String
     reader
         .take(max + 1)
         .read_to_end(&mut body)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))))?;
+        .map_err(|e| read_failure(url, e))?;
     if body.len() as u64 > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -561,7 +623,7 @@ pub(crate) fn download_unpinned(url: &str, dest: &Path, max: u64) -> io::Result<
 /// read error. Every message names `url` as `shown_url` shows it.
 fn copy_unpinned(url: &str, dest: &Path, max: u64, reader: Box<dyn Read>) -> io::Result<()> {
     let mut file = fs::File::create(dest)?;
-    let copied = io::copy(&mut reader.take(max + 1), &mut file);
+    let copied = copy_unpinned_stream(url, max, reader, &mut file);
     drop(file);
     let refusal = match copied {
         Ok(copied) if copied <= max => return Ok(()),
@@ -569,10 +631,32 @@ fn copy_unpinned(url: &str, dest: &Path, max: u64, reader: Box<dyn Read>) -> io:
             "download {}: longer than {max} bytes; refusing",
             shown_url(url)
         )),
-        Err(e) => io::Error::new(e.kind(), format!("read {}: {e}", shown_url(url))),
+        Err(e) => e,
     };
     let _ = fs::remove_file(dest);
     Err(refusal)
+}
+
+/// Classify only errors from the network reader. Destination write errors
+/// keep their local cause and remain ordinary failures.
+fn copy_unpinned_stream(
+    url: &str,
+    max: u64,
+    reader: Box<dyn Read>,
+    writer: &mut impl Write,
+) -> io::Result<u64> {
+    struct Source<'a> {
+        url: &'a str,
+        reader: Box<dyn Read>,
+    }
+    impl Read for Source<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reader
+                .read(buf)
+                .map_err(|error| read_failure(self.url, error))
+        }
+    }
+    io::copy(&mut Source { url, reader }.take(max + 1), writer)
 }
 
 /// `url` parsed the way the fetcher parses it (ureq, through the `url`
@@ -634,12 +718,7 @@ fn stream_to_file(
         let n = match reader.read(&mut buf) {
             Ok(0) => break Ok(()),
             Ok(n) => n,
-            Err(e) => {
-                break Err(io::Error::new(
-                    e.kind(),
-                    format!("read {}: {e}", shown_url(url)),
-                ))
-            }
+            Err(e) => break Err(read_failure(url, e)),
         };
         total += n as u64;
         progress.advance(n as u64);
@@ -1110,15 +1189,22 @@ pub(crate) fn cache_from_reader_any(
     candidates: &[Digest],
     open: impl FnOnce() -> io::Result<Box<dyn Read>>,
 ) -> io::Result<(CacheLease, Digest)> {
-    cache_or_download_narrated(
-        store,
-        activity,
-        url,
-        candidates,
-        false,
-        MAX_ARTIFACT,
-        || open().map(|reader| (reader, None)),
-    )
+    cache_from_reader_within(store, activity, url, candidates, MAX_ARTIFACT, open)
+}
+
+/// `cache_from_reader_any` with its stream cap as a parameter, so a test
+/// can feed the proxy's path a stream past a cap without several GiB.
+fn cache_from_reader_within(
+    store: &Store,
+    activity: &StoreActivity,
+    url: &str,
+    candidates: &[Digest],
+    max: u64,
+    open: impl FnOnce() -> io::Result<Box<dyn Read>>,
+) -> io::Result<(CacheLease, Digest)> {
+    cache_or_download_narrated(store, activity, url, candidates, false, max, || {
+        open().map(|reader| (reader, None))
+    })
 }
 
 /// A verified cache entry for `digest`, fetched through `open` only when
@@ -2355,6 +2441,253 @@ mod integrity_tests {
         .unwrap_err();
         assert!(HashMismatch::of(&error).is_some(), "{error}");
         assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// The proxy's path refuses a stream past its cap and leaves nothing
+    /// behind, as the pinned path does (#620). The cap is 1 KiB here,
+    /// `MAX_ARTIFACT` in `cache_from_reader_any`.
+    #[test]
+    fn a_proxied_download_past_its_cap_is_refused() {
+        let (_scratch, store) = scratch_store("fetch-cap-proxy-refused");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let candidates = [Digest::sha256(&sha256_hex(b"hello")).unwrap()];
+        let error =
+            cache_from_reader_within(&store, activity, "https://x/big", &candidates, 1024, || {
+                Ok(Box::new(io::repeat(0).take(1025)) as Box<dyn Read>)
+            })
+            .map(drop)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the 1024-byte artifact cap"),
+            "{error}"
+        );
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// A transport failure and a status a retry can change are the
+    /// `Network` class (exit 6); a 404 is an answer, not a network
+    /// failure, and a broken-off body is `Network` unless it was a local
+    /// file (#258).
+    #[test]
+    fn network_failures_are_the_network_class() {
+        use crate::kernel::error::{class_of, Class};
+        // Nothing listens on port 1 of the loopback address.
+        let refused = fetch_text("https://127.0.0.1:1/x").unwrap_err();
+        assert_eq!(class_of(&refused), Some(Class::Network), "{refused}");
+        for code in [408, 429, 500, 503, 599] {
+            assert_eq!(class_of(&status_failure(code)), Some(Class::Network));
+        }
+        for code in [403, 404, 600] {
+            let answer = status_failure(code);
+            assert_eq!(class_of(&answer), None);
+            assert_eq!(http_status(&answer), Some(code));
+        }
+        let reset = || io::Error::from(io::ErrorKind::ConnectionReset);
+        let remote = read_failure("https://x/a", reset());
+        assert_eq!(class_of(&remote), Some(Class::Network));
+        assert_eq!(remote.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(class_of(&read_failure("file:///a", reset())), None);
+    }
+
+    #[test]
+    fn permanent_request_errors_are_not_retryable_network_failures() {
+        for url in [
+            "https://[",
+            "ftp://example.invalid/x",
+            "http://example.invalid/x",
+        ] {
+            let error = fetch_text(url).unwrap_err();
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                None,
+                "{url}: {error}"
+            );
+        }
+        for kind in [
+            ureq::ErrorKind::InvalidUrl,
+            ureq::ErrorKind::UnknownScheme,
+            ureq::ErrorKind::InsecureRequestHttpsOnly,
+            ureq::ErrorKind::InvalidProxyUrl,
+            ureq::ErrorKind::ProxyUnauthorized,
+            ureq::ErrorKind::TooManyRedirects,
+            ureq::ErrorKind::BadStatus,
+            ureq::ErrorKind::BadHeader,
+        ] {
+            assert!(!retryable_transport(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn tls_failures_are_permanent_but_socket_failures_remain_retryable() {
+        let tls = io::Error::new(
+            io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+        );
+        let error = network_error("fetch", "https://x/a", ureq::Error::from(tls));
+        assert_eq!(crate::kernel::error::class_of(&error), None, "{error}");
+        for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::TimedOut] {
+            let error = network_error(
+                "fetch",
+                "https://x/a",
+                ureq::Error::from(io::Error::from(kind)),
+            );
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Network),
+                "{error}"
+            );
+        }
+    }
+
+    struct TlsFixture {
+        client: std::sync::Arc<rustls::ClientConfig>,
+        wire: Box<dyn ureq::ReadWrite>,
+        corrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    // A real ureq TLS connection without a socket or external server.
+    fn tls_fixture(trust_server: bool) -> TlsFixture {
+        #[derive(Debug)]
+        struct Wire {
+            server: rustls::ServerConnection,
+            response: Vec<u8>,
+            corrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Read for Wire {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self
+                    .corrupt
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    self.response = vec![0xff, 3, 3, 0, 0];
+                }
+                let n = buf.len().min(self.response.len());
+                buf[..n].copy_from_slice(&self.response[..n]);
+                self.response.drain(..n);
+                Ok(n)
+            }
+        }
+        impl Write for Wire {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let n = self.server.read_tls(&mut &buf[..])?;
+                self.server
+                    .process_new_packets()
+                    .map_err(io::Error::other)?;
+                while self.server.wants_write() {
+                    self.server.write_tls(&mut self.response)?;
+                }
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl ureq::ReadWrite for Wire {
+            fn socket(&self) -> Option<&std::net::TcpStream> {
+                None
+            }
+        }
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der())
+            .into();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.cert.der().clone()], key)
+            .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        if trust_server {
+            roots.add(certificate.cert.der().clone()).unwrap();
+        }
+        let client = std::sync::Arc::new(
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let corrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wire = Wire {
+            server: rustls::ServerConnection::new(std::sync::Arc::new(server)).unwrap(),
+            response: Vec::new(),
+            corrupt: corrupt.clone(),
+        };
+        TlsFixture {
+            client,
+            wire: Box::new(wire),
+            corrupt,
+        }
+    }
+
+    #[test]
+    fn an_actual_untrusted_tls_handshake_is_not_retryable() {
+        let fixture = tls_fixture(false);
+        let rejected =
+            ureq::TlsConnector::connect(&fixture.client, "localhost", fixture.wire).unwrap_err();
+        assert_eq!(rejected.kind(), ureq::ErrorKind::ConnectionFailed);
+        let error = network_error("fetch", "https://localhost/x", rejected);
+        assert!(error.to_string().contains("UnknownIssuer"), "{error}");
+        assert_eq!(crate::kernel::error::class_of(&error), None, "{error}");
+    }
+
+    #[test]
+    fn a_tls_protocol_error_in_the_response_body_is_not_retryable() {
+        let fixture = tls_fixture(true);
+        let mut stream =
+            ureq::TlsConnector::connect(&fixture.client, "localhost", fixture.wire).unwrap();
+        fixture
+            .corrupt
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let error = stream.read(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(permanent_tls_cause(&error), "{error}");
+        let error = read_failure("https://localhost/x", error);
+        assert_eq!(crate::kernel::error::class_of(&error), None, "{error}");
+        assert!(permanent_tls_cause(&error), "typed cause lost: {error}");
+        for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::TimedOut] {
+            let error = read_failure("https://x/a", io::Error::from(kind));
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Network)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unpinned_download_keeps_local_write_failures_ordinary() {
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::StorageFull))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = copy_unpinned_stream("https://x/a", 1024, Box::new(&b"hello"[..]), &mut Full)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(crate::kernel::error::class_of(&error), None);
+        assert!(!error.to_string().contains("read https"), "{error}");
+
+        let error = copy_unpinned_stream(
+            "https://x/a",
+            1024,
+            Box::new(DroppedStream {
+                head: b"hel",
+                served: 0,
+            }),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Network)
+        );
     }
 
     /// An unpinned download stops reading one byte past its cap, so a

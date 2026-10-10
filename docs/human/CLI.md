@@ -130,11 +130,12 @@ the program's status through. Which files tog reads per ecosystem:
   | 3 | refused by rule: a policy denial, a store tog will not open, a project path swapped under it, `pip install` inside `tog run` | change the policy or the input; rerunning changes nothing |
   | 4 | stale: a committed lock no longer matches its inputs, or is missing where `--frozen` or a strict policy never writes one | update the lock and commit it |
   | 5 | unsupported here: a pin no catalog has, a runtime too old for the file, no isolation on this machine | change the pin or the machine |
+  | 6 | network: offline, DNS, a refused or reset connection, a timeout, a download that broke off, or a server status a retry can change (408, 429, 5xx) | run it again; HTTP 403/404, invalid request or proxy settings, and TLS certificate/protocol failures exit 1 |
   | 128 + n | stopped by signal n (130 for Ctrl-C) | |
 
   Under `--json` the failure object carries the same class as a key:
   `{"error": "...", "class": "refused"}` (`refused`, `stale`,
-  `unsupported`), beside `fix` when there is one. `audit` keeps its own
+  `unsupported`, `network`), beside `fix` when there is one. `audit` keeps its own
   verdict codes: 1 for a gate that denies, 2 for a misconfigured one.
   `status` and `doctor` also return their report verdicts, including 1 for
   a stale projection or a failed diagnostic. These are completed reports,
@@ -432,6 +433,12 @@ it, or once `gc` has forgotten the root the older tog registered (until then,
 alone, it is what keeps that root readable); every reader but gc skips it. Nothing roots the formatter object, so `gc` can reclaim it between runs
 and the next run realizes it again. A package.json script named `fmt` wins and runs as
 `tog run fmt`; an explicit `--eco rust` bypasses the script.
+
+Rust formatting reads Cargo configuration and its includes from the held
+workspace. A config that resolves outside that workspace, or to the signing
+key by any name, is refused with exit 3. Absolute include paths must name
+files inside the workspace. An absolute alias outside it is refused even
+when that alias points back inside. Missing optional includes remain allowed.
 
 **run** executes a command with the PATH and ecosystem variables of the
 nearest projected root (the closest ancestor with `.tog/closures/`). A

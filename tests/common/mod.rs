@@ -154,6 +154,18 @@ fn scrubbed(mut command: Command, home: &Path) -> Command {
 /// The environment [`command_for`] gives the binary, applied to `command`,
 /// which may be a wrapper that execs the binary.
 fn configure(command: Command, cwd: &Path, home: &Path, store: &Path) -> Command {
+    // The layout [`command`] warns against, refused up front (#560): a
+    // project directory with HOME below it (temp/ as the project, with
+    // temp/home inside) passes only until its ecosystem's resolution runs
+    // confined. HOME as the directory itself is a command run outside any
+    // project, which the offline cases use.
+    assert!(
+        home == cwd || cwd == Path::new("/") || !home.starts_with(cwd),
+        "test harness: HOME {} is inside the directory tog runs in, {}; put the project \
+         beside home (temp/project and temp/home), see `command`",
+        home.display(),
+        cwd.display()
+    );
     let mut command = scrubbed(command, home);
     command
         .current_dir(cwd)

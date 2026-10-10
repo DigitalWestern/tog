@@ -1,9 +1,9 @@
 //! The command surface, exercised through the real binary and offline: no
 //! store objects are realized, no network is touched. Every case here is a
-//! contract from CLI.md (exit statuses 0 through 5, help on stdout, errors on stderr
-//! with a next step, pass-through for `run`). The one exception is ignored:
-//! `run_refuses_a_runtime_its_synced_environment_lost` downloads CPython,
-//! and the heavy workflow runs it (`cargo test --test cli -- --ignored`).
+//! contract from CLI.md (exit statuses 0 through 6, help on stdout, errors on stderr
+//! with a next step, pass-through for `run`). A case that needs a realized
+//! runtime belongs in an e2e file instead: an ignored test here would make
+//! the heavy workflow download one for every change to this file.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
@@ -984,59 +984,6 @@ fn run_passes_arguments_through_and_needs_a_project() {
     let out = tog(&project.0, &home.0, &["run", "--", "-h"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("no environment projected here"));
-}
-
-/// `tog run` itself refuses a runtime its project's environment does not
-/// provide, rather than letting the host's PATH supply one (#564, #581):
-/// the unit tests of `unprovided_runtime` do not show that `run` calls it.
-/// Ignored: the sync downloads CPython. The environment is then broken in
-/// this case's own store (never a shared `TOG_STORE`), by making the
-/// interpreter `.venv/bin` points at non-executable, so `python` and
-/// `python3` are named but not provided. A host python3 (every CI runner
-/// has one) would answer `--version` if `run` fell through.
-#[test]
-#[ignore]
-fn run_refuses_a_runtime_its_synced_environment_lost() {
-    let home = TempDir::boundary("cli-run-runtime");
-    let project = TempDir::boundary("cli-run-runtime-project");
-    std::fs::write(
-        project.0.join("pyproject.toml"),
-        "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-    )
-    .unwrap();
-    let out = tog(&project.0, &home.0, &["run", "python3", "--version"]);
-    let stdout = text(&out.stdout);
-    assert!(
-        out.status.success() && stdout.starts_with("Python 3."),
-        "stdout: {stdout}\nstderr: {}",
-        text(&out.stderr)
-    );
-    let interpreter = std::fs::canonicalize(project.0.join(".venv/bin/python3")).unwrap();
-    assert!(
-        interpreter.starts_with(std::fs::canonicalize(home.0.join("store")).unwrap()),
-        "{} is not in this case's store",
-        interpreter.display()
-    );
-    let mode = std::fs::metadata(&interpreter).unwrap().permissions();
-    std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o644)).unwrap();
-    for program in ["python3", "python"] {
-        let out = tog(&project.0, &home.0, &["run", program, "--version"]);
-        let stderr = text(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{program}: {stderr}");
-        assert!(
-            stderr.contains(&format!(
-                "'{program}' is the python runtime, but the project's environment does not \
-                 provide it"
-            )),
-            "{program}: {stderr}"
-        );
-        assert!(
-            text(&out.stdout).is_empty(),
-            "{program} ran: {}",
-            text(&out.stdout)
-        );
-    }
-    std::fs::set_permissions(&interpreter, mode).unwrap();
 }
 
 /// A project that has a manifest but no projection is synced before the
@@ -5265,12 +5212,12 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     );
     assert!(!stderr.contains("is a python file"), "{stderr}");
     // Outside any project the file takes the lone-file road too, on the
-    // shipped runtime: with the network cut, realizing it refuses, and
-    // nothing ran on the host's `python`.
+    // shipped runtime: with the network cut, realizing it fails as a
+    // network failure (exit 6), and nothing ran on the host's `python`.
     let empty = TempDir::boundary("cli-file-empty");
     std::fs::write(empty.0.join("app.py"), "print('host python ran')\n").unwrap();
     let out = tog_offline(&empty.0, &home.0, &["-v", "app.py"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains(

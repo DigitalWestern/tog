@@ -35,14 +35,16 @@ None open.
 
 ## Open work, each its own pull request
 
+- **#655: hand-hashed Python adoption.** Test the documented conversion to a compiled lock and signed receipt, then consider an explicit adoption command.
+- **#656: harness HOME containment.** Add alternate-spelling coverage and define physical containment with the existing offline exceptions in the next shared-harness change.
+
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
 - **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
   - #615 remaining design questions: SRI candidate choice, cargo's symlinked members, the `hard_link_target` doc.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
-  - #619 held project root: `tog fmt` reads cargo config by path.
-  - #620 test gaps: the hook for tailors other than Ruby, the `sandbox_deny` header, a CPython test in `tests/cli.rs`, the proxy reader's upper cap.
+  - #620 test gaps: the dev-files hook for tailors other than Ruby, to add with the next tailor whose host-header fallback changes.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **Action leftovers (#427).** Left: the first tag that carries
@@ -55,7 +57,7 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 (closed) holds the overall verdict. What
   is left, one issue and one PR each, in order:
-  - #258: failure classes. `kernel::error` carries Refused, Stale and Unsupported to exit statuses 3 to 5 (a signal is already `128 + n`). Left: the Network class, whose one source is `fetch::network_error` (a heavy-suite file, so it goes in a pull request that touches `src/kernel/fetch*` anyway), and moving the `io::Error::new(e.kind(), format!(..))` re-wraps to `error::context` as each is touched.
+  - #258: failure classes. `kernel::error` carries Refused, Stale, Unsupported and Network to exit statuses 3 to 6 (a signal is already `128 + n`). Left: moving the `io::Error::new(e.kind(), format!(..))` re-wraps to `error::context` as each is touched.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
@@ -72,7 +74,6 @@ None open.
   unblocks the authenticated parts of `docs/agent/DESIGNS.md` §2 (WP3,
   #404) and §4 (WP5, #405); §2 PR 0, the provider evidence spike, comes
   first.
-- **#560: e2e layouts with HOME inside the project.** The Python and Ruby tests moved their projects beside HOME in #205 and #206. Left: the harness guard in `tests/common/mod.rs`.
 - **macOS arm64 gate. Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
   (after #305); `tests/supervise_signals.rs` (#57) and the Mach allow-list

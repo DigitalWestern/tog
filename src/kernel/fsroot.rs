@@ -966,6 +966,53 @@ impl ProjectRoot {
         self.open_input_with_missing(relative, false)
     }
 
+    /// Like `open_input_file`, for an optional input that cargo treats as
+    /// absent when a parent component is a regular file (a file named
+    /// `.cargo`, or an include under a file): ENOTDIR is a missing input.
+    pub(crate) fn open_optional_input_file(&self, relative: &Path) -> io::Result<Option<fs::File>> {
+        self.open_input_with_missing(relative, true)
+    }
+
+    /// Verify that an opened file belongs to this held directory. Recover
+    /// its parent from the kernel name, verify the file's identity there,
+    /// then walk held parents until this root's identity is reached.
+    /// A renamed root is still the same root. A replacement at its old
+    /// pathname cannot satisfy this check.
+    pub(crate) fn contains_open_file(&self, file: &fs::File) -> io::Result<bool> {
+        let real = descriptor_path(file.as_raw_fd())?;
+        let parent = real
+            .parent()
+            .ok_or_else(|| refusal("file has no parent".into()))?;
+        let name = real
+            .file_name()
+            .ok_or_else(|| refusal("file has no name".into()))?;
+        let mut dir = walk_from_root_with(parent, ANCESTOR_FLAGS)?;
+        if !same_inode(
+            &fd_stat(file.as_raw_fd())?,
+            &stat_at(dir.as_raw_fd(), name.as_bytes())?,
+        ) {
+            return Err(refusal(
+                "file moved while checking project containment".into(),
+            ));
+        }
+        let root = fd_stat(self.dir.as_raw_fd())?;
+        // Bound the walk even if another process keeps moving directories.
+        for _ in 0..4096 {
+            let current = fd_stat(dir.as_raw_fd())?;
+            if same_inode(&current, &root) {
+                return Ok(true);
+            }
+            let parent = open_file_at(dir.as_raw_fd(), b"..", ANCESTOR_FLAGS, 0)?;
+            if same_inode(&current, &fd_stat(parent.as_raw_fd())?) {
+                return Ok(false);
+            }
+            dir = parent;
+        }
+        Err(refusal(
+            "project ancestry kept changing during containment check".into(),
+        ))
+    }
+
     fn open_input(&self, relative: &Path) -> io::Result<Option<fs::File>> {
         self.open_input_with_missing(relative, true)
     }
@@ -1217,6 +1264,36 @@ fn walk_from_root_with(path: &Path, last_flags: libc::c_int) -> io::Result<fs::F
         }
     }
     Ok(dir)
+}
+
+/// The current path of what the descriptor `fd` holds, from the kernel
+/// (`/proc/self/fd` on Linux, `F_GETPATH` on macOS): the file or directory
+/// actually opened, wherever it is now, never a name looked up again.
+pub(crate) fn descriptor_path(fd: RawFd) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_link(format!("/proc/self/fd/{fd}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = [0 as libc::c_char; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes to this buffer.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, bytes.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful F_GETPATH writes a NUL-terminated pathname.
+        let path = unsafe { std::ffi::CStr::from_ptr(bytes.as_ptr()) };
+        Ok(std::ffi::OsString::from_vec(path.to_bytes().to_vec()).into())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fd;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the path of a held descriptor is unsupported on this platform",
+        ))
+    }
 }
 
 fn is_directory_stat(stat: &libc::stat) -> bool {
