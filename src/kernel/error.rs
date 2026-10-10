@@ -191,10 +191,7 @@ mod tests {
 
     #[test]
     fn retained_io_errors_keep_their_class_through_multiple_contexts() {
-        let nested = io::Error::new(
-            io::ErrorKind::Other,
-            refused(io::ErrorKind::InvalidData, "denied"),
-        );
+        let nested = io::Error::other(refused(io::ErrorKind::InvalidData, "denied"));
         let wrapped = context(context(nested, "tool"), "sync");
         assert_eq!(class_of(&wrapped), Some(Class::Refused));
         assert_eq!(wrapped.to_string(), "sync: tool: denied");
