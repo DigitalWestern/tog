@@ -436,12 +436,12 @@ fn permanent_tls_cause(error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 /// A response body that broke off while it was read: a `Network` failure,
-/// since a retry may finish it. A local file's read error (a `file://`
-/// URL) is an ordinary one.
+/// since a retry may finish it. Local file errors and typed TLS protocol
+/// failures remain ordinary errors with their original cause retained.
 fn read_failure(url: &str, e: io::Error) -> io::Error {
     let message = format!("read {}: {e}", shown_url(url));
-    if url.starts_with("file:") {
-        io::Error::new(e.kind(), message)
+    if url.starts_with("file:") || permanent_tls_cause(&e) {
+        error::describe(e, message)
     } else {
         error::new(error::Class::Network, e.kind(), message)
     }
@@ -451,7 +451,7 @@ fn read_failure(url: &str, e: io::Error) -> io::Error {
 /// (408), a rate limit (429), or a server error (5xx). A 404 or a 403 is
 /// an answer and stays an ordinary failure.
 pub(crate) fn retry_may_help(error: &io::Error) -> bool {
-    http_status(error).is_some_and(|code| code == 408 || code == 429 || code >= 500)
+    http_status(error).is_some_and(|code| code == 408 || code == 429 || (500..600).contains(&code))
 }
 
 /// A request the server answered with an error status. It prints as the
@@ -2476,10 +2476,10 @@ mod integrity_tests {
         // Nothing listens on port 1 of the loopback address.
         let refused = fetch_text("https://127.0.0.1:1/x").unwrap_err();
         assert_eq!(class_of(&refused), Some(Class::Network), "{refused}");
-        for code in [408, 429, 500, 503] {
+        for code in [408, 429, 500, 503, 599] {
             assert_eq!(class_of(&status_failure(code)), Some(Class::Network));
         }
-        for code in [403, 404] {
+        for code in [403, 404, 600] {
             let answer = status_failure(code);
             assert_eq!(class_of(&answer), None);
             assert_eq!(http_status(&answer), Some(code));
@@ -2541,17 +2541,28 @@ mod integrity_tests {
         }
     }
 
-    #[test]
-    fn an_actual_untrusted_tls_handshake_is_not_retryable() {
-        // Exercise ureq's ConnectionFailed wrapper without a socket or
-        // external server. The server's self-signed certificate is untrusted.
+    struct TlsFixture {
+        client: std::sync::Arc<rustls::ClientConfig>,
+        wire: Box<dyn ureq::ReadWrite>,
+        corrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    // A real ureq TLS connection without a socket or external server.
+    fn tls_fixture(trust_server: bool) -> TlsFixture {
         #[derive(Debug)]
         struct Wire {
             server: rustls::ServerConnection,
             response: Vec<u8>,
+            corrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
         }
         impl Read for Wire {
             fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self
+                    .corrupt
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                {
+                    self.response = vec![0xff, 3, 3, 0, 0];
+                }
                 let n = buf.len().min(self.response.len());
                 buf[..n].copy_from_slice(&self.response[..n]);
                 self.response.drain(..n);
@@ -2588,23 +2599,62 @@ mod integrity_tests {
             .with_no_client_auth()
             .with_single_cert(vec![certificate.cert.der().clone()], key)
             .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        if trust_server {
+            roots.add(certificate.cert.der().clone()).unwrap();
+        }
         let client = std::sync::Arc::new(
             rustls::ClientConfig::builder_with_provider(provider)
                 .with_safe_default_protocol_versions()
                 .unwrap()
-                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_root_certificates(roots)
                 .with_no_client_auth(),
         );
+        let corrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let wire = Wire {
             server: rustls::ServerConnection::new(std::sync::Arc::new(server)).unwrap(),
             response: Vec::new(),
+            corrupt: corrupt.clone(),
         };
+        TlsFixture {
+            client,
+            wire: Box::new(wire),
+            corrupt,
+        }
+    }
+
+    #[test]
+    fn an_actual_untrusted_tls_handshake_is_not_retryable() {
+        let fixture = tls_fixture(false);
         let rejected =
-            ureq::TlsConnector::connect(&client, "localhost", Box::new(wire)).unwrap_err();
+            ureq::TlsConnector::connect(&fixture.client, "localhost", fixture.wire).unwrap_err();
         assert_eq!(rejected.kind(), ureq::ErrorKind::ConnectionFailed);
         let error = network_error("fetch", "https://localhost/x", rejected);
         assert!(error.to_string().contains("UnknownIssuer"), "{error}");
         assert_eq!(crate::kernel::error::class_of(&error), None, "{error}");
+    }
+
+    #[test]
+    fn a_tls_protocol_error_in_the_response_body_is_not_retryable() {
+        let fixture = tls_fixture(true);
+        let mut stream =
+            ureq::TlsConnector::connect(&fixture.client, "localhost", fixture.wire).unwrap();
+        fixture
+            .corrupt
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let error = stream.read(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(permanent_tls_cause(&error), "{error}");
+        let error = read_failure("https://localhost/x", error);
+        assert_eq!(crate::kernel::error::class_of(&error), None, "{error}");
+        assert!(permanent_tls_cause(&error), "typed cause lost: {error}");
+        for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::TimedOut] {
+            let error = read_failure("https://x/a", io::Error::from(kind));
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Network)
+            );
+        }
     }
 
     #[test]
