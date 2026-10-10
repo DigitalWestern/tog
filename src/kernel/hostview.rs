@@ -128,7 +128,7 @@ const PLUGIN_DIRS: &[&str] = &[
 /// (`gtk-3.0`, `gdk-pixbuf-2.0`, `gstreamer-1.0`, OpenSSL's `engines-3`).
 const PLUGIN_DIR_PREFIXES: &[&str] = &["gtk-", "gdk-pixbuf-", "gstreamer-", "engines-"];
 
-/// Whether the host path `path` is in a plugin directory: a component
+/// Whether the sandbox path `path` is in a plugin directory: a component
 /// below its library directory (the first `lib`, `lib64`, `lib32` or
 /// `libx32`) is a `PLUGIN_DIRS` name or starts with a
 /// `PLUGIN_DIR_PREFIXES` prefix. Only what is below counts, so the
@@ -494,6 +494,7 @@ fn library_entry_placement(
     name: &str,
     file_type: fs::FileType,
     host_entry: &Path,
+    inside_entry: &Path,
     curation: Curation,
 ) -> Placement {
     let subtree = curation == Curation::Subtree;
@@ -511,7 +512,7 @@ fn library_entry_placement(
     if file_type.is_dir() {
         return if is_compiler_dir(name)
             || is_llvm_bin(name, host_entry)
-            || !holds_dev_files(host_entry)
+            || !holds_dev_files(host_entry, inside_entry)
         {
             Placement::Keep
         } else {
@@ -523,7 +524,7 @@ fn library_entry_placement(
     }
     if let Some(stem) = name.strip_suffix(".so") {
         if c_runtime(C_RUNTIME_SHARED, stem)
-            || (subtree && (!name.starts_with("lib") || in_plugin_dir(host_entry)))
+            || (subtree && (!name.starts_with("lib") || in_plugin_dir(inside_entry)))
         {
             return Placement::Keep;
         }
@@ -575,7 +576,12 @@ fn is_header(name: &str) -> bool {
 /// linker script, the link name a `-devel` package adds
 /// (`openmpi/lib/libmpi.so`). In a plugin directory that same name is a
 /// plugin its program opens, so it marks nothing.
-fn marks_dev_dir(name: &str, file_type: fs::FileType, host_entry: &Path) -> bool {
+fn marks_dev_dir(
+    name: &str,
+    file_type: fs::FileType,
+    host_entry: &Path,
+    inside_entry: &Path,
+) -> bool {
     if file_type.is_dir() {
         return is_dev_dir(name);
     }
@@ -585,7 +591,7 @@ fn marks_dev_dir(name: &str, file_type: fs::FileType, host_entry: &Path) -> bool
     let link_name = name.starts_with("lib")
         && name.ends_with(".so")
         && (file_type.is_symlink() || (file_type.is_file() && !starts_with_elf_magic(host_entry)));
-    link_name && !in_plugin_dir(host_entry)
+    link_name && !in_plugin_dir(inside_entry)
 }
 
 /// Whether anything under the host directory `host` marks it as holding
@@ -593,7 +599,7 @@ fn marks_dev_dir(name: &str, file_type: fs::FileType, host_entry: &Path) -> bool
 /// are not followed. A directory tog cannot list may hold any of them, by
 /// a name the build can still open, so it counts as holding some: curated,
 /// it is an empty directory in the view (`classify_dir`).
-fn holds_dev_files(host: &Path) -> bool {
+fn holds_dev_files(host: &Path, inside: &Path) -> bool {
     let Ok(entries) = fs::read_dir(host) else {
         return true;
     };
@@ -603,8 +609,9 @@ fn holds_dev_files(host: &Path) -> bool {
         };
         let name = entry.file_name();
         let path = entry.path();
-        marks_dev_dir(&name.to_string_lossy(), file_type, &path)
-            || (file_type.is_dir() && holds_dev_files(&path))
+        let inside_entry = inside.join(&name);
+        marks_dev_dir(&name.to_string_lossy(), file_type, &path, &inside_entry)
+            || (file_type.is_dir() && holds_dev_files(&path, &inside_entry))
     })
 }
 
@@ -1011,7 +1018,7 @@ fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Ve
             }
             Curation::Headers | Curation::Empty => Placement::Drop,
             Curation::Libraries | Curation::Subtree => {
-                library_entry_placement(&text, file_type, &host_entry, curation)
+                library_entry_placement(&text, file_type, &host_entry, &inside_entry, curation)
             }
         };
         entries.push((name, file_type, nested, placement));
@@ -1942,6 +1949,30 @@ mod tests {
             "the plugin symlink was dropped"
         );
         assert!(fs::symlink_metadata(mirror.join("plugin-api.h")).is_err());
+    }
+
+    /// The host prefix is outside the sandbox path. A scratch ancestor
+    /// named lib/plugins must not exempt ordinary link names or change
+    /// which inputs the shared classifier fingerprints.
+    #[test]
+    fn scratch_ancestors_do_not_make_library_entries_plugins() {
+        let host = subtree_fake_host("plugin-looking-prefix");
+        let before = host_build_inputs_at(&host.0).unwrap();
+        let nested = host.0.join("lib/plugins/host");
+        fs::create_dir_all(&nested).unwrap();
+        fs::rename(host.0.join("usr"), nested.join("usr")).unwrap();
+        assert_eq!(host_build_inputs_at(&nested).unwrap(), before);
+        let skeleton = temp_dir("plugin-looking-prefix-skeleton");
+        let (args, _) = runtime_only_args(&nested, &skeleton.0).unwrap();
+        for dropped in [
+            "usr/lib64/linkonly/liblinkonly.so",
+            "usr/lib64/scripted/libscripted.so",
+        ] {
+            assert!(fs::symlink_metadata(skeleton.0.join(dropped)).is_err());
+        }
+        assert!(ro_binds(&args)
+            .iter()
+            .any(|(_, to)| { to == Path::new("/usr/lib64/bfd-plugins") }));
     }
 
     /// A development file appearing in a curated subdirectory, a dev
