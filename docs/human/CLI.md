@@ -1007,9 +1007,15 @@ The closures a reviewer reads in the diff come from the protected job, or
 from a developer running a signing sync locally.
 
 On a runner without unprivileged user namespaces the build sandbox is
-unavailable, so a project that needs `tog build` or sdist compilation needs
-a runner that has them; `sync` of a wheel-only or lock-only project does
-not.
+unavailable, so `tog build` and source-package compilation need a runner
+with the sandbox prerequisites. Ruby and Elixir also require resolution
+isolation for ordinary sync and plan with committed locks, because their
+manifest checks and lock parsers run project code through the door. Edits,
+missing-lock generation and `tog attest` require it too. On Linux, enable
+unprivileged user namespaces and install bubblewrap. If the native runner
+is unavailable, these operations refuse before executing project code.
+Wheel-only Python sync with an existing recorded lock does not execute a
+resolution tool unless metadata preparation or resolution is needed.
 
 
 ## Maintain verbs
