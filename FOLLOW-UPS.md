@@ -101,3 +101,8 @@ None open.
 - **#637: configurable Ruby and Elixir manifest inputs.** Design narrower explicit declarations with conservative coverage as the default.
 - **#638: authenticated Hex cache.** Keep private homes until a data-only persistent cache has reviewed integrity and tenant boundaries.
 - **#639: resolution publication concurrency.** Add deterministic full planner-to-closure race tests for Ruby and Elixir.
+
+- #640: Define independent .NET lock semantic verification for executable MSBuild projects.
+- #641: Design policy-owned NuGet feeds, credentials, signatures and cache boundaries.
+- #642: Design declared MSBuild resolution inputs with conservative fallback.
+- #643: Cover unsupported future-tailor attest guards with focused unit tests.
