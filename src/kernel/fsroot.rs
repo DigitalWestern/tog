@@ -1962,6 +1962,36 @@ mod tests {
         assert_eq!(fs::read(gate.join("pkg/inner/new/out.txt")).unwrap(), b"y");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_search_only_directory_cannot_be_listed_but_its_known_file_can_be_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: geteuid takes no arguments and only reads process state.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skip permission enforcement: root bypasses directory mode bits");
+            return;
+        }
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let gate = dir.join("gate");
+        fs::create_dir(&gate).unwrap();
+        fs::write(gate.join("known"), b"readable").unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o111)).unwrap();
+        let os_listing = fs::read_dir(&gate);
+        let known = root.read_file(Path::new("gate/known"));
+        let held = root.subdir(Path::new("gate"));
+        let listing = root.read_dir(Path::new("gate"));
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            os_listing.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(known.unwrap().as_deref(), Some(&b"readable"[..]));
+        assert_eq!(held.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(listing.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
     /// The walk from `/` holds ancestors without reading them, but never
     /// through a symlink: a recorded path whose ancestor became one fails.
     #[test]
