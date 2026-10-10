@@ -54,7 +54,19 @@ const ROOT_DIRS: [&str; 8] = ["usr", "etc", "run", "run/tog", "tmp", "proc", "de
 
 /// The flags every container of a run gets, the preflight's included, so
 /// the probe cannot pass on a configuration the run never uses.
-const FENCE: [&str; 21] = [
+const FENCE: [&str; 33] = [
+    "--privileged=false",
+    "--sig-proxy=false",
+    "--pid",
+    "private",
+    "--ipc",
+    "private",
+    "--uts",
+    "private",
+    "--cgroupns",
+    "private",
+    "--cgroups",
+    "enabled",
     "--network",
     "none",
     "--userns",
@@ -77,6 +89,59 @@ const FENCE: [&str; 21] = [
     "never",
     "--log-driver=none",
 ];
+
+/// Engine configuration stays outside every mount visible to the tool.
+/// Ambient configuration must never add host mounts, hooks or namespaces.
+#[derive(Clone)]
+pub(super) struct EngineConfig {
+    config: PathBuf,
+    hooks: PathBuf,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl EngineConfig {
+    pub(super) fn new(stage: &Path) -> io::Result<Self> {
+        // SAFETY: UID queries have no pointer arguments or failure mode.
+        let (uid, effective) = unsafe { (libc::getuid(), libc::geteuid()) };
+        if uid == 0 || effective != uid {
+            return Err(io::Error::new(io::ErrorKind::Unsupported,
+                "the resolution container requires a local non-root user without elevated privileges"));
+        }
+        let config = stage.join("engine.conf");
+        let hooks = stage.join("engine-hooks");
+        fs::create_dir(&hooks)?;
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&config)?;
+        file.write_all(
+            b"[containers]\ndefault_mounts_file=\"/dev/null\"\n[engine]\nhooks_dir=[]\n",
+        )?;
+        let mut env = Vec::new();
+        // Infrastructure only. Neither the engine nor its helpers inherit
+        // loader, remote, containers.conf or storage configuration overrides.
+        for key in ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+            if let Some(value) = std::env::var_os(key) {
+                env.push((key.into(), value));
+            }
+        }
+        Ok(Self { config, hooks, env })
+    }
+
+    pub(super) fn command(&self, podman: &Path) -> io::Result<std::process::Command> {
+        let mut command = sandbox::bwrap_command(podman)?;
+        command
+            .env_clear()
+            .envs(self.env.iter().cloned())
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("CONTAINERS_CONF", &self.config)
+            .env("CONTAINERS_STORAGE_CONF", "/dev/null")
+            .args(["--remote=false", "--hooks-dir"])
+            .arg(&self.hooks);
+        Ok(command)
+    }
+}
 
 /// The rootless podman this machine can run a fenced container with, found
 /// and tried once per process. An interrupt during the probe is returned
@@ -125,6 +190,7 @@ fn probe_container(
     fs::create_dir(scratch)?;
     fs::set_permissions(scratch, fs::Permissions::from_mode(0o700))?;
     let (rootfs, system) = root(scratch)?;
+    let config = EngineConfig::new(scratch)?;
     let name = name();
     let mut args = run_args(&name);
     for (source, destination) in &system {
@@ -132,9 +198,9 @@ fn probe_container(
     }
     args.extend(rootfs_args(&rootfs)?);
     args.push("/usr/bin/true".into());
-    let mut command = sandbox::bwrap_command(podman)?;
+    let mut command = config.command(podman)?;
     command.args(&args);
-    let removal = Removal::new(podman, name);
+    let removal = Removal::new(podman, name, config);
     let output = crate::kernel::supervise::local_output(&mut command, activity);
     drop(removal);
     let output = output?;
@@ -344,20 +410,22 @@ pub(super) fn podman_args(
 pub struct Removal {
     podman: PathBuf,
     name: String,
+    config: EngineConfig,
 }
 
 impl Removal {
-    pub fn new(podman: &Path, name: String) -> Removal {
+    pub(super) fn new(podman: &Path, name: String, config: EngineConfig) -> Removal {
         Removal {
             podman: podman.to_path_buf(),
             name,
+            config,
         }
     }
 }
 
 impl Drop for Removal {
     fn drop(&mut self) {
-        remove(&self.podman, &self.name);
+        remove(&self.podman, &self.name, &self.config);
     }
 }
 
@@ -367,8 +435,10 @@ impl Drop for Removal {
 /// reads and writes no store path.
 // Reviewed site (tests/architecture.rs): the forced removal of a resolution container, which must run after an interrupt.
 #[allow(clippy::disallowed_methods)]
-fn remove(podman: &Path, name: &str) {
-    let mut command = std::process::Command::new(podman);
+fn remove(podman: &Path, name: &str, config: &EngineConfig) {
+    let Ok(mut command) = config.command(podman) else {
+        return;
+    };
     command
         .args(["rm", "--force", "--time", "0", "--ignore", name])
         .stdin(std::process::Stdio::null())

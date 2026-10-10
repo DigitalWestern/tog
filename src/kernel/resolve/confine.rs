@@ -984,9 +984,10 @@ pub fn confined_run(
             let podman = super::container::preflight(activity)?;
             let name = super::container::name();
             let args = super::container::podman_args(run, &mounts, &name)?;
-            let mut command = sandbox::bwrap_command(podman)?;
+            let config = super::container::EngineConfig::new(run.snapshot.stage())?;
+            let mut command = config.command(podman)?;
             command.args(&args);
-            let removal = super::container::Removal::new(podman, name);
+            let removal = super::container::Removal::new(podman, name, config);
             (command, Some(removal))
         }
     };
