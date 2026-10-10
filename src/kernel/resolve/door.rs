@@ -1703,6 +1703,193 @@ exit 37
         assert!(outcome.recorded.is_empty(), "{:?}", outcome.recorded);
     }
 
+    #[test]
+    fn podman_door_ignores_ambient_engine_mounts_and_remote_settings() {
+        let _env = policy::test_env_lock();
+        let fx = fixture("podman-ambient");
+        let Some(relay) = podman_relay("podman-ambient", &fx.harness.activity) else {
+            return;
+        };
+        let secret = fx._temp.0.join("unapproved");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("marker"), "host input").unwrap();
+        let poison = fx._temp.0.join("poison.conf");
+        fs::write(
+            &poison,
+            format!(
+                "[containers]\nvolumes=[{:?}]\nprivileged=true\npidns=\"host\"\nipcns=\"host\"\n",
+                format!("{}:/unexpected:rw", secret.display())
+            ),
+        )
+        .unwrap();
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(
+            [
+                "CONTAINERS_CONF",
+                "CONTAINERS_CONF_OVERRIDE",
+                "CONTAINER_HOST",
+            ]
+            .map(|key| (key, std::env::var_os(key)))
+            .into(),
+        );
+        std::env::set_var("CONTAINERS_CONF", &poison);
+        std::env::set_var("CONTAINERS_CONF_OVERRIDE", &poison);
+        std::env::set_var(
+            "CONTAINER_HOST",
+            "unix:///definitely-not-the-local-engine.sock",
+        );
+        let outcome = run_podman_door(
+            &fx,
+            relay,
+            "test ! -e /unexpected/marker || exit 33\ngrep CapEff /proc/self/status > deps.lock\n",
+            |_| {},
+        );
+        assert!(outcome.result.unwrap().status.success());
+        assert_eq!(
+            fs::read_to_string(fx.project.join("deps.lock")).unwrap(),
+            "CapEff:\t0000000000000000\n"
+        );
+        assert_eq!(fs::read(secret.join("marker")).unwrap(), b"host input");
+    }
+
+    #[test]
+    fn podman_cleanup_failure_refuses_outputs_and_preserves_the_project() {
+        let fx = fixture("podman-cleanup-failure");
+        let Some(relay) = podman_relay("podman-cleanup-failure", &fx.harness.activity) else {
+            return;
+        };
+        let before = tree(&fx.project);
+        super::super::container::FAIL_FINISH.with(|flag| flag.set(true));
+        let outcome = run_podman_door(&fx, relay, "echo changed > deps.lock\n", |_| {});
+        assert!(outcome
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("confirm container removal"));
+        assert_eq!(tree(&fx.project), before);
+        assert!(rooted(&fx).is_empty());
+    }
+
+    /// Re-executed in a separate process so signals cannot stop other tests.
+    #[test]
+    #[ignore = "subprocess harness for the foreground Podman cancellation test"]
+    fn podman_signal_harness() {
+        let Some(marker) = std::env::var_os("TOG_PODMAN_SIGNAL_MARKER") else {
+            return;
+        };
+        let marker = PathBuf::from(marker);
+        let signal: i32 = std::env::var("TOG_PODMAN_SIGNAL_NUMBER")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let fx = fixture("podman-signal");
+        let relay = podman_relay("podman-signal", &fx.harness.activity).unwrap();
+        let cache = fx.harness.store.root.join("cache/signal");
+        fs::create_dir(&cache).unwrap();
+        fs::write(marker.join("cache"), cache.as_os_str().as_encoded_bytes()).unwrap();
+        let before = tree(&fx.project);
+        let script = format!(
+            "trap '' INT TERM\necho ready > '{}/ready'\nwhile :; do sleep 1; done\n",
+            cache.display()
+        );
+        let outcome = run_podman_door(&fx, relay, &script, |confined| {
+            confined.cache_roots = vec![cache]
+        });
+        let error = outcome.result.unwrap_err();
+        assert_eq!(
+            crate::kernel::supervise::stop_signal(&error),
+            Some(signal),
+            "{error}"
+        );
+        assert_eq!(tree(&fx.project), before);
+        fs::write(marker.join("stopped"), "stopped").unwrap();
+    }
+
+    #[test]
+    fn podman_door_cancellation_stops_the_container_for_int_and_term() {
+        use std::os::unix::process::CommandExt;
+        use std::time::{Duration, Instant};
+        let fx = fixture("podman-signal-parent");
+        if podman_relay("podman-signal-parent", &fx.harness.activity).is_none() {
+            return;
+        }
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let marker = TempDir::named("podman-signal-marker");
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "kernel::resolve::door::tests::podman_signal_harness",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("TOG_PODMAN_SIGNAL_MARKER", &marker.0)
+                .env("TOG_PODMAN_SIGNAL_NUMBER", signal.to_string())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(25);
+            loop {
+                if let Ok(cache) = fs::read_to_string(marker.0.join("cache")) {
+                    if Path::new(&cache).join("ready").exists() {
+                        break;
+                    }
+                }
+                if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("Podman signal harness did not start its tool");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // INT goes to the foreground group, TERM directly to Tog's
+            // supervisor process. Both must reach checked force-removal.
+            let pid = child.id() as i32;
+            let target = if signal == libc::SIGINT { -pid } else { pid };
+            // SAFETY: the child is unreaped and belongs to this test.
+            assert_eq!(unsafe { libc::kill(target, signal) }, 0);
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "signal harness failed: {status}");
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("Podman cancellation hung for signal {signal}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(marker.0.join("stopped").is_file());
+            let output = std::process::Command::new("/usr/bin/podman")
+                .args([
+                    "--remote=false",
+                    "ps",
+                    "--filter",
+                    &format!("name=tog-resolve-{pid}-"),
+                    "--format",
+                    "{{.Names}}",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert!(
+                output.stdout.is_empty(),
+                "owned container survived cancellation"
+            );
+        }
+    }
+
     /// The survivor test, in a container: a detached child still writing
     /// after the tool exits is killed, and nothing it writes is published.
     #[test]

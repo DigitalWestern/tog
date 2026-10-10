@@ -485,6 +485,11 @@ impl Removal {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_FINISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl Removal {
     /// Publication is gated on checked teardown, not on a best-effort drop.
     pub fn finish(mut self) -> io::Result<()> {
@@ -494,7 +499,14 @@ impl Removal {
             &self.name,
             &self.config,
             std::time::Duration::from_secs(10),
-        )
+        )?;
+        #[cfg(test)]
+        if FAIL_FINISH.with(|flag| flag.replace(false)) {
+            return Err(io::Error::other(
+                "test engine could not confirm container removal",
+            ));
+        }
+        Ok(())
     }
 }
 
