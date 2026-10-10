@@ -92,7 +92,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   and `env` build open the project once and read it through that descriptor. `audit` uses the same held project for policy, closures,
   detection, freshness, and resolution evidence. `gc --register` still opens it by path.
 - **CLI exit statuses distinguish classified failures.** See the
-  [CLI status table](CLI.md#ground-rules) for ordinary errors, usage errors,
+  [CLI status table](CLI.md#conventions) for ordinary errors, usage errors,
   refusals (3), stale locks (4), unsupported requests (5) and signals.
   Completed `audit`, `status` and `doctor` reports retain their verdict codes.
   `run`, `x` and `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
