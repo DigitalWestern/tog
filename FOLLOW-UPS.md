@@ -96,3 +96,8 @@ None open.
 - #641: Design policy-owned NuGet feeds, credentials, signatures and cache boundaries.
 - #642: Design declared MSBuild resolution inputs with conservative fallback.
 - #643: Cover unsupported future-tailor attest guards with focused unit tests.
+
+- #645: Design Docker relay descriptor transport and the privileged helper installation boundary.
+- #646: Design policy-owned Podman runtime and storage configuration with tenant boundaries.
+- #647: Design persisted owned-container recovery and stopped-process proof after crashes.
+- #648: Require a supported-Podman CI lane and forced-backend real ecosystem coverage.
