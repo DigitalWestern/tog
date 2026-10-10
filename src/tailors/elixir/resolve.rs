@@ -360,13 +360,39 @@ mod tests {
     /// A harness whose upstream answers repo.hex.pm from the recorded Hex
     /// rows, and whose proxy every door in this thread uses while it
     /// lives. builds.hex.pm is not served: no route permits it.
-    fn hex_harness(label: &str) -> Option<&'static Harness> {
+    fn hex_harness(label: &str, corrupt: bool) -> Option<&'static Harness> {
         let relay = relay(label)?;
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
         SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
         let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
         reach.request_timeout = std::time::Duration::from_secs(20);
         let rows = stored_rows("elixir", label);
+        if corrupt {
+            use std::io::{Read, Write};
+            let body_path = rows.0.join("repo.hex.pm/packages/jason.body");
+            let body = fs::read(&body_path).unwrap();
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(body.as_slice())
+                .read_to_end(&mut decoded)
+                .unwrap();
+            *decoded.last_mut().unwrap() ^= 1;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&decoded).unwrap();
+            let corrupt = encoder.finish().unwrap();
+            fs::write(body_path, &corrupt).unwrap();
+            let index_path = rows.0.join("index.json");
+            let mut index: Vec<serde_json::Value> =
+                serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+            for row in &mut index {
+                if row["url"] == "https://repo.hex.pm/packages/jason" {
+                    row["sha256"] = hex::encode(Sha256::digest(&corrupt)).into();
+                    row["size"] = corrupt.len().into();
+                }
+            }
+            fs::write(index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+        }
+
         let harness: &'static Harness = Box::leak(Box::new(Harness::serving(
             label,
             reach,
@@ -427,9 +453,10 @@ mod tests {
     #[test]
     #[ignore = "realizes the store BEAM over the network"]
     fn mix_resolves_through_the_hex_mirror() {
+        let _env = policy::test_env_lock();
         let _serial = policy::attribution_test_lock();
         let label = "mix_resolves_through_the_hex_mirror";
-        let Some(harness) = hex_harness(label) else {
+        let Some(harness) = hex_harness(label, false) else {
             return;
         };
         let selected = super::super::shipped_selection().unwrap();
@@ -458,6 +485,39 @@ mod tests {
             "{lock}"
         );
         assert!(dir.join(".tog/resolution/elixir.json").is_file());
+
+        let direct = temp.0.join("direct");
+        let direct_home = temp.0.join("direct-home");
+        fs::create_dir_all(&direct).unwrap();
+        fs::create_dir_all(&direct_home).unwrap();
+        fs::copy(dir.join("mix.exs"), direct.join("mix.exs")).unwrap();
+        let ca = temp.0.join("fixture-ca.pem");
+        fs::write(&ca, harness.upstream_ca_pem()).unwrap();
+        let forwarder =
+            crate::kernel::resolve::testing::blind_forwarder(harness.upstream.address());
+        let direct_result = std::process::Command::new(beam.join("elixir/bin/mix"))
+            .args(["deps.get"])
+            .current_dir(&direct)
+            .env_clear()
+            .envs(super::super::forced_env(
+                &beam,
+                &direct_home.join("deps"),
+                &direct_home,
+            ))
+            .env_remove("HEX_OFFLINE")
+            .env("https_proxy", format!("http://{forwarder}"))
+            .env("HEX_CACERTS_PATH", &ca)
+            .env("HOME", &direct_home)
+            .env("PATH", super::super::beam_path(&beam))
+            .output()
+            .unwrap();
+        assert!(
+            direct_result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&direct_result.stderr)
+        );
+        assert_eq!(fs::read(direct.join("mix.lock")).unwrap(), lock.as_bytes());
+
         assert!(
             !dir.join("deps").exists(),
             "deps were fetched into the project"
@@ -508,6 +568,26 @@ mod tests {
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(record.outputs.len(), 2, "{:?}", record.outputs);
 
+        let (updated, recorded) = through_door(harness, DoorKind::Edit, |door| {
+            update(
+                door,
+                &held,
+                &beam,
+                &selected,
+                &["mix", "deps.update", "jason"],
+            )
+        });
+        updated.unwrap();
+        assert!(recorded.is_empty(), "{recorded:?}");
+        assert_eq!(fs::read(dir.join("mix.lock")).unwrap(), lock.as_bytes());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(".tog/resolution/elixir.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            receipt["command"],
+            serde_json::json!(["mix", "mix", "deps.update", "jason"])
+        );
+
         fs::write(
             dir.join("mix.exs"),
             manifest("{:jason, \"1.4.5\"}, {:telemetry, \"1.4.2\"}"),
@@ -520,6 +600,37 @@ mod tests {
         let why = drifted.unwrap_err().to_string();
         assert!(why.contains("not attested"), "{why}");
         assert_eq!(fs::read(dir.join("mix.lock")).unwrap(), before);
+        done();
+    }
+
+    #[test]
+    #[ignore = "realizes the store BEAM over the network"]
+    fn mix_refuses_a_corrupted_registry_signature() {
+        let _env = policy::test_env_lock();
+        let _serial = policy::attribution_test_lock();
+        let Some(harness) = hex_harness("hex-corrupt-signature", true) else {
+            return;
+        };
+        let selected = super::super::shipped_selection().unwrap();
+        let beam = super::super::realize_runtime(
+            &harness.store,
+            &harness.activity,
+            Platform::host().unwrap(),
+            &selected,
+        )
+        .unwrap();
+        let temp = TempDir::named("hex-corrupt-project");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("mix.exs"), manifest("{:jason, \"1.4.5\"}")).unwrap();
+        let held = ProjectRoot::open(&dir).unwrap();
+        let (result, _) = through_door(harness, DoorKind::MissingLock, |door| {
+            generate_lock(door, &held, &beam, &selected)
+        });
+        let why = result.unwrap_err().to_string();
+        assert!(why.to_ascii_lowercase().contains("signature"), "{why}");
+        assert!(!dir.join("mix.lock").exists());
+        assert!(!dir.join(".tog/resolution/elixir.json").exists());
         done();
     }
 }

@@ -300,6 +300,7 @@ mod tests {
     #[test]
     #[ignore = "realizes the store Ruby over the network"]
     fn bundler_resolves_through_the_rubygems_mirror() {
+        let _env = policy::test_env_lock();
         let _serial = policy::attribution_test_lock();
         let label = "bundler_resolves_through_the_rubygems_mirror";
         let Some(harness) = ruby_harness(label) else {
@@ -333,6 +334,49 @@ mod tests {
         assert!(lock.contains("remote: https://rubygems.org/"), "{lock}");
         assert!(lock.contains("rake (13.4.2)"), "{lock}");
         assert!(dir.join(".tog/resolution/ruby.json").is_file());
+
+        // Compare against Bundler talking directly to the recorded registry,
+        // through an opaque TLS forwarder rather than the tog mirror.
+        let direct = temp.0.join("direct");
+        let direct_home = temp.0.join("direct-home");
+        fs::create_dir_all(&direct).unwrap();
+        fs::create_dir_all(&direct_home).unwrap();
+        fs::copy(dir.join("Gemfile"), direct.join("Gemfile")).unwrap();
+        let ca = temp.0.join("fixture-ca.pem");
+        fs::write(&ca, harness.upstream_ca_pem()).unwrap();
+        let forwarder =
+            crate::kernel::resolve::testing::blind_forwarder(harness.upstream.address());
+        let direct_result = std::process::Command::new(ruby_obj.join("bin/bundle"))
+            .args(["lock"])
+            .current_dir(&direct)
+            .env_clear()
+            .envs(super::super::forced_env(
+                "Gemfile",
+                &direct_home.join("gems"),
+            ))
+            .env("BUNDLE_FROZEN", "false")
+            .env(
+                super::super::registry::MIRROR_VARIABLE,
+                "https://index.rubygems.org/",
+            )
+            .env("https_proxy", format!("http://{forwarder}"))
+            .env("SSL_CERT_FILE", &ca)
+            .env("HOME", &direct_home)
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", ruby_obj.join("bin").display()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            direct_result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&direct_result.stderr)
+        );
+        assert_eq!(
+            fs::read(direct.join("Gemfile.lock")).unwrap(),
+            lock.as_bytes()
+        );
 
         let ((check, plan), recorded) = through_door(harness, DoorKind::Planner, |door| {
             let check = helper(door, &held, &ruby_obj, "check", None).unwrap();
@@ -417,6 +461,24 @@ mod tests {
         let why = drifted.unwrap_err().to_string();
         assert!(why.contains("would change Gemfile.lock"), "{why}");
         assert_eq!(fs::read(dir.join("Gemfile.lock")).unwrap(), before);
+        fs::write(
+            dir.join("Gemfile"),
+            "source \"https://private.example.invalid\"\ngem \"rake\", \"13.4.2\"\n",
+        )
+        .unwrap();
+        fs::remove_file(dir.join("Gemfile.lock")).unwrap();
+        let (refused, _) = through_door(harness, DoorKind::MissingLock, |door| {
+            generate_lock(door, &held, &ruby_obj, &selected)
+        });
+        let why = refused.unwrap_err().to_string();
+        assert!(
+            why.contains("refused") || why.contains("not permitted"),
+            "{why}"
+        );
+        assert!(
+            !dir.join("Gemfile.lock").exists(),
+            "refused source published a lock"
+        );
         done();
     }
 }
