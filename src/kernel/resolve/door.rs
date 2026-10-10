@@ -1890,6 +1890,81 @@ exit 37
         }
     }
 
+    #[test]
+    fn podman_concurrent_sessions_do_not_remove_each_others_containers() {
+        use std::os::unix::process::CommandExt;
+        use std::time::{Duration, Instant};
+        let fx = fixture("podman-concurrent-parent");
+        if podman_relay("podman-concurrent-parent", &fx.harness.activity).is_none() {
+            return;
+        }
+        let markers = [
+            TempDir::named("podman-concurrent-a"),
+            TempDir::named("podman-concurrent-b"),
+        ];
+        let mut children: Vec<_> = markers
+            .iter()
+            .map(|marker| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "kernel::resolve::door::tests::podman_signal_harness",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("TOG_PODMAN_SIGNAL_MARKER", &marker.0)
+                    .env("TOG_PODMAN_SIGNAL_NUMBER", libc::SIGTERM.to_string())
+                    .process_group(0)
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        for index in 0..2 {
+            loop {
+                if let Ok(cache) = fs::read_to_string(markers[index].0.join("cache")) {
+                    if Path::new(&cache).join("ready").exists() {
+                        break;
+                    }
+                }
+                if Instant::now() >= deadline || children[index].try_wait().unwrap().is_some() {
+                    for child in &mut children {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    panic!("concurrent Podman tool did not start");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        for index in 0..2 {
+            // SAFETY: this test owns the unreaped child.
+            assert_eq!(
+                unsafe { libc::kill(children[index].id() as i32, libc::SIGTERM) },
+                0
+            );
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = children[index].try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    for child in &mut children {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    panic!("concurrent Podman cancellation hung");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(markers[index].0.join("stopped").is_file());
+            if index == 0 {
+                assert!(children[1].try_wait().unwrap().is_none());
+            }
+        }
+    }
+
     /// The survivor test, in a container: a detached child still writing
     /// after the tool exits is killed, and nothing it writes is published.
     #[test]

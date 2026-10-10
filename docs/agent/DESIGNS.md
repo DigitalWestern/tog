@@ -3780,11 +3780,21 @@ podman only. Decisions:
   answers `unshare`/`clone` with `CLONE_NEWUSER` with `EPERM` and
   `clone3` with `ENOSYS` (libc falls back to `clone`), as podman's and
   docker's own default profiles do without `CAP_SYS_ADMIN`.
-- **Teardown.** `container::Removal` runs `podman rm --force --time 0`
-  by name after every run, outside the supervisor, so an interrupt that
-  killed the client still leaves no container.
+- **Engine trust.** A per-run effective `containers.conf` excludes ambient
+  mounts, devices and hooks. A minimal captured engine environment excludes
+  remote/loader/configuration overrides, and storage uses built-in defaults.
+  Private PID/IPC/UTS/cgroup namespaces, `--privileged=false` and local
+  rootless execution are required. The relay refuses to run unless PID 1.
+- **Teardown.** Signal proxying is disabled so cancellation terminates the
+  client and reaches checked `podman rm --force --time 0 --ignore` outside
+  the supervisor. Removal is bounded to ten seconds. A failed removal
+  refuses outputs before descriptor joins. Descriptor draining is also
+  bounded. Drop is only a fallback for early errors. SIGKILL of Tog itself
+  or a machine crash needs operator recovery until a reviewed recovery
+  mechanism exists.
 - **The tier.** Podman is probed only when bubblewrap's preflight fails,
-  by running `/usr/bin/true` under the same fence, once per process.
+  by running the actual relay, both descriptors and a harmless shell
+  environment check under the same fence, once per process.
 - **Not built.** Docker has no `--preserve-fds`, so the relay's
   descriptors cannot reach it. `tog-isolate` is setuid root and needs an
   install under `/etc` and `/run` to test. `tog doctor --isolation` says

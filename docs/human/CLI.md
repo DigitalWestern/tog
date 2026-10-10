@@ -869,6 +869,31 @@ helper, which this build does not have. It exits 1 when neither engine
 can run one here. The podman row needs the store, so it is `warn` and
 `not checked` when the store is busy or cannot be opened.
 
+The fallback requires local rootless Podman with `--rootfs <dir>:O`,
+`--preserve-fds`, cgroup v2, subordinate user/group IDs, and a runtime
+that supports the relay's seccomp listener. Podman 5.8.4 with crun is
+validated on Linux. The probe runs the actual relay with its environment
+and log descriptors, rather than checking only that a container starts.
+Older engines that cannot pass that probe are refused.
+
+Tog supplies its own engine configuration and a minimal engine environment.
+User and system `containers.conf`, automatic secret mounts, OCI hooks,
+remote-engine settings and `storage.conf` overrides are excluded. This
+prevents engine defaults from exposing host files or joining host process
+namespaces. Storage uses Podman's built-in defaults. Arbitrary custom
+engine configuration is currently unsupported. The tool sees the same
+host runtime subset as the bubblewrap door. SELinux container labeling is
+disabled, while private namespaces, dropped capabilities, seccomp and
+read-only mounts enforce the door's boundary.
+
+Container mount paths containing commas or colons are refused. On
+cancellation, Tog stops the client and force-removes its own container.
+Removal has a ten-second deadline, and a failure refuses all outputs with
+a diagnostic naming the container to inspect. Forced termination of Tog
+itself, such as SIGKILL or a machine crash, cannot run that cleanup. An
+operator must inspect any remaining `tog-resolve-*` container with Podman
+before removing it. Automated crash recovery is deferred.
+
 **--version** prints `tog <crate version> (<short commit> <commit date>)`,
 stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);
 outside a checkout the parenthesis says `unknown build`. Two binaries of the
