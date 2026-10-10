@@ -72,6 +72,78 @@ fn assert_realization_does_not_evaluate_user_project(temp: &TempDir) {
     );
 }
 
+/// Exercise the CLI's signed receipt and strict resolution join using the
+/// SDK already realized by the build test. Added project data must invalidate
+/// evidence and preserve the last signed environment on refusal.
+fn assert_signed_dotnet_resolution(temp: &TempDir) {
+    let project = temp.0.join("dotnet-resolution");
+    copy_dotnet_hello(&project);
+    std::fs::remove_file(project.join("packages.lock.json")).unwrap();
+    let key = temp.0.join("resolution.key");
+    let trust = assert_ok(
+        tog(&temp.0, &temp.0, &["keygen", key.to_str().unwrap()]),
+        "resolution keygen",
+    );
+    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::write(
+        temp.0.join(".tog/policy.toml"),
+        format!("deny = [\"unrecorded-resolution\"]\n{trust}"),
+    )
+    .unwrap();
+    let env = [("TOG_SIGNING_KEY", &key)];
+    assert_ok(
+        common::tog_env(&project, &temp.0, &["sync"], &env),
+        "signed missing-lock restore",
+    );
+    let receipt_path = project.join(".tog/resolution/dotnet.json");
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    };
+    let public = tog::kernel::signing::SigningKey::load(&key)
+        .unwrap()
+        .public_key();
+    let receipt = read(&receipt_path);
+    assert_eq!(
+        tog::kernel::signing::verify(&receipt),
+        tog::kernel::signing::Verification::Valid(public)
+    );
+    let lock_before = std::fs::read(project.join("packages.lock.json")).unwrap();
+    let project_before = std::fs::read(project.join("proj.csproj")).unwrap();
+    assert_ok(
+        common::tog_env(&project, &temp.0, &["attest", "dotnet"], &env),
+        "signed .NET attest",
+    );
+    let receipt = read(&receipt_path);
+    assert_eq!(
+        tog::kernel::signing::verify(&receipt),
+        tog::kernel::signing::Verification::Valid(public)
+    );
+    assert_eq!(
+        std::fs::read(project.join("packages.lock.json")).unwrap(),
+        lock_before
+    );
+    assert_eq!(
+        std::fs::read(project.join("proj.csproj")).unwrap(),
+        project_before
+    );
+    assert_ok(
+        common::tog_env(&project, &temp.0, &["sync"], &env),
+        "trusted .NET receipt join",
+    );
+    let closure_path = project.join(".tog/closures/dotnet.json");
+    let closure_before = std::fs::read(&closure_path).unwrap();
+    assert_eq!(read(&closure_path)["body"]["resolution"], receipt);
+    std::fs::write(project.join("added-input.txt"), "new MSBuild-visible data").unwrap();
+    let refused = common::tog_env(&project, &temp.0, &["sync"], &env);
+    assert!(!refused.status.success());
+    assert!(
+        common::text(&refused.stderr).contains("policy denies unrecorded-resolution"),
+        "{}",
+        common::text(&refused.stderr)
+    );
+    assert_eq!(std::fs::read(closure_path).unwrap(), closure_before);
+}
+
 #[test]
 #[ignore]
 fn dotnet_sync_sandboxed_build_and_run() {
@@ -162,4 +234,6 @@ fn dotnet_sync_sandboxed_build_and_run() {
         .cloned()
         .collect();
     assert!(left.is_empty(), "runs left {left:?} under the temp root");
+
+    assert_signed_dotnet_resolution(&temp);
 }

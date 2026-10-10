@@ -702,17 +702,6 @@ pub(super) fn project_env_inner(
     if let Some(backup) = backup.as_ref() {
         refs.backup(&store, activity, backup)?;
     }
-    // Durable protection precedes both the user-data move and the visible
-    // .venv switch. A failed later step therefore over-retains safely.
-    persist_root_for_refs_with_project_lock(project, &store, activity, &refs, &project_lock)?;
-    if let Some(backup) = backup.as_ref() {
-        move_reserved_backup(project, venv, backup)?;
-    }
-    // replace_project_symlink makes and renames its own temporary link; an
-    // extra one here would be left behind in the user's project on every
-    // sync.
-    replace_project_symlink(project, venv, &env_obj, ".venv")?;
-
     let mut body = python_closure_body(
         &env_obj,
         &native_reference,
@@ -743,6 +732,28 @@ pub(super) fn project_env_inner(
     if let Some(basis) = basis {
         body[crate::comforter::join::BASIS_FIELD] = crate::comforter::join::basis_value(basis);
     }
+    // Validate the consumed lock generation and receipt policy before any
+    // backup move or visible environment switch. The project lock spans
+    // this check and the closure writer's final recheck.
+    crate::comforter::join::join_for_closure(
+        project,
+        "python",
+        &mut body,
+        &store,
+        activity,
+        Some(&mut refs),
+    )?;
+    // Durable protection precedes both the user-data move and the visible
+    // .venv switch. A failed later step therefore over-retains safely.
+    persist_root_for_refs_with_project_lock(project, &store, activity, &refs, &project_lock)?;
+    if let Some(backup) = backup.as_ref() {
+        move_reserved_backup(project, venv, backup)?;
+    }
+    // replace_project_symlink makes and renames its own temporary link; an
+    // extra one here would be left behind in the user's project on every
+    // sync.
+    replace_project_symlink(project, venv, &env_obj, ".venv")?;
+
     write_closure_with_project_lock(
         project,
         "python",
@@ -814,6 +825,94 @@ mod tests {
         );
         assert!(bare.get("toolchain").is_none());
         assert!(bare.get("runtime_object").is_none());
+    }
+
+    #[test]
+    fn resolution_refusals_leave_the_environment_and_closure_unchanged() {
+        use crate::comforter::join;
+        use crate::kernel::policy::{self, Policy};
+        let _serial = policy::attribution_test_lock();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                join::set_resolution_files_for_test(None);
+                join::set_policy_for_test(None);
+            }
+        }
+        let _reset = Reset;
+        join::set_resolution_files_for_test(Some(std::sync::Arc::new(|_, project| {
+            Ok(Some(crate::kernel::resolve::record::ResolutionFiles {
+                outputs: super::super::resolve::resolution_outputs(project)?,
+                inputs: super::super::resolve::resolution_inputs(project)?,
+            }))
+        })));
+        for changed_lock in [true, false] {
+            let (_store_temp, store) = test_store("refused-projection");
+            let activity = store
+                .activity(crate::kernel::activity::ActivityMode::Shared)
+                .unwrap();
+            let env_id = store.publish_bare_test("env", "0");
+            let temp = TempDir::named("python-refused-projection");
+            fs::create_dir_all(temp.0.join(".venv")).unwrap();
+            fs::create_dir_all(temp.0.join(".tog/closures")).unwrap();
+            fs::write(temp.0.join(".venv/sentinel"), "old environment").unwrap();
+            fs::write(temp.0.join(".tog/closures/python.json"), "old closure").unwrap();
+            fs::write(temp.0.join("requirements.lock.txt"), "generation A").unwrap();
+            let project = ProjectRoot::open(&temp.0).unwrap();
+            let basis = super::super::resolve::resolution_basis(&project).unwrap();
+            let policy = if changed_lock {
+                fs::write(temp.0.join("requirements.lock.txt"), "generation B").unwrap();
+                Policy::default()
+            } else {
+                policy::parse_file(Path::new("test-policy"), "deny = ['unrecorded-resolution']")
+                    .unwrap()
+            };
+            join::set_policy_for_test(Some(policy));
+            let mut attribution = policy::Attribution::open("python").unwrap();
+            let plan = Plan {
+                ecosystem: "python".into(),
+                python_version: "3.12.14".into(),
+                packages: Vec::new(),
+            };
+            let error = project_env_inner(
+                &activity,
+                &project,
+                &store.object_path(&env_id),
+                &plan,
+                None,
+                &[],
+                None,
+                &serde_json::Value::Null,
+                &[],
+                Some(&basis),
+                &mut attribution,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(if changed_lock {
+                    "changed"
+                } else {
+                    "unrecorded-resolution"
+                }),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read_to_string(temp.0.join(".venv/sentinel")).unwrap(),
+                "old environment"
+            );
+            assert_eq!(
+                fs::read_to_string(temp.0.join(".tog/closures/python.json")).unwrap(),
+                "old closure"
+            );
+            assert!(!temp
+                .0
+                .join(".venv")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            attribution.discard();
+        }
     }
 
     /// The durable root/2 record `project_env_inner` publishes names exactly

@@ -159,6 +159,13 @@ impl Manifest {
         if !self.setup || self.setup_cfg {
             return Ok(());
         }
+        // The older egg_info path runs project code too. Its cached result
+        // retains that provenance, so permission is checked on cache hits.
+        door.attribution().record(
+            crate::kernel::policy::RESOLUTION_BUILD,
+            "setup.py",
+            "dependencies prepared by setup.py egg_info (confined), or reused from its matching metadata cache",
+        )?;
         let tree_hash = setup_tree_hash(project)?;
         // Read through the held descriptor, and treat a refusal as an error
         // rather than a miss. A cache hit decides the requirements this plan
@@ -499,6 +506,73 @@ mod tests {
 
     fn temp_project(name: &str) -> TempDir {
         TempDir::named(&format!("manifest-{name}"))
+    }
+
+    #[test]
+    fn cached_setup_metadata_keeps_build_provenance_and_requires_permission() {
+        use crate::kernel::policy::{self, Attribution, Policy};
+        let _serial = policy::attribution_test_lock();
+        let temp = temp_project("setup-cache-permission");
+        fs::write(
+            temp.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let platform = Platform::host().unwrap();
+        let version = "3.12.14";
+        let cache = SetupCache {
+            tree_hash: setup_tree_hash(&project).unwrap(),
+            requirements: vec!["six==1.16.0".into()],
+            requires_python: None,
+            python_version: version.into(),
+            platform: platform.triple().into(),
+            build_toolchain: build::derivation_fingerprint(),
+        };
+        project
+            .write_file(Path::new(SETUP_CACHE), &serde_json::to_vec(&cache).unwrap())
+            .unwrap();
+        let store = Store::for_test(temp.0.join("absent-store"));
+        let lease = crate::kernel::testutil::detached_lease();
+        for denied in [false, true] {
+            let policy = if denied {
+                policy::parse_file(Path::new("policy"), "deny = ['resolution-build']").unwrap()
+            } else {
+                Policy::default()
+            };
+            let mut attribution = Attribution::open("python").unwrap().with_policy(policy);
+            let mut door = ResolutionDoor::open(
+                &store,
+                &lease.1,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+                &mut attribution,
+            )
+            .unwrap();
+            let mut manifest = discover(platform, &project, version).unwrap();
+            let result = manifest.prepare_setup(
+                &project,
+                &crate::tailors::python::shipped_selection(version).unwrap(),
+                &mut door,
+            );
+            drop(door);
+            if denied {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+                assert!(attribution.recorded().is_empty());
+            } else {
+                result.unwrap();
+                assert_eq!(manifest.requirements, ["six==1.16.0"]);
+                assert!(attribution
+                    .recorded()
+                    .iter()
+                    .any(|fact| fact.kind == policy::RESOLUTION_BUILD));
+            }
+            assert!(
+                !store.root.exists(),
+                "cache reuse must not realize build tools"
+            );
+            attribution.discard();
+        }
     }
 
     #[test]

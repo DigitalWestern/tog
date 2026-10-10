@@ -49,13 +49,14 @@ impl Tailor for Ruby {
         "ruby"
     }
 
-    /// The Gemfile and Gemfile.lock: what `bundle lock` and `bundle add`
-    /// write. Bundler reads no other resolution input tog can name: config
-    /// files are ignored (`BUNDLE_IGNORE_CONFIG=1`), a source other than
-    /// rubygems.org is refused at plan time, and what a Gemfile loads with
-    /// `eval_gemfile` is code tog cannot list.
+    /// Manifest and lock outputs, plus every visible regular project input
+    /// because Gemfiles can load other files while evaluating dependencies.
     fn resolution_outputs(&self, _project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
         Ok(vec!["Gemfile".into(), "Gemfile.lock".into()])
+    }
+
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<std::path::PathBuf>> {
+        super::resolve::resolution_inputs(project)
     }
 
     fn attest_lock(

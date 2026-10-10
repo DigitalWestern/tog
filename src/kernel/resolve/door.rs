@@ -25,7 +25,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::policy::{self, Policy};
 use crate::kernel::store::Store;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -139,6 +139,11 @@ pub struct ConfinedSpec<'a> {
     /// `--no-build` probe: `resolution-build`), recorded with the session's
     /// and carried in the receipt.
     pub facts: Vec<Fact>,
+    /// Digests a planner already consumed. The staged bytes must match
+    /// before project code runs, even if the live files change back later.
+    pub expected_inputs: BTreeMap<String, String>,
+    /// Also refuse newly added project files outside the consumed generation.
+    pub complete_inputs: bool,
 }
 
 impl<'a> ConfinedSpec<'a> {
@@ -167,6 +172,8 @@ impl<'a> ConfinedSpec<'a> {
             permitted: Permitted::compiled(),
             policy: None,
             facts: Vec::new(),
+            expected_inputs: BTreeMap::new(),
+            complete_inputs: false,
         }
     }
 
@@ -301,7 +308,7 @@ pub(super) fn run(
     // The signing key never enters the stage, under any name (a hard link
     // in the project is the key too).
     let key_ids = confine::signing_key_ids();
-    let snapshot = Snapshot::build(
+    let mut snapshot = Snapshot::build(
         store,
         activity,
         &SnapshotSpec {
@@ -311,6 +318,16 @@ pub(super) fn run(
             forbidden: &key_ids,
         },
     )?;
+    check_planning_inputs(&snapshot, &confined.expected_inputs)?;
+    if confined.complete_inputs && snapshot.project_file_digests()? != confined.expected_inputs {
+        return Err(io::Error::other(
+            "project files changed while planning executable-manifest resolution; \
+             nothing was published; run `tog` again",
+        ));
+    }
+    if confined.complete_inputs {
+        snapshot.normalize_executable_inputs()?;
+    }
     let ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
     if let Some(failure) = ran.session.facts.failure() {
@@ -322,13 +339,27 @@ pub(super) fn run(
             ),
         ));
     }
+    let facts = record_facts(&confined, &policy, &ran)?;
     if !status.success() {
         // The call site words a failing tool, as it does for `Legacy`.
         // Nothing was published and no ledger is kept.
-        return Ok(report(status, ran.outcome, None));
+        let mut failed = report(status, ran.outcome, None);
+        // Clients such as Bundler discard the body of a refused CONNECT.
+        // Keep the proxy's redacted reason visible at the command boundary.
+        for refusal in ran
+            .session
+            .diagnostics
+            .refusals
+            .iter()
+            .collect::<BTreeSet<_>>()
+        {
+            failed
+                .stderr
+                .extend_from_slice(format!("\ntog: {refusal}\n").as_bytes());
+        }
+        return Ok(failed);
     }
     let outputs = check_outputs(store, activity, &confined, &snapshot, &ran)?;
-    let facts = record_facts(&confined, &policy, &ran)?;
     let diagnostics = diagnostics(
         store,
         door,
@@ -362,6 +393,23 @@ pub(super) fn run(
         )?,
     }
     Ok(report(status, ran.outcome, Some(objects)))
+}
+
+/// Bind a detached planner's snapshot to the generation it already read.
+fn check_planning_inputs(
+    snapshot: &Snapshot,
+    expected: &BTreeMap<String, String>,
+) -> io::Result<()> {
+    for (relative, digest) in expected {
+        let path = snapshot.lock_root().real.join(relative);
+        if !matches!(snapshot.baseline(&path), Some(EntryState::File { sha256, .. }) if hex::encode(sha256) == *digest)
+        {
+            return Err(io::Error::other(format!(
+                "{relative} changed while planning; nothing was published; run `tog` again"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Step 1: refuse before anything is held or copied.
@@ -978,6 +1026,96 @@ mod tests {
         }
     }
 
+    #[test]
+    fn planner_checks_the_staged_generation_even_if_live_inputs_change_back() {
+        let fx = fixture("planner-generation");
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let expected =
+            super::super::record::file_digests(&held, &[PathBuf::from("deps.lock")]).unwrap();
+        fs::write(fx.project.join("deps.lock"), "new generation").unwrap();
+        let snapshot = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        fs::write(fx.project.join("deps.lock"), OLD_LOCK).unwrap();
+        assert!(check_planning_inputs(&snapshot, &expected)
+            .unwrap_err()
+            .to_string()
+            .contains("changed while planning"));
+        assert!(check_planning_inputs(&snapshot, &BTreeMap::new()).is_ok());
+        // A link introduced after the input walk cannot enter an otherwise
+        // identical complete snapshot without being represented in a receipt.
+        std::os::unix::fs::symlink("deps.lock", fx.project.join("late-link")).unwrap();
+        let with_link = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        assert!(with_link.project_file_digests().is_err());
+    }
+
+    #[test]
+    fn executable_snapshot_canonicalizes_permissions_and_removes_empty_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("canonical-project");
+        fs::create_dir_all(fx.project.join("empty/nested")).unwrap();
+        fs::set_permissions(
+            fx.project.join("package.json"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let mut snapshot = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        snapshot.normalize_executable_inputs().unwrap();
+        let staged = &snapshot.lock_root().staged;
+        assert!(!staged.join("empty").exists());
+        assert_eq!(
+            fs::metadata(staged.join("package.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::metadata(staged).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(snapshot.diff().unwrap().is_empty());
+        assert!(fx.project.join("empty/nested").is_dir());
+        assert_eq!(
+            fs::metadata(fx.project.join("package.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
     /// Every file under `dir` with its bytes.
     fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
@@ -1106,6 +1244,38 @@ get() {
     fn assert_untouched(fx: &Fixture, before: &BTreeMap<PathBuf, Vec<u8>>) {
         assert_eq!(&tree(&fx.project), before, "the project changed");
         assert!(rooted(fx).is_empty(), "{:?}", rooted(fx));
+    }
+
+    #[test]
+    fn failed_tool_keeps_the_proxy_refusal_reason_and_source_fact() {
+        let Some(relay) = relay("failed_tool_keeps_the_proxy_refusal_reason_and_source_fact")
+        else {
+            return;
+        };
+        let fx = fixture("failed-tool-refusal");
+        let before = tree(&fx.project);
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            r#"send "$(printf 'CONNECT private.example:443 HTTP/1.1\r\nHost: private.example:443\r\nProxy-Authorization: Basic %s\r\n\r\n' "$AUTH")" >/dev/null
+exit 37
+"#,
+            Policy::default(),
+            |_| {},
+        );
+        let report = outcome.result.unwrap();
+        assert_eq!(report.status.code(), Some(37));
+        assert!(report.ledger.is_none());
+        let stderr = String::from_utf8_lossy(&report.stderr);
+        assert!(
+            stderr.contains("refused CONNECT private.example:443"),
+            "{stderr}"
+        );
+        assert!(outcome
+            .recorded
+            .iter()
+            .any(|fact| fact.kind == policy::UNATTESTED_INDEX));
+        assert_untouched(&fx, &before);
     }
 
     #[test]

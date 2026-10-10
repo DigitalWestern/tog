@@ -1001,20 +1001,6 @@ pub fn build_sdist_wheel(
     build_sdist_wheel_at_depth(door, pkg, selected, None, None, 0).map(|wheel| wheel.path)
 }
 
-/// Public runtime-aware entry point for callers that are building one sdist
-/// outside a complete environment realization (for example, an integration
-/// test). Normal project sync supplies this automatically from its Plan.
-pub fn build_sdist_wheel_with_runtime_plan(
-    door: &mut ResolutionDoor<'_>,
-    pkg: &LockedPackage,
-    selected: &Selected,
-    runtime_plan: &Plan,
-) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(door, pkg, selected, None, Some(runtime_plan), 0)
-        .map(|wheel| wheel.path)
-}
-
 /// Turn a git dependency into an ordinary sdist package: realize the commit,
 /// pack the (sub)directory deterministically, and put it in the artifact cache
 /// so `download_verified_held` finds it without touching the network.
@@ -1497,6 +1483,9 @@ pub fn ensure_build_environment(
         selected,
     )
 }
+
+#[cfg(test)]
+mod isolation_tests;
 
 #[cfg(test)]
 mod tests {
