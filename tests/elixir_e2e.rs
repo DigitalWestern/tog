@@ -113,14 +113,11 @@ fn elixir_sync_sandboxed_build_and_run() {
     let otp = beam.join("otp");
     assert!(otp.join("bin/erl").is_file());
 
-    // An unchanged project re-syncs with the network cut: the mix.exs and
-    // mix.lock consistency check passed for these exact inputs on the first
-    // sync, so it is not asked of the Hex registry again, and the same
-    // objects are projected. The planner's Mix and Hex home is removed
-    // first: it is scratch every project on the machine shares, so another
-    // project's sync replaces the packages in it, and a re-sync that leans
-    // on it only works offline by luck.
-    remove_tree(&store.join("planner-hexhome"));
+    // An unchanged project re-syncs with the network cut: the consistency
+    // check passed for these exact inputs, so no live Hex query is needed.
+    // Each resolution run owns its private Hex home. No shared executable
+    // client configuration or cache survives for another project to inherit.
+    assert!(!store.join("planner-hexhome").exists());
     assert_ok(
         tog_offline(&project, &temp.0, &["sync"]),
         "offline re-sync of the unchanged project",
