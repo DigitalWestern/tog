@@ -107,6 +107,7 @@ pub fn refusal_fix(error: &io::Error) -> Option<&str> {
         .get_ref()
         .and_then(|inner| inner.downcast_ref::<Refused>())
         .map(|refused| refused.fix.as_str())
+        .or_else(|| crate::kernel::error::inner(error).and_then(refusal_fix))
 }
 
 /// `command` with `TOG_STORE` set to exactly `root`, as a POSIX shell

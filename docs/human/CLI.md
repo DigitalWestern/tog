@@ -137,6 +137,12 @@ the program's status through. Which files tog reads per ecosystem:
   `{"error": "...", "class": "refused"}` (`refused`, `stale`,
   `unsupported`, `network`), beside `fix` when there is one. `audit` keeps its own
   verdict codes: 1 for a gate that denies, 2 for a misconfigured one.
+  `status` and `doctor` also return their report verdicts, including 1 for
+  a stale projection or a failed diagnostic. These are completed reports,
+  rather than classified command errors. Classification is being migrated
+  gradually. Remaining ordinary errors, including some proxy resolution
+  failures, exit 1 and omit `class`. Treat 1 as an unknown failure, without
+  assuming that retrying is safe or that it bypasses a policy denial.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
   and every subprocess command line — the bug-report mode. An error is never
   narration: `--quiet` redirects stderr but keeps a private copy of it, and
@@ -367,7 +373,9 @@ development dependencies (`remove --dev` only for uv and Cargo). The global
 verbs, including `update --toolchain` and `update --self`, because they
 exist to write the lock `--frozen` only checks. Refusals —
 Poetry, PDM, Yarn classic and Berry, setup.py, Elixir `mix add`, .NET —
-print the exact line and file to run yourself, exit 5 (unsupported), no writes. Every
+print the exact line and file to run yourself, exit 5 (unsupported), no writes
+when the edit reaches that unsupported project shape. Earlier input, lock or
+policy checks retain their own failure statuses. Every
 dependency argument is validated before delegation, and a request that would
 edit more than one project root (a pnpm member plus its workspace root) is
 refused with both roots named. Ecosystem choice, cheapest rung first:
@@ -619,6 +627,23 @@ still blocks a build. The build
 itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
 single command, `tog --frozen build`, whose implicit sync runs frozen.
+
+On Linux, Ruby native extensions, Python sdists that use Rust or pinned native
+libraries, and Node install scripts first build with a restricted view of host
+libraries. A lone `lib*.so` symlink or linker script now makes its library
+subdirectory restricted too. Known plugin directories keep the names programs
+load. A plugin directory missing from the allowlist can fail until it is added.
+If the first build fails, a retry against the whole host requires policy to
+permit `host-build-inputs`, and records that exception. Policies can deny that
+retry. This change advances the shared view identity to `runtime-only/3`.
+The next sync rebuilds affected environments or wheels once instead of reusing
+objects built under the older view. See [host-view limitations](LIMITATIONS.md)
+for the plugin allowlist and the remaining explicitly reachable host paths.
+
+Debug builds that use the `TOG_TEST_HOST_DEV_FILES` test fixture now refuse
+symlinked directories, including a symlinked fixture root, with refusal
+status 3. Copy those directories into the fixture. File symlinks remain
+recorded in its fingerprint. Release builds ignore this test variable.
 
 ## Inspect verbs
 
@@ -887,6 +912,31 @@ helper, which this build does not have. It exits 1 when neither engine
 can run one here. The podman row needs the store, so it is `warn` and
 `not checked` when the store is busy or cannot be opened.
 
+The fallback requires local rootless Podman with `--rootfs <dir>:O`,
+`--preserve-fds`, cgroup v2, subordinate user/group IDs, and a runtime
+that supports the relay's seccomp listener. Podman 5.8.4 with crun is
+validated on Linux. The probe runs the actual relay with its environment
+and log descriptors, rather than checking only that a container starts.
+Older engines that cannot pass that probe are refused.
+
+Tog supplies its own engine configuration and a minimal engine environment.
+User and system `containers.conf`, automatic secret mounts, OCI hooks,
+remote-engine settings and `storage.conf` overrides are excluded. This
+prevents engine defaults from exposing host files or joining host process
+namespaces. Storage uses Podman's built-in defaults. Arbitrary custom
+engine configuration is currently unsupported. The tool sees the same
+host runtime subset as the bubblewrap door. SELinux container labeling is
+disabled, while private namespaces, dropped capabilities, seccomp and
+read-only mounts enforce the door's boundary.
+
+Container mount paths containing commas or colons are refused. On
+cancellation, Tog stops the client and force-removes its own container.
+Removal has a ten-second deadline, and a failure refuses all outputs with
+a diagnostic naming the container to inspect. Forced termination of Tog
+itself, such as SIGKILL or a machine crash, cannot run that cleanup. An
+operator must inspect any remaining `tog-resolve-*` container with Podman
+before removing it. Automated crash recovery is deferred.
+
 **--version** prints `tog <crate version> (<short commit> <commit date>)`,
 stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);
 outside a checkout the parenthesis says `unknown build`. Two binaries of the
@@ -963,12 +1013,23 @@ branch's cache.
 any repository: the action and its releases are public, and the job's own
 token reads them.
 
-The same job written out by hand, for a runner the action does not cover
-or a step that has to differ. Its install step uses the one-line installer.
+The signed-closure job below is for a trusted protected ref whose workflow,
+policy and project inputs the operator controls. It is not a pull-request
+candidate gate. For candidate verification with a separate signing job, use
+README.md's "Signing locks: who attests" recipe. Its keyless sync verifies
+resolution receipts and writes unsigned closures.
+
+The same trusted job written out by hand, for a runner the action does not
+cover or a step that has to differ. Its install step uses the one-line installer.
 
 ```yaml
 name: tog
-on: [pull_request]
+on:
+  push:
+    branches: [main]  # protect this ref and its workflow/policy files
+
+permissions:
+  contents: read
 
 jobs:
   audit:
@@ -997,13 +1058,15 @@ jobs:
       - name: Sync
         env:
           TOG_SIGNING_KEY: ${{ runner.temp }}/tog.key
+          TOG_SIGNING_KEY_CONTENTS: ${{ secrets.TOG_SIGNING_KEY }}
         run: |
           # printf, not a herestring: no bash dependency, and no newline
           # appended to the key. umask before the write, so the file is
           # never briefly world-readable.
-          (umask 077; printf '%s' '${{ secrets.TOG_SIGNING_KEY }}' > "$TOG_SIGNING_KEY")
+          trap 'rm -f "$TOG_SIGNING_KEY"' EXIT
+          (umask 077; printf '%s' "$TOG_SIGNING_KEY_CONTENTS" > "$TOG_SIGNING_KEY")
+          unset TOG_SIGNING_KEY_CONTENTS
           tog --frozen
-          rm -f "$TOG_SIGNING_KEY"
 
       # Every closure signed by a trusted key, current for the inputs on
       # disk and tog-toolchain.toml, no denied or unknown exception. Exit 1 is a denied build,
@@ -1017,10 +1080,13 @@ jobs:
 
 **Which jobs may hold the key.** A sync executes project code while
 planning, and mode 0600 does not stop same-user code from reading a key, so
-the job above is only safe on a ref you control — a protected branch, or a
-`pull_request_target`-style job you have deliberately reviewed. For pull
-requests from forks, drop the key and the `audit` step and run the sync
-alone:
+the job above is only for an operator-controlled workflow on a trusted
+protected ref. Do not give signing credentials to a candidate-controlled
+workflow or use `pull_request_target` to execute unreviewed candidate code.
+For an unsigned fork build, drop the key and the signed-closure `audit` step.
+A policy that requires resolution provenance still needs trusted receipts,
+as in the README recipe. Omitting audit never bypasses that requirement:
+
 
 ```yaml
       - run: tog --frozen --strict    # or: tog --frozen, under ci/tog-policy.toml
@@ -1033,9 +1099,15 @@ The closures a reviewer reads in the diff come from the protected job, or
 from a developer running a signing sync locally.
 
 On a runner without unprivileged user namespaces the build sandbox is
-unavailable, so a project that needs `tog build` or sdist compilation needs
-a runner that has them; `sync` of a wheel-only or lock-only project does
-not.
+unavailable, so `tog build` and source-package compilation need a runner
+with the sandbox prerequisites. Ruby and Elixir also require resolution
+isolation for ordinary sync and plan with committed locks, because their
+manifest checks and lock parsers run project code through the door. Edits,
+missing-lock generation and `tog attest` require it too. On Linux, enable
+unprivileged user namespaces and install bubblewrap. If the native runner
+is unavailable, these operations refuse before executing project code.
+Wheel-only Python sync with an existing recorded lock does not execute a
+resolution tool unless metadata preparation or resolution is needed.
 
 
 ## Maintain verbs
@@ -1093,6 +1165,12 @@ concurrent sync cannot lose one. Sharp edges:
   writes nothing) and no other option. A reset that is interrupted leaves
   a store with no marker, which is still refused: run it again.
 
+Resolution has no unsandboxed fallback. The former Legacy mode is removed.
+Dependency edits, missing-lock generation and executable-manifest planning
+require usable bubblewrap or rootless Podman. A host with neither refuses
+resolution and names the missing capability. Run `tog doctor --isolation`
+to check the host before migrating a CI runner.
+
 **attest** `[<ecosystem>...]` gives existing locks a signed resolution
 record without changing them. For each named ecosystem (all detected ones
 that have a resolution door when none is named) it runs the ecosystem's own
@@ -1119,24 +1197,83 @@ the pnpm `packageManager` pins for a `pnpm-lock.yaml`, each confined the
 same way, at the lock root: from a pnpm workspace member it is refused,
 naming the root. A `yarn.lock` has no check, since yarn is not a pinned
 tool, and a `file:` dependency outside the project is refused by name.
+Python resolution first runs uv with `--no-build`. If source builds or
+metadata preparation are needed, including the project's own backend,
+`resolution-build` permission is required before any backend runs. A denial
+names the package and publishes nothing. An allowed rerun records the
+exception in its signed resolution receipt. The project's own metadata is
+not exempt because its backend can request third-party source builds.
+The older `setup.py egg_info` path and reuse of its metadata cache also
+require permission and carry `resolution-build` provenance.
+PyPI wheel metadata sidecars are verified against the index's advertised
+digests before use. A missing digest records `weak-integrity`, which policy
+can deny. A mismatch always fails and is never cached.
+
+Python resolution runs uv with `--no-config`. Scalar uv settings from
+`uv.toml`, `[tool.uv]`, and `[tool.uv.pip]`, such as `resolution` and
+`prerelease`, currently use uv's defaults. Explicit dependency sources and
+indexes still apply through the proxy, with PyPI forced as the default.
+The door disables interpreter downloads and keyring programs and selects
+the store interpreter. Preserving safe resolver settings needs a reviewed
+allowlist so configuration cannot bypass these controls.
+
 Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
 lock the same `uv pip compile` tog ran to write it, which must leave it
 byte for byte the same: `requirements.lock.txt` from the requirements tog
 compiles it from, or `requirements.txt` from `requirements.in`. A
 compiled lock whose header names another command than `tog` (one written
-by uv or pip-tools directly) is refused: delete it and run `tog` to
-compile it again. A project with no lock a tool resolved (a hand-pinned
+by uv or pip-tools directly) is refused. For a pip-compile pair, retain
+`requirements.txt` and run `tog update`. For a generated
+`requirements.lock.txt`, delete only that lock and run `tog` again.
+Commit the regenerated lock before attesting. A project with no lock a
+tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
 file that includes one outside the project.
 Ruby's is `bundle lock` with `BUNDLE_FROZEN=true`, which must leave the
-Gemfile and Gemfile.lock byte for byte the same. Bundler reaches
+Gemfile and Gemfile.lock byte for byte the same. Ruby and Elixir manifests
+execute code that can load other project files. Their resolution records
+therefore cover every regular file visible in the resolver's project snapshot,
+including Ruby `eval_gemfile` inputs, umbrella app manifests and nested
+configuration. Editing one of these files requires a fresh resolution or
+`tog attest`, even if the lock still agrees. `.git`, `.tog`, Ruby's `.bundle`
+and `vendor/bundle`, and Elixir's `deps` and `_build` are excluded from that
+snapshot. During these Ruby and Elixir checks, project files have mode 0644,
+directories have mode 0755, and empty directories are absent. These rules
+apply only to the private resolver view. The checkout keeps its permissions
+and empty directories. Manifests must select dependencies from file names
+and contents. Invoke project helper scripts through their interpreter, since
+the resolver view removes their executable bit. Other project symlinks are refused because the receipt cannot
+cover them safely. Keep resolution inputs as regular files inside the project.
+Hex uses a fresh private home for every run, so executable configuration
+cannot persist between projects. Registry responses are reused through the
+proxy cache. Bundler reaches
 rubygems.org only through the session's RubyGems mirror
 (`BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/`), so the lock keeps naming
 rubygems.org. Elixir's is `mix deps.get --check-locked`, with Hex pointed
 at the session's mirror of repo.hex.pm (`HEX_MIRROR`). Both run confined,
 like the others, and their fetches are in the record's ledger. .NET's is
 `dotnet restore --locked-mode` with a tog-written `nuget.config` whose one
-source is the session's NuGet mirror.
+source is the session's NuGet mirror. Missing-lock restore and attestation
+require the resolution sandbox. MSBuild can read arbitrary project data, so
+.NET records every regular file visible in the resolver view, except `obj/`,
+`bin/`, `.git/` and `.tog/`. Changes or added files invalidate that evidence.
+Symlinks in this input set are refused. As with Ruby and Elixir, the staged
+resolver view uses file mode 0644 and directory mode 0755, and omits empty
+directories. The checkout's permissions and empty directories are preserved.
+Restore always names `packages.lock.json` explicitly. Project files containing
+`NuGetLockFilePath` or `TreatAsLocalProperty` are conservatively refused,
+including imported files and UTF-16/32 XML. Use Tog's default lock path.
+Existing .NET locks need a trusted resolution receipt under strict/company
+policy. Run `tog attest dotnet` with a signing key trusted by that policy,
+then commit `.tog/resolution/dotnet.json`. The mirror supports public
+api.nuget.org only. It records transport and package content hashes, without
+claiming publisher-signature verification.
+
+Hashes alone prove package bytes, not how the dependency set was resolved.
+To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`
+beside the existing file, then run a Python `tog update` to compile the pair.
+For example, `tog update --no-sync py:six` in a project that pins six writes
+the compiled lock and its resolution receipt before sync or attest.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.

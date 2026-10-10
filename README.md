@@ -294,69 +294,190 @@ proxy, and every fetch went into a ledger. The company policy
 lock without one (`unrecorded-resolution`). `tog attest` is how a
 repository's existing locks get records: it runs each ecosystem's own lock
 check confined and signs the result only when the lock comes out
-byte-unchanged.
+byte-unchanged. Some existing locks need migration first. A hand-pinned
+Python requirements file has no resolver provenance and must be recompiled
+through Tog before attestation. See [the attest migration rules](docs/human/CLI.md).
 
 Two setups. Both are verified the same way, against the `[signing]` keys
 in the machine policy.
 
-**On CI, the default.** One job holds the signing key and runs no project
-code. It writes its records as a build artifact, and a keyless gate job
-verifies them, so nothing is committed by a bot. The public half of the
-key is the repository variable `TOG_ATTEST_PUBKEY`. The gate writes its
-machine policy from that variable, never from the checkout, because a
-project policy file can only narrow trust:
+**On CI, the default.** Keep the signing key in an operator-controlled
+workflow and binary. `tog attest` may evaluate project code, but only
+inside confined resolution tools. The keyless gate verifies the signed
+records against machine trust and the same candidate files.
+
+The worked example below is a manual candidate-verification workflow.
+Run it from the protected default branch, with the full candidate commit
+SHA. Configure `tog-attest` as a protected environment that permits only
+that branch, requires operator approval of the candidate and does not
+allow approval bypass. Store `TOG_ATTEST_KEY` in that environment, not as
+a repository-wide secret. Set the operator-owned repository variables
+`TOG_ATTEST_PUBKEY`, `TOG_INSTALL_REF` (a reviewed full commit SHA from the
+Tog repository) and `TOG_VERSION` (a reviewed release tag with these
+commands). All three jobs check out the identical candidate and install
+the same release. None executes a workflow or installer from the candidate.
+
+Branch protection alone does not make a pull request's workflow trusted.
+Do not put the signing secret in a candidate-controlled `pull_request`
+workflow or run candidate scripts through `pull_request_target`. See
+[GitHub's workflow security guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)
+and [environment protections](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
 
 ```yaml
+name: Tog candidate verification
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Reviewed candidate commit (full 40-character SHA)
+        required: true
+        type: string
+permissions:
+  contents: read
+
+env:
+  TOG_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+  TOG_INSTALL_REF: ${{ vars.TOG_INSTALL_REF }}
+  TOG_VERSION: ${{ vars.TOG_VERSION }}
+
 jobs:
-  attest:                      # holds the key, runs no project code
-    runs-on: ubuntu-latest
+  attest:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-22.04
+    environment: tog-attest
     steps:
-      - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
-      - run: |
+      - name: Validate the candidate identity
+        run: '[[ "$TOG_CANDIDATE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TOG_CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+      - name: Install the reviewed Tog release and isolation backend
+        run: |
+          [[ "$TOG_INSTALL_REF" =~ ^[0-9a-fA-F]{40}$ ]]
+          test -n "$TOG_VERSION"
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          curl -fsSL "https://raw.githubusercontent.com/DigitalWestern/tog/$TOG_INSTALL_REF/install.sh" \
+            | sh -s -- --version="$TOG_VERSION" --dir="$RUNNER_TEMP/tog-bin" --no-modify-path --no-completions
+          echo "$RUNNER_TEMP/tog-bin" >> "$GITHUB_PATH"
+      - name: Attest only through confined resolution tools
+        id: attest
+        working-directory: candidate
+        run: |
           umask 077
-          printf '%s\n' "$TOG_ATTEST_KEY" > "$RUNNER_TEMP/attest.key"
-          TOG_SIGNING_KEY="$RUNNER_TEMP/attest.key" tog attest --record-out resolution/
+          attest_key_file=$(mktemp "$RUNNER_TEMP/tog-key.XXXXXX")
+          trap 'rm -f "$attest_key_file"' EXIT
+          record_dir=$(mktemp -d "$RUNNER_TEMP/tog-records.XXXXXX")
+          printf '%s' "$TOG_ATTEST_KEY" > "$attest_key_file"
+          unset TOG_ATTEST_KEY
+          TOG_SIGNING_KEY="$attest_key_file" tog attest --record-out "$record_dir"
+          printf 'records=%s\n' "$record_dir" >> "$GITHUB_OUTPUT"
         env:
           TOG_ATTEST_KEY: ${{ secrets.TOG_ATTEST_KEY }}
-      - uses: actions/upload-artifact@v4
-        with: { name: resolution-records, path: resolution/ }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: resolution-records
+          path: ${{ steps.attest.outputs.records }}
+          if-no-files-found: error
 
-  gate:                        # no key, verifies the records
+  gate:
     needs: attest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
-      - uses: actions/download-artifact@v4
-        with: { name: resolution-records, path: resolution/ }
-      - run: |
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TOG_CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+      - name: Install the reviewed Tog release and isolation backend
+        run: |
+          [[ "$TOG_INSTALL_REF" =~ ^[0-9a-fA-F]{40}$ ]]
+          test -n "$TOG_VERSION"
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          curl -fsSL "https://raw.githubusercontent.com/DigitalWestern/tog/$TOG_INSTALL_REF/install.sh" \
+            | sh -s -- --version="$TOG_VERSION" --dir="$RUNNER_TEMP/tog-bin" --no-modify-path --no-completions
+          echo "$RUNNER_TEMP/tog-bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: resolution-records
+          path: ${{ runner.temp }}/resolution-records
+      - name: Verify resolution receipts and enforce policy
+        working-directory: candidate
+        run: |
           printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
           export TOG_POLICY="$RUNNER_TEMP/policy.toml"
-          tog --strict sync --frozen --resolution-record resolution/
-          tog audit
+          tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
         env:
           TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
 
-  test:                        # runs project code, holds no key
+  test:
     needs: gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
-      - run: tog sync --frozen && tog run test
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TOG_CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+      - name: Install the reviewed Tog release and isolation backend
+        run: |
+          [[ "$TOG_INSTALL_REF" =~ ^[0-9a-fA-F]{40}$ ]]
+          test -n "$TOG_VERSION"
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          curl -fsSL "https://raw.githubusercontent.com/DigitalWestern/tog/$TOG_INSTALL_REF/install.sh" \
+            | sh -s -- --version="$TOG_VERSION" --dir="$RUNNER_TEMP/tog-bin" --no-modify-path --no-completions
+          echo "$RUNNER_TEMP/tog-bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: resolution-records
+          path: ${{ runner.temp }}/resolution-records
+      - name: Verify again, then run the project's tests without the key
+        working-directory: candidate
+        run: |
+          printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
+          export TOG_POLICY="$RUNNER_TEMP/policy.toml"
+          tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
+          tog run npm test
+        env:
+          TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
 ```
 
-The `attest` job runs only confined tools, so no project code runs outside
-a sandbox where the key is. GitHub withholds secrets from fork pull
-requests, so a fork's `attest` job fails and its gate reports
-`unrecorded-resolution`. That is the fail-closed result: a maintainer's
-run of the same commit signs it. Make the gate a required check and
-protect its workflow file with branch rules.
+Replace `tog run npm test` with the project's actual test command. `tog run`
+executes on the host, so this last job must be disposable and hold no key or
+other secrets. The attestation artifact stays outside the checkout in every
+job. That prevents candidate symlinks from controlling host-side upload and
+keeps added receipt files out of executable-manifest input coverage. The key
+is removed even on failure, before artifact upload.
 
-The alternative is a bot commit: the key-holding job runs `tog attest`
-without `--record-out` and commits `.tog/resolution/` back to the branch.
-The gate is then `tog --strict sync --frozen` with no extra flag.
+This gate verifies resolution signatures during a fresh policy-enforced
+sync. Its keyless sync writes unsigned closure records, so `tog audit`
+under the trusted-key policy would refuse those closures. Signed resolution
+receipts do not sign closures. A signed-closure gate needs a separate trusted
+closure-producing setup.
+
+`--strict` rejects every exception, including `resolution-build` and
+`stale-resolution`, which the company template deliberately permits. A team
+that permits those kinds should use its operator-owned machine deny policy
+with the trusted keys instead of `--strict`. Project policy can narrow
+machine trust and denials. It cannot supply the gate's trust roots.
+
+This manual workflow's Actions check belongs to its default-branch run,
+not automatically to the candidate pull request. Automatic required checks
+need a separately reviewed result-publishing flow that binds its verdict to
+that exact candidate SHA. A skipped signing job is not a passed gate. Fork
+pull requests do not receive repository secrets in ordinary `pull_request`
+workflows. Maintainers can verify a fork commit with the trusted workflow
+after choosing and approving that exact commit.
+
+The alternative is a bot commit from the same trusted signing setup:
+`tog attest` without `--record-out` writes `.tog/resolution/`, which the bot
+commits to the candidate branch. The keyless gate then uses
+`tog --strict sync --frozen` with no record flag. This still needs immutable
+candidate selection and a protected key-holding workflow.
 
 **Per developer.** Each developer makes a key (`tog keygen <path>`), sets
 `TOG_SIGNING_KEY=<path>`, and the team lists every public key in the

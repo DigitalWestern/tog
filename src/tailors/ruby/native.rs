@@ -151,20 +151,20 @@ impl GemInstall<'_> {
             fingerprint: crate::kernel::hostview::host_build_inputs,
             build: install,
         };
-        install_gem(platform, native, &gem.full_name, attempt).map_err(|e| {
-            if hostfallback::is_host_changed(&e) {
-                return e;
-            }
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "{}: sandboxed gem install failed: {e}\n(network is denied inside the \
-                     sandbox, so a gem whose installer downloads anything cannot be installed)",
-                    gem.full_name
-                ),
-            )
-        })
+        install_gem(platform, native, &gem.full_name, attempt)
+            .map_err(|error| gem_install_error(&gem.full_name, error))
     }
+}
+
+fn gem_install_error(gem: &str, error: io::Error) -> io::Error {
+    if hostfallback::is_host_changed(&error) {
+        return error;
+    }
+    let message = format!(
+        "{gem}: sandboxed gem install failed: {error}\n(network is denied inside the \
+         sandbox, so a gem whose installer downloads anything cannot be installed)"
+    );
+    crate::kernel::error::describe(error, message)
 }
 
 /// The HOME and TMPDIR of each attempt at one gem's install: a fresh empty
@@ -268,6 +268,43 @@ mod tests {
     use super::super::tests::linux_test_plan;
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    #[test]
+    fn a_refused_fingerprint_keeps_its_class_through_the_gem_install_error() {
+        use crate::kernel::error::{class_of, refused, Class};
+        let mut views = Vec::new();
+        let attempt = Attempt {
+            record: |_: &str, _: &str, _: &str| -> io::Result<()> {
+                panic!("a refused fingerprint must not admit a host build")
+            },
+            discard: || Ok(()),
+            fingerprint: || {
+                Err(refused(
+                    io::ErrorKind::InvalidInput,
+                    "dev is a symlink to a directory",
+                ))
+            },
+            build: |view| {
+                views.push(view);
+                Err(io::Error::other("header not found"))
+            },
+        };
+        let error = install_gem(Platform::X86_64UnknownLinuxGnu, true, "probe-1.0", attempt)
+            .map_err(|error| gem_install_error("probe-1.0", error))
+            .unwrap_err();
+        assert_eq!(views, [HostView::RuntimeOnly]);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(class_of(&error), Some(Class::Refused));
+        assert!(error
+            .to_string()
+            .contains("probe-1.0: sandboxed gem install failed"));
+        assert!(error.to_string().contains("symlink to a directory"));
+        let changed = io::Error::other(hostfallback::HostChanged("probe-1.0".into()));
+        assert!(hostfallback::is_host_changed(&gem_install_error(
+            "probe-1.0",
+            changed
+        )));
+    }
 
     /// Runs `install_hermetic_first` with scripted attempt results and a
     /// real attribution frame, returning the result, the views tried in
@@ -479,8 +516,20 @@ mod tests {
         };
         let fell_back = ["rake-13.2.1".to_string()];
 
+        // A build cached under the previous, wider view cannot answer
+        // for the tightened view, even before its host fingerprint runs.
+        let mut previous = runtime_only.clone();
+        previous
+            .inputs
+            .insert("build_view".into(), "runtime-only/2".into());
+        plant(&previous.object_id());
+        record_host_fallback(&store, &activity, &previous, &host, &fell_back);
         plant(&fallback.object_id());
-        assert_eq!(lookup(&host), None, "no record, no fallback object");
+        assert_eq!(
+            lookup(&host),
+            None,
+            "an old view's cache or record was reused"
+        );
         record_host_fallback(&store, &activity, &runtime_only, &host, &fell_back);
         assert_eq!(lookup(&host), Some(fallback.object_id()));
         // A host whose build inputs changed finds no record, and builds.
@@ -509,7 +558,11 @@ mod tests {
             .unwrap(),
             Some(runtime_only.object_id())
         );
-        for id in [runtime_only.object_id(), fallback.object_id()] {
+        for id in [
+            previous.object_id(),
+            runtime_only.object_id(),
+            fallback.object_id(),
+        ] {
             fs::set_permissions(store.object_path(&id), fs::Permissions::from_mode(0o755)).unwrap();
         }
     }

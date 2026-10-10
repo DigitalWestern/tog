@@ -279,9 +279,9 @@ pub fn select_for<'a>(
     rows: &[InputRow],
 ) -> io::Result<&'a Bundle> {
     let request = request_for(ecosystem, rows)?;
-    catalog
-        .select(&request)
-        .map_err(|error| invalid(format!("{ecosystem} toolchain: {error}")))
+    catalog.select(&request).map_err(|error| {
+        crate::kernel::error::context(error, format_args!("{ecosystem} toolchain"))
+    })
 }
 
 #[cfg(test)]

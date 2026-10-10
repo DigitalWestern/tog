@@ -35,8 +35,11 @@ None open.
 
 ## Open work, each its own pull request
 
+- **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
+- **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
+- **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
-  - #615 design questions: SRI candidate choice, cargo's symlinked members, the ecosystem-arm check in `kernel/provider`, the `hard_link_target` doc.
+  - #615 remaining design questions: SRI candidate choice, cargo's symlinked members, the `hard_link_target` doc.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
   - #620 test gaps: the dev-files hook for tailors other than Ruby, to add with the next tailor whose host-header fallback changes.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
@@ -81,3 +84,28 @@ None open.
   sessions (#57; everything but the `/proc` cases runs there), and the
   resolution proxy's Mach allow-list (`tools/proxy_spike/macos_mach.sh`). Nothing Linux-side
   clears this.
+
+- **#637: configurable Ruby and Elixir manifest inputs.** Design narrower explicit declarations with conservative coverage as the default.
+- **#638: authenticated Hex cache.** Keep private homes until a data-only persistent cache has reviewed integrity and tenant boundaries.
+- **#639: resolution publication concurrency.** Add deterministic full planner-to-closure race tests for Ruby and Elixir.
+
+- #640: Define independent .NET lock semantic verification for executable MSBuild projects.
+- #641: Design policy-owned NuGet feeds, credentials, signatures and cache boundaries.
+- #642: Design declared MSBuild resolution inputs with conservative fallback.
+- #643: Cover unsupported future-tailor attest guards with focused unit tests.
+
+- #645: Design Docker relay descriptor transport and the privileged helper installation boundary.
+- #646: Design policy-owned Podman runtime and storage configuration with tenant boundaries.
+- #647: Design persisted owned-container recovery and stopped-process proof after crashes.
+- #648: Require a supported-Podman CI lane and forced-backend real ecosystem coverage.
+
+- #649: Validate the documented signing workflow on fresh Linux runners and adversarial inputs.
+- #650: Publish trusted admission results on the exact verified candidate commit.
+
+- #257: Finish explicit Context ownership and independent attribution. Thread-bound policy, key and strictness scopes support synchronous operations.
+
+- #651: carry explicit operation Context settings and independently owned attribution through the CLI, completing #257.
+
+- **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.
+
+- #653: detect ecosystem comparisons across Rust line boundaries with a bounded token scan and adversarial fixtures.

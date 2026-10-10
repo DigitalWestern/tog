@@ -17,7 +17,7 @@ const WHY: &str = "evaluates the project's MSBuild files and fetches packages fr
 /// Restore and build output in the project: never copied into the
 /// snapshot, never diffed. A confined restore writes `obj/` in its stage,
 /// and it is discarded.
-const EXCLUDE: [&str; 2] = ["obj", "bin"];
+pub(super) const EXCLUDE: [&str; 4] = ["obj", "bin", ".git", ".tog"];
 
 /// Stands for the run's scratch directory in an argument.
 const SCRATCH: &str = "@SCRATCH@";
@@ -34,6 +34,8 @@ pub(crate) struct DotnetRun<'a> {
     /// The arguments after `dotnet restore`.
     pub args: &'a [&'a str],
     pub outputs: Vec<PathBuf>,
+    /// The input generation captured before restore.
+    pub inputs: Option<&'a crate::comforter::join::Digests>,
     pub receipt: Option<ReceiptProducer<'a>>,
 }
 
@@ -51,7 +53,12 @@ pub(crate) fn dotnet_tool(selected: &Selected) -> io::Result<crate::kernel::reso
 fn restore_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let mut all = vec!["restore"];
     all.extend(args);
-    all.extend(["--configfile", "@SCRATCH@/nuget.config"]);
+    all.extend([
+        "--configfile",
+        "@SCRATCH@/nuget.config",
+        "--lock-file-path",
+        "packages.lock.json",
+    ]);
     all
 }
 
@@ -86,6 +93,8 @@ fn in_scratch(arg: &OsString, scratch: &Path) -> OsString {
 fn dotnet_confined<'a>(run: &mut DotnetRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     let mut confined = ConfinedSpec::new("dotnet", "dotnet", WHY);
     confined.name = "dotnet restore";
+    confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
+    confined.complete_inputs = true;
     confined.store_reads = vec![run.sdk_obj.to_path_buf()];
     confined.exclude = EXCLUDE
         .iter()
@@ -144,9 +153,9 @@ pub(crate) fn run_restore(
     let spec = spec(&run);
     let confined = dotnet_confined(&mut run)?;
     door.run_confined(spec, confined).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("store dotnet restore {}: {e}", run.args.join(" ")),
+        crate::kernel::error::context(
+            e,
+            format_args!("store dotnet restore {}", run.args.join(" ")),
         )
     })
 }
@@ -163,7 +172,9 @@ mod tests {
                 "restore",
                 "--use-lock-file",
                 "--configfile",
-                "@SCRATCH@/nuget.config"
+                "@SCRATCH@/nuget.config",
+                "--lock-file-path",
+                "packages.lock.json"
             ]
         );
         assert_eq!(
@@ -179,6 +190,7 @@ mod tests {
             lock_root: Path::new("/work/p"),
             args: &["--locked-mode"],
             outputs: Vec::new(),
+            inputs: None,
             receipt: None,
         };
         let command = format!("{:?}", spec(&run).command());
