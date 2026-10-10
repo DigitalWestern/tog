@@ -31,7 +31,7 @@ pub(crate) fn project_files(
                 ))
             })?
         };
-        for name in dir.read_dir(Path::new("."))?.unwrap_or_default() {
+        for name in dir.read_input_dir(Path::new("."))?.unwrap_or_default() {
             let path = relative.join(&name);
             if excludes.iter().any(|pattern| pattern.matches(&path))
                 || outputs.iter().any(|output| path == Path::new(output))
