@@ -479,8 +479,20 @@ mod tests {
         };
         let fell_back = ["rake-13.2.1".to_string()];
 
+        // A build cached under the previous, wider view cannot answer
+        // for the tightened view, even before its host fingerprint runs.
+        let mut previous = runtime_only.clone();
+        previous
+            .inputs
+            .insert("build_view".into(), "runtime-only/2".into());
+        plant(&previous.object_id());
+        record_host_fallback(&store, &activity, &previous, &host, &fell_back);
         plant(&fallback.object_id());
-        assert_eq!(lookup(&host), None, "no record, no fallback object");
+        assert_eq!(
+            lookup(&host),
+            None,
+            "an old view's cache or record was reused"
+        );
         record_host_fallback(&store, &activity, &runtime_only, &host, &fell_back);
         assert_eq!(lookup(&host), Some(fallback.object_id()));
         // A host whose build inputs changed finds no record, and builds.
@@ -509,7 +521,11 @@ mod tests {
             .unwrap(),
             Some(runtime_only.object_id())
         );
-        for id in [runtime_only.object_id(), fallback.object_id()] {
+        for id in [
+            previous.object_id(),
+            runtime_only.object_id(),
+            fallback.object_id(),
+        ] {
             fs::set_permissions(store.object_path(&id), fs::Permissions::from_mode(0o755)).unwrap();
         }
     }

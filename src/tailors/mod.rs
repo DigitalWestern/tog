@@ -907,19 +907,14 @@ pub fn detected(dir: &Path) -> io::Result<Vec<&'static dyn Tailor>> {
     detected_in(&project)
 }
 
-/// Whether `error`, from opening `dir`, means there is no project there: the
-/// path is missing, or it names something that is not a directory. Any
-/// other failure is an error naming the path, since an empty detection
-/// would report "no project here" for a project that exists. That includes
-/// the refusal `ProjectRoot::open` gives when a directory on the path was
-/// swapped for a symlink while it walked: it shares `InvalidData` with the
-/// not-a-directory case, so the path itself is looked at to tell them apart.
-fn nothing_to_detect(dir: &Path, error: &io::Error) -> bool {
-    match error.kind() {
-        io::ErrorKind::NotFound => true,
-        io::ErrorKind::InvalidData => std::fs::metadata(dir).is_ok_and(|meta| !meta.is_dir()),
-        _ => false,
-    }
+/// Only an ordinary absent path or non-directory request means no project.
+/// A classified refusal is authoritative even if its path has since changed.
+fn nothing_to_detect(_dir: &Path, error: &io::Error) -> bool {
+    crate::kernel::error::class_of(error).is_none()
+        && matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        )
 }
 
 /// `detected` for a project the caller already holds: sync detects through
@@ -1009,12 +1004,17 @@ mod tests {
         assert!(detected(&file).unwrap().is_empty());
         // The refusal a symlink swapped in mid-walk gives, for a path that
         // is a directory when looked at: that is no "nothing here".
-        let refusal = io::Error::new(
+        let refusal = crate::kernel::error::refused(
             io::ErrorKind::InvalidData,
             "x is not a real directory; refusing to open project through it",
         );
         assert!(!nothing_to_detect(&temp.0, &refusal));
-        assert!(nothing_to_detect(&file, &refusal));
+        assert!(!nothing_to_detect(&file, &refusal));
+        let not_directory = ProjectRoot::open(&file).unwrap_err();
+        assert_eq!(not_directory.kind(), io::ErrorKind::NotADirectory);
+        assert!(nothing_to_detect(&file, &not_directory));
+        let absent_refusal = crate::kernel::error::refused(io::ErrorKind::NotFound, "moved");
+        assert!(!nothing_to_detect(&temp.0.join("absent"), &absent_refusal));
         let missing = io::Error::from(io::ErrorKind::NotFound);
         assert!(nothing_to_detect(&temp.0.join("absent"), &missing));
         assert!(detected(&temp.0.join("absent")).unwrap().is_empty());

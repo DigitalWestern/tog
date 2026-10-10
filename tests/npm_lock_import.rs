@@ -869,6 +869,49 @@ fn plan_refuses_a_lock_that_disagrees_with_package_json() {
     }
 }
 
+/// Adding or removing a Yarn manifest dependency both require regenerating
+/// the lock. JSON and the exit status agree, and planning writes nothing.
+#[test]
+fn yarn_manifest_additions_and_removals_report_stale_in_json() {
+    let home = TempDir::new("yarn-stale-json-home");
+    for removed in [false, true] {
+        let project = fixture_with_added_dependency("proj-yarn1", "package.json");
+        if removed {
+            fs::write(
+                project.path().join("package.json"),
+                r#"{"name":"proj-yarn1","version":"1.0.0","dependencies":{}}"#,
+            )
+            .unwrap();
+        }
+        let manifest = fs::read(project.path().join("package.json")).unwrap();
+        let lock = fs::read(project.path().join("yarn.lock")).unwrap();
+        let out = tog(project.path(), home.path(), &["plan", "--json"]);
+        let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
+            .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
+        assert_eq!(out.status.code(), Some(4), "{failure}");
+        assert_eq!(failure["class"], "stale");
+        assert!(
+            failure["error"].as_str().unwrap().contains(if removed {
+                "no package.json depends on"
+            } else {
+                "dependencies disagree"
+            }),
+            "{failure}"
+        );
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(fs::read(project.path().join("yarn.lock")).unwrap(), lock);
+        assert!(!project.path().join("tog-toolchain.toml").exists());
+        assert_eq!(
+            fs::read_dir(project.path().join(".tog")).unwrap().count(),
+            0
+        );
+    }
+}
+
 /// An npm workspace member's package.json is checked against the lock's
 /// entry for that member, not only the root's.
 #[test]
