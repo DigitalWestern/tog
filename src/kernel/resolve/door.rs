@@ -319,7 +319,7 @@ pub(super) fn run(
         },
     )?;
     check_planning_inputs(&snapshot, &confined.expected_inputs)?;
-    if confined.complete_inputs && snapshot.project_file_digests() != confined.expected_inputs {
+    if confined.complete_inputs && snapshot.project_file_digests()? != confined.expected_inputs {
         return Err(io::Error::other(
             "project files changed while planning executable-manifest resolution; \
              nothing was published; run `tog` again",
@@ -1047,6 +1047,21 @@ mod tests {
             .to_string()
             .contains("changed while planning"));
         assert!(check_planning_inputs(&snapshot, &BTreeMap::new()).is_ok());
+        // A link introduced after the input walk cannot enter an otherwise
+        // identical complete snapshot without being represented in a receipt.
+        std::os::unix::fs::symlink("deps.lock", fx.project.join("late-link")).unwrap();
+        let with_link = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        assert!(with_link.project_file_digests().is_err());
     }
 
     /// Every file under `dir` with its bytes.

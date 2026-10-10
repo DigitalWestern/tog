@@ -281,15 +281,20 @@ impl Snapshot {
     }
 
     /// Every regular project file in the immutable pre-run snapshot.
-    pub(super) fn project_file_digests(&self) -> BTreeMap<String, String> {
+    pub(super) fn project_file_digests(&self) -> io::Result<BTreeMap<String, String>> {
         self.baseline
             .iter()
             .filter_map(|(path, state)| {
                 let relative = path.strip_prefix(&self.lock_root().real).ok()?;
                 match state {
-                    EntryState::File { sha256, .. } => {
-                        Some((relative.to_string_lossy().into_owned(), hex::encode(sha256)))
-                    }
+                    EntryState::File { sha256, .. } => Some(Ok((
+                        relative.to_string_lossy().into_owned(),
+                        hex::encode(sha256),
+                    ))),
+                    EntryState::Symlink { .. } => Some(Err(io::Error::other(format!(
+                        "{} is a symlink in the staged resolution inputs; nothing was published",
+                        relative.display()
+                    )))),
                     _ => None,
                 }
             })
