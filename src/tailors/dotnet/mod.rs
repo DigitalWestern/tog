@@ -869,71 +869,7 @@ fn parse_lock(text: &str) -> io::Result<ParsedLock> {
     })
 }
 
-/// What preflight checked: the canonical project file, and the lock's text
-/// and parse when the project has one (it may not exist until delegated
-/// planning writes it). Planning and realization take it as proof.
-#[derive(Debug)]
-pub struct Preflight {
-    pub csproj: PathBuf,
-    lock: Option<(String, ParsedLock)>,
-}
-
-/// Central v0 trust-boundary validation.
-///
-/// Project files are read through the held descriptor (a held root is a
-/// directory by construction); the returned paths are for messages and
-/// child-process arguments. Ancestors lie outside the project and are
-/// still inspected by path.
-pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflight> {
-    let project_dir = project.path();
-    let csproj_rel = find_project(project)?;
-    let csproj = project_dir.join(&csproj_rel);
-    if !regular_file_if_present(project, &csproj_rel, "csproj")? {
-        return Err(err(format!("csproj is missing: {}", csproj.display())));
-    }
-    validate_csproj(project, &csproj_rel)?;
-
-    let lock_rel = Path::new(LOCK_FILE);
-    regular_file_if_present(project, lock_rel, "packages.lock.json")?;
-    regular_file_if_present(project, Path::new("global.json"), "global.json")?;
-    check_global_json(project, sdk_version)?;
-
-    // Each directory above is reached from the held project, not its path.
-    for (depth, ancestor) in project.ancestors().enumerate() {
-        let ancestor = ancestor?;
-        let present = |name: &str| {
-            ancestor
-                .entry(Path::new(name))
-                .map(|entry| entry != Entry::Absent)
-        };
-        for name in [
-            "Directory.Packages.props",
-            "Directory.Build.rsp",
-            "packages.config",
-        ] {
-            if present(name)? {
-                return Err(err(format!(
-                    "{name} is not supported in the project or an SDK ancestor: {}",
-                    ancestor.path().join(name).display()
-                )));
-            }
-        }
-        if depth > 0 && present("global.json")? {
-            return Err(err(format!(
-                "ancestor global.json is not supported; SDK discovery would see {}",
-                ancestor.path().join("global.json").display()
-            )));
-        }
-    }
-    let lock = if project.is_input_file(lock_rel) {
-        let text = read_input_text(project, lock_rel)?;
-        let parsed = parse_lock(&text)?;
-        Some((text, parsed))
-    } else {
-        None
-    };
-    Ok(Preflight { csproj, lock })
-}
+pub use resolve::{preflight, Preflight};
 
 const LOCK_FILE: &str = "packages.lock.json";
 
@@ -959,7 +895,7 @@ pub fn plan_dotnet(
 ) -> io::Result<(DotnetPlan, String)> {
     let lock_rel = Path::new(LOCK_FILE);
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    let Preflight { csproj, lock } = checked;
+    let Preflight { csproj, lock, .. } = checked;
     let Some((lock, ParsedLock { targets, packages })) = lock else {
         return Err(crate::tailors::missing_lock(project, LOCK_FILE));
     };
@@ -979,6 +915,11 @@ pub fn plan_dotnet(
     if now != *lock {
         return Err(err(
             "packages.lock.json changed while planning; re-run 'tog'",
+        ));
+    }
+    if resolve::resolution_basis(project)? != checked.basis {
+        return Err(err(
+            ".NET resolution inputs changed while planning; run `tog` again",
         ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))

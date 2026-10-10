@@ -2,7 +2,7 @@
 //! proxy session's NuGet mirror, for a missing lock and for `tog attest`.
 
 use super::door::{dotnet_tool, run_restore, DotnetRun};
-use super::{err, find_project, preflight, require_lock, LOCK_FILE};
+use super::{err, find_project, require_lock, LOCK_FILE};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
 use crate::kernel::resolve::ResolutionDoor;
@@ -40,6 +40,86 @@ pub(crate) fn resolution_basis(
     let mut listed = resolution_outputs(project)?;
     listed.extend(resolution_inputs(project)?);
     record::file_digests(project, &listed)
+}
+
+/// What preflight checked: the canonical project file, and the lock's text
+/// and parse when the project has one (it may not exist until delegated
+/// planning writes it). Planning and realization take it as proof.
+#[derive(Debug)]
+pub struct Preflight {
+    pub csproj: PathBuf,
+    pub(super) lock: Option<(String, super::ParsedLock)>,
+    pub(super) basis: crate::comforter::join::Digests,
+}
+
+/// Central v0 trust-boundary validation.
+///
+/// Project files are read through the held descriptor (a held root is a
+/// directory by construction); the returned paths are for messages and
+/// child-process arguments. Ancestors lie outside the project and are
+/// still inspected by path.
+pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflight> {
+    let observed = project.observing_inputs()?;
+    let project = &observed;
+    let basis = resolution_basis(project)?;
+    let project_dir = project.path();
+    let csproj_rel = find_project(project)?;
+    let csproj = project_dir.join(&csproj_rel);
+    if !super::regular_file_if_present(project, &csproj_rel, "csproj")? {
+        return Err(err(format!("csproj is missing: {}", csproj.display())));
+    }
+    super::validate_csproj(project, &csproj_rel)?;
+
+    let lock_rel = Path::new(LOCK_FILE);
+    super::regular_file_if_present(project, lock_rel, "packages.lock.json")?;
+    super::regular_file_if_present(project, Path::new("global.json"), "global.json")?;
+    super::check_global_json(project, sdk_version)?;
+
+    // Each directory above is reached from the held project, not its path.
+    for (depth, ancestor) in project.ancestors().enumerate() {
+        let ancestor = ancestor?;
+        let present = |name: &str| {
+            ancestor
+                .entry(Path::new(name))
+                .map(|entry| entry != crate::kernel::fsroot::Entry::Absent)
+        };
+        for name in [
+            "Directory.Packages.props",
+            "Directory.Build.rsp",
+            "packages.config",
+        ] {
+            if present(name)? {
+                return Err(err(format!(
+                    "{name} is not supported in the project or an SDK ancestor: {}",
+                    ancestor.path().join(name).display()
+                )));
+            }
+        }
+        if depth > 0 && present("global.json")? {
+            return Err(err(format!(
+                "ancestor global.json is not supported; SDK discovery would see {}",
+                ancestor.path().join("global.json").display()
+            )));
+        }
+    }
+    let lock = if project.is_input_file(lock_rel) {
+        let text = super::read_input_text(project, lock_rel)?;
+        let parsed = super::parse_lock(&text)?;
+        Some((text, parsed))
+    } else {
+        None
+    };
+    project.verify_observed_inputs()?;
+    if resolution_basis(project)? != basis {
+        return Err(err(
+            ".NET resolution inputs changed during preflight; run `tog` again",
+        ));
+    }
+    Ok(Preflight {
+        csproj,
+        lock,
+        basis,
+    })
 }
 
 /// `prepare`: packages.lock.json, written by the store SDK's `restore
@@ -182,6 +262,33 @@ mod tests {
         assert_ne!(resolution_basis(&project).unwrap(), before);
         std::os::unix::fs::symlink("config", temp.0.join("linked")).unwrap();
         assert!(resolution_inputs(&project).is_err());
+    }
+
+    #[test]
+    fn a_cached_preflight_cannot_label_a_changed_project_generation() {
+        let temp = TempDir::named("dotnet-captured-plan");
+        fs::write(temp.0.join("app.csproj"), csproj("")).unwrap();
+        fs::write(
+            temp.0.join(LOCK_FILE),
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        )
+        .unwrap();
+        fs::write(temp.0.join("version.txt"), "A").unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let selected = super::super::shipped_selection().unwrap();
+        let checked = preflight(&project, selected.version("dotnet-sdk").unwrap()).unwrap();
+        super::super::plan_dotnet(&project, &selected, &checked).unwrap();
+        fs::write(temp.0.join("version.txt"), "B").unwrap();
+        let why = super::super::plan_dotnet(&project, &selected, &checked)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("resolution inputs changed"), "{why}");
+        fs::write(temp.0.join("version.txt"), "A").unwrap();
+        fs::write(temp.0.join("new.props"), "new input").unwrap();
+        assert!(super::super::plan_dotnet(&project, &selected, &checked).is_err());
+        fs::remove_file(temp.0.join("new.props")).unwrap();
+        fs::write(temp.0.join("app.csproj"), csproj("<!-- changed -->")).unwrap();
+        assert!(super::super::plan_dotnet(&project, &selected, &checked).is_err());
     }
 
     /// An unsigned package with one netstandard2.0 asset, so the fixture
