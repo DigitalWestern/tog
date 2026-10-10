@@ -850,7 +850,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     .unwrap();
 
     let out = tog(&project.0, &home.0, &["fmt", "--eco", "rust"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(5));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("rust toolchain") && stderr.contains("1.69.0"),
@@ -1093,7 +1093,7 @@ fn a_first_scoped_build_explains_why_another_ecosystem_stops_it() {
     )
     .unwrap();
     let out = tog(&project.0, &home.0, &["build", "cargo"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(5));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains("creating tog-toolchain.toml selects a toolchain for every ecosystem")
@@ -5218,7 +5218,7 @@ fn unknown_first_word_that_names_a_source_file_runs_it_in_its_project() {
     std::fs::write(project.0.join("tool.rb"), "").unwrap();
     std::fs::write(project.0.join(".ruby-version"), "0.0.1\n").unwrap();
     let out = tog(&project.0, &home.0, &["-v", "tool.rb"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(5), "{}", text(&out.stderr));
     let stderr = text(&out.stderr);
     assert!(
         stderr.contains(
