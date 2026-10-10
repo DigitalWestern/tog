@@ -341,9 +341,9 @@ fn layers_point_one_way() {
 /// ecosystem knows goes through a `Tailor` method or a table the tailors
 /// install (#255).
 ///
-/// Comparisons are not checked under `kernel/provider/`: that tree is
-/// heavy-watched in CI and `cpython.rs` still compares `selected.ecosystem`
-/// with `"python"`, which waits for a pull request that has to touch it.
+/// A comparison listed in `ECOSYSTEM_COMPARISONS` is the one exception,
+/// and every entry must occur exactly once, so a fixed site leaves no stale
+/// permission behind and a copied site needs its own review.
 #[test]
 fn the_kernel_branches_on_no_ecosystem_name() {
     let mut names: Vec<&str> = tog::tailors::registry()
@@ -356,29 +356,108 @@ fn the_kernel_branches_on_no_ecosystem_name() {
     let mut files = Vec::new();
     rust_files(&root.join("kernel"), &mut files);
     let mut violations = Vec::new();
+    let mut allowed_counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
     for file in &files {
         let relative = file.strip_prefix(&root).unwrap();
-        let comparisons = !relative.starts_with("kernel/provider");
         let text = fs::read_to_string(file).unwrap();
-        for (number, line) in non_test(&text).lines().enumerate() {
-            if let Some(name) = ecosystem_arm(line, &names, comparisons) {
-                violations.push(format!("{}:{}: \"{name}\"", relative.display(), number + 1));
-            }
-        }
+        violations.extend(ecosystem_violations(
+            relative,
+            &text,
+            &names,
+            &mut allowed_counts,
+        ));
     }
     assert!(
         violations.is_empty(),
         "the kernel matches on an ecosystem name; give the tailors a method or a table instead:\n  {}",
         violations.join("\n  ")
     );
+    let allowances = ecosystem_allowance_violations(&allowed_counts);
+    assert!(
+        allowances.is_empty(),
+        "ECOSYSTEM_COMPARISONS must allow exactly one occurrence per entry; remove stale entries or review copied sites:\n  {}",
+        allowances.join("\n  ")
+    );
 }
+
+fn ecosystem_violations(
+    relative: &Path,
+    text: &str,
+    names: &[&str],
+    allowed_counts: &mut [usize],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (number, line) in non_test(text).lines().enumerate() {
+        let Some(name) = ecosystem_arm(line, names) else {
+            continue;
+        };
+        let allowed = ECOSYSTEM_COMPARISONS.iter().position(|(path, code, _)| {
+            relative == Path::new(path).strip_prefix("src").unwrap() && line.trim() == *code
+        });
+        match allowed {
+            Some(index) => allowed_counts[index] += 1,
+            None => violations.push(format!("{}:{}: \"{name}\"", relative.display(), number + 1)),
+        }
+    }
+    violations
+}
+
+fn ecosystem_allowance_violations(allowed_counts: &[usize]) -> Vec<String> {
+    ECOSYSTEM_COMPARISONS
+        .iter()
+        .zip(allowed_counts)
+        .filter(|(_, count)| **count != 1)
+        .map(|((path, code, _), count)| format!("{path}: {code} (found {count}, expected 1)"))
+        .collect()
+}
+
+#[test]
+fn ecosystem_allowances_cover_one_live_site_only() {
+    let path = Path::new("kernel/provider/cpython.rs");
+    let guard = "if selected.ecosystem != \"python\" {\n    return Err(refused());\n}\n";
+    for (source, accepted) in [
+        (String::new(), false),
+        (guard.into(), true),
+        (guard.repeat(2), false),
+    ] {
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        assert!(ecosystem_violations(path, &source, &["python"], &mut counts).is_empty());
+        assert_eq!(ecosystem_allowance_violations(&counts).is_empty(), accepted);
+    }
+    // Neither another provider nor another comparison in the same provider
+    // inherits the reviewed input guard's permission.
+    for (path, source) in [
+        (Path::new("kernel/provider/rust.rs"), guard),
+        (
+            path,
+            "if selected.ecosystem == \"python\" {\n    choose_runtime();\n}\n",
+        ),
+    ] {
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        assert_eq!(
+            ecosystem_violations(path, source, &["python"], &mut counts).len(),
+            1
+        );
+        assert!(!ecosystem_allowance_violations(&counts).is_empty());
+    }
+}
+
+/// The kernel's reviewed comparisons with an ecosystem name: the file, the
+/// whole line as it reads trimmed, and why it is not a branch an eighth
+/// ecosystem would have to edit.
+const ECOSYSTEM_COMPARISONS: &[(&str, &str, &str)] = &[(
+    "src/kernel/provider/cpython.rs",
+    "if selected.ecosystem != \"python\" {",
+    "the CPython provider refuses a selection from another ecosystem's \
+     section: a guard on its own input, not a branch per ecosystem",
+)];
 
 /// The ecosystem `line` branches on: a quoted name in a pattern, which is
 /// anything before a `=>` on its line (a plain arm, a guard arm, a tuple
 /// or `Some(..)` pattern), one `|` alternative of a pattern continued over
-/// several lines, or an argument of `matches!`; and, when `comparisons` is
-/// set, a quoted name beside `==` or `!=`.
-fn ecosystem_arm<'a>(line: &str, names: &[&'a str], comparisons: bool) -> Option<&'a str> {
+/// several lines, or an argument of `matches!`; and a quoted name beside
+/// `==` or `!=`.
+fn ecosystem_arm<'a>(line: &str, names: &[&'a str]) -> Option<&'a str> {
     let code = line.split("//").next().unwrap_or(line);
     names.iter().copied().find(|name| {
         let quoted = format!("\"{name}\"");
@@ -388,10 +467,9 @@ fn ecosystem_arm<'a>(line: &str, names: &[&'a str], comparisons: bool) -> Option
             let alternative = (after.starts_with('|') && !after.starts_with("||"))
                 || (before.ends_with('|') && !before.ends_with("||"));
             let pattern = after.contains("=>") || before.contains("matches!(");
-            let compared = comparisons
-                && ["==", "!="]
-                    .iter()
-                    .any(|op| after.starts_with(op) || before.ends_with(op));
+            let compared = ["==", "!="]
+                .iter()
+                .any(|op| after.starts_with(op) || before.ends_with(op));
             alternative || pattern || compared
         })
     })
@@ -414,7 +492,7 @@ fn the_ecosystem_arm_scan_sees_every_spelling() {
         "    if selected.ecosystem != \"python\" {",
         "    name == \"go\" || other",
     ] {
-        assert!(ecosystem_arm(line, &names, true).is_some(), "{line}");
+        assert!(ecosystem_arm(line, &names).is_some(), "{line}");
     }
     for line in [
         "    let tool = \"go\";",
@@ -426,14 +504,8 @@ fn the_ecosystem_arm_scan_sees_every_spelling() {
         "    // \"python\" => no longer here",
         "        \"golang\" => {",
     ] {
-        assert_eq!(ecosystem_arm(line, &names, true), None, "{line}");
+        assert_eq!(ecosystem_arm(line, &names), None, "{line}");
     }
-    // A provider file is scanned for patterns, not for comparisons.
-    assert_eq!(
-        ecosystem_arm("    if selected.ecosystem != \"python\" {", &names, false),
-        None
-    );
-    assert!(ecosystem_arm("        \"python\" => {", &names, false).is_some());
 }
 
 /// Every spelling of a path into another layer is seen: nested groups,
