@@ -105,3 +105,5 @@ None open.
 - #650: Publish trusted admission results on the exact verified candidate commit.
 
 - #257: Finish explicit Context ownership and independent attribution. Thread-bound policy, key and strictness scopes support synchronous operations.
+
+- #651: carry explicit operation Context settings and independently owned attribution through the CLI, completing #257.
