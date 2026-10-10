@@ -1193,7 +1193,7 @@ impl Fingerprint<'_> {
             let target = fs::read_link(host).map_err(|error| fingerprint_error(host, error))?;
             self.field(target.as_os_str().as_bytes());
             if self.resolved(inside)? && self.refuse_directory_links {
-                return Err(io::Error::new(
+                return Err(crate::kernel::error::refused(
                     io::ErrorKind::InvalidInput,
                     format!(
                         "{} in TOG_TEST_HOST_DEV_FILES is a symlink to a directory; \
@@ -1342,10 +1342,18 @@ mod tests {
             error.to_string().contains("symlink to a directory"),
             "{error}"
         );
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         fs::remove_file(dev.join("usr/include")).unwrap();
         let linked = temp.0.join("dev-link");
         symlink(&dev, &linked).unwrap();
-        assert!(with_dev_files(&host, &linked).is_err());
+        let error = with_dev_files(&host, &linked).unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
     }
 
     #[test]
@@ -1369,6 +1377,10 @@ mod tests {
         assert!(
             error.to_string().contains("symlink to a directory"),
             "{error}"
+        );
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
         );
     }
 
