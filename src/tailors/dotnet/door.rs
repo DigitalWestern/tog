@@ -53,7 +53,12 @@ pub(crate) fn dotnet_tool(selected: &Selected) -> io::Result<crate::kernel::reso
 fn restore_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
     let mut all = vec!["restore"];
     all.extend(args);
-    all.extend(["--configfile", "@SCRATCH@/nuget.config"]);
+    all.extend([
+        "--configfile",
+        "@SCRATCH@/nuget.config",
+        "--lock-file-path",
+        "packages.lock.json",
+    ]);
     all
 }
 
@@ -167,7 +172,9 @@ mod tests {
                 "restore",
                 "--use-lock-file",
                 "--configfile",
-                "@SCRATCH@/nuget.config"
+                "@SCRATCH@/nuget.config",
+                "--lock-file-path",
+                "packages.lock.json"
             ]
         );
         assert_eq!(

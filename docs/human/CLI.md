@@ -1161,7 +1161,14 @@ require the resolution sandbox. MSBuild can read arbitrary project data, so
 `bin/`, `.git/` and `.tog/`. Changes or added files invalidate that evidence.
 Symlinks in this input set are refused. As with Ruby and Elixir, the staged
 resolver view uses file mode 0644 and directory mode 0755, and omits empty
-directories. The checkout's permissions and empty directories are preserved.
+directories. The checkout's permissions and empty directories are preserved. Restore always names `packages.lock.json` explicitly. Project files containing
+`NuGetLockFilePath` or `TreatAsLocalProperty` are conservatively refused,
+including imported files and UTF-16/32 XML. Use Tog's default lock path.
+Existing .NET locks need a trusted resolution receipt under strict/company
+policy. Run `tog attest dotnet` with a signing key trusted by that policy,
+then commit `.tog/resolution/dotnet.json`. The mirror supports public
+api.nuget.org only. It records transport and package content hashes, without
+claiming publisher-signature verification.
 
 Hashes alone prove package bytes, not how the dependency set was resolved.
 To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`

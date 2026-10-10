@@ -42,6 +42,35 @@ pub(crate) fn resolution_basis(
     record::file_digests(project, &listed)
 }
 
+/// Command-line global properties hold the lock contract unless imported
+/// MSBuild opts them back into local reassignment. Scan all visible bytes,
+/// including UTF-16/32 XML's NUL-padded ASCII names, rather than guessing
+/// which extensions arbitrary imports may use. This is a conservative refusal.
+fn reject_lock_controls(
+    project: &ProjectRoot,
+    basis: &crate::comforter::join::Digests,
+) -> io::Result<()> {
+    for path in basis.keys().filter(|path| path.as_str() != LOCK_FILE) {
+        let bytes = project
+            .read_input(Path::new(path))?
+            .ok_or_else(|| err("MSBuild input vanished"))?;
+        let ascii: Vec<u8> = bytes
+            .into_iter()
+            .filter(|byte| *byte != 0)
+            .map(|byte| byte.to_ascii_lowercase())
+            .collect();
+        for control in ["treataslocalproperty", "nugetlockfilepath"] {
+            if ascii
+                .windows(control.len())
+                .any(|part| part == control.as_bytes())
+            {
+                return Err(err(format!("{path}: unsupported MSBuild lock control {control}; restore must check packages.lock.json with tog's global settings")));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// What preflight checked: the canonical project file, and the lock's text
 /// and parse when the project has one (it may not exist until delegated
 /// planning writes it). Planning and realization take it as proof.
@@ -62,6 +91,7 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
     let observed = project.observing_inputs()?;
     let project = &observed;
     let basis = resolution_basis(project)?;
+    reject_lock_controls(project, &basis)?;
     let project_dir = project.path();
     let csproj_rel = find_project(project)?;
     let csproj = project_dir.join(&csproj_rel);
@@ -291,6 +321,43 @@ mod tests {
         assert!(super::super::plan_dotnet(&project, &selected, &checked).is_err());
     }
 
+    #[test]
+    fn alternate_lock_controls_are_refused_in_main_and_imported_files() {
+        let temp = TempDir::named("dotnet-lock-control");
+        let plain = csproj("");
+        fs::write(temp.0.join("app.csproj"), &plain).unwrap();
+        fs::write(
+            temp.0.join(LOCK_FILE),
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.0.join("alternate.lock.json"),
+            r#"{"version":1,"dependencies":{"net9.0":{"Other":{}}}}"#,
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let sdk_version = super::super::shipped_selection()
+            .unwrap()
+            .version("dotnet-sdk")
+            .unwrap()
+            .to_owned();
+        fs::write(temp.0.join("app.csproj"), plain.replace("</Project>", "<PropertyGroup><NuGetLockFilePath>alternate.lock.json</NuGetLockFilePath></PropertyGroup></Project>")).unwrap();
+        let why = preflight(&project, &sdk_version).unwrap_err().to_string();
+        assert!(why.contains("nugetlockfilepath"), "{why}");
+        fs::write(temp.0.join("app.csproj"), &plain).unwrap();
+        for control in [
+            "<Project TreatAsLocalProperty=\"NuGetLockFilePath;RestoreLockedMode\" />",
+            "<Project><PropertyGroup><NuGetLockFilePath>alternate.lock.json</NuGetLockFilePath></PropertyGroup></Project>",
+        ] {
+            fs::write(temp.0.join("Directory.Build.props"), control).unwrap();
+            assert!(preflight(&project, &sdk_version).is_err());
+            let utf16: Vec<_> = std::iter::once(0xfeffu16).chain(control.encode_utf16()).flat_map(u16::to_le_bytes).collect();
+            fs::write(temp.0.join("Directory.Build.props"), utf16).unwrap();
+            assert!(preflight(&project, &sdk_version).is_err());
+        }
+    }
+
     /// An unsigned package with one netstandard2.0 asset, so the fixture
     /// restore has a real `.nupkg` to install (the recorded rows kept
     /// Humanizer.Core's index but not its 500 KB body).
@@ -410,9 +477,10 @@ mod tests {
     /// signed, a drifted csproj refused.
     #[test]
     #[ignore = "realizes the store .NET SDK over the network"]
-    fn dotnet_missing_lock_restore_through_nuget_mirror() {
+    fn dotnet_restore_attest_without_unix_sockets_through_nuget_mirror() {
+        let _env = policy::test_env_lock();
         let _serial = policy::attribution_test_lock();
-        let label = "dotnet_missing_lock_restore_through_nuget_mirror";
+        let label = "dotnet_restore_attest_without_unix_sockets_through_nuget_mirror";
         let Some(harness) = nuget_harness(label) else {
             return;
         };
@@ -427,8 +495,26 @@ mod tests {
         let temp = TempDir::named("dotnet-mirror");
         let dir = temp.0.join("project");
         fs::create_dir_all(&dir).unwrap();
-        let reference = "    <PackageReference Include=\"Tog.Fixture\" Version=\"1.0.0\" />\n";
+        let reference =
+            "    <PackageReference Include=\"Tog.Fixture\" Version=\"$(FixtureVersion)\" Condition=\"!Exists('empty-switch')\" />\n";
         fs::write(dir.join("app.csproj"), csproj(reference)).unwrap();
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::write(dir.join("config/version.txt"), "1.0.0").unwrap();
+        fs::write(dir.join("config/package.props"), r#"<Project><PropertyGroup>
+          <FixtureVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)version.txt').Trim())</FixtureVersion>
+        </PropertyGroup></Project>"#).unwrap();
+        fs::write(dir.join("Directory.Build.props"), r#"<Project>
+          <Import Project="config/package.props" />
+          <PropertyGroup>
+            <TogDiagnostics>$([System.Environment]::GetEnvironmentVariable('DOTNET_EnableDiagnostics'))</TogDiagnostics>
+            <TogNodeReuse>$([System.Environment]::GetEnvironmentVariable('MSBUILDDISABLENODEREUSE'))</TogNodeReuse>
+          </PropertyGroup>
+          <Target Name="TogNoUnixSettings" BeforeTargets="Restore">
+            <Error Condition="'$(TogDiagnostics)' != '0'" Text="diagnostic IPC not disabled" />
+            <Error Condition="'$(TogNodeReuse)' != '1'" Text="MSBuild node reuse not disabled" />
+            <Error Condition="'$(MSBuildNodeCount)' != '1'" Text="parallel MSBuild workers not disabled" />
+          </Target>
+        </Project>"#).unwrap();
         let dir = dir.canonicalize().unwrap();
         let held = ProjectRoot::open(&dir).unwrap();
 
@@ -452,6 +538,48 @@ mod tests {
         let (record, _) = attested.unwrap();
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(record.outputs.len(), 2, "{:?}", record.outputs);
+        for input in [
+            "Directory.Build.props",
+            "config/package.props",
+            "config/version.txt",
+        ] {
+            assert!(record.inputs.contains_key(input), "{record:?}");
+        }
+        // Changing data read by an imported props file invalidates the receipt,
+        // even though the main project and its lock remain byte-identical.
+        let before_basis = resolution_basis(&held).unwrap();
+        fs::write(dir.join("config/version.txt"), "2.0.0").unwrap();
+        assert_ne!(resolution_basis(&held).unwrap(), before_basis);
+        let before_lock = fs::read(dir.join(LOCK_FILE)).unwrap();
+        let (changed_data, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        assert!(changed_data.is_err());
+        assert_eq!(fs::read(dir.join(LOCK_FILE)).unwrap(), before_lock);
+        fs::write(dir.join("config/version.txt"), "1.0.0").unwrap();
+
+        // Empty directories and host execute bits cannot select a different
+        // dependency set in the canonical resolver view. The checkout stays intact.
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::create_dir(dir.join("empty-switch")).unwrap();
+        fs::set_permissions(
+            dir.join("config/version.txt"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let (canonical, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &sdk, &selected)
+        });
+        canonical.unwrap();
+        assert!(dir.join("empty-switch").is_dir());
+        assert_eq!(
+            fs::metadata(dir.join("config/version.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
 
         fs::write(dir.join("app.csproj"), csproj("")).unwrap();
         let before = fs::read(dir.join(LOCK_FILE)).unwrap();
