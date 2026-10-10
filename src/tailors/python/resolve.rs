@@ -24,7 +24,7 @@ const OUTPUTS: [&str; 5] = [
 
 /// Project files uv reads when it resolves and never writes: the setuptools
 /// metadata a project without `[project]` declares its dependencies in.
-const INPUTS: [&str; 2] = ["setup.cfg", "setup.py"];
+const INPUTS: [&str; 3] = ["setup.cfg", "setup.py", "tog.toml"];
 
 /// The requirements files whose `-r`/`-c` includes a door's uv reads.
 const REQUIREMENTS: [&str; 2] = ["requirements.in", "requirements.txt"];
@@ -78,11 +78,18 @@ fn includes(root: &ProjectRoot) -> io::Result<Includes> {
         inside: Vec::new(),
         outside: Vec::new(),
     };
-    for top in REQUIREMENTS {
-        if !root.is_input_file(Path::new(top)) {
-            continue;
+    let mut sources: Vec<PathBuf> = REQUIREMENTS
+        .iter()
+        .filter(|top| root.is_input_file(Path::new(top)))
+        .map(|top| root.path().join(top))
+        .collect();
+    if let Some(source) = super::manifest::resolution_requirements_source(root)? {
+        if !sources.contains(&source) {
+            sources.push(source);
         }
-        for file in super::manifest::include_closure(root, &root.path().join(top))? {
+    }
+    for top in sources {
+        for file in super::manifest::include_closure(root, &top)? {
             match super::manifest::held_relative(root, &file) {
                 Some(relative) => {
                     let listed = OUTPUTS.iter().any(|output| relative == Path::new(output));
@@ -342,7 +349,9 @@ pub(crate) fn attest_project(
             format!(
                 "{} has no lock a tool resolved (no uv.lock, requirements.lock.txt, or \
                  requirements.in with its compiled requirements.txt), so there is no lock check \
-                 to attest; run `tog` to write one, commit it, then attest",
+                 to attest; run `tog` for an unpinned source; for a hand-hashed \
+                 requirements.txt, copy it to requirements.in and run `tog update` to \
+                 compile the pair; commit the result, then attest",
                 dir.display()
             ),
         ));
@@ -410,10 +419,15 @@ fn refuse_foreign_header(project: &ProjectRoot, output: &str) -> io::Result<()> 
     if compiled_by_tog(&text) {
         return Ok(());
     }
+    let recovery = if output == "requirements.txt" {
+        "run `tog update` to compile it again"
+    } else {
+        "delete only requirements.lock.txt and run `tog` to compile it again"
+    };
     Err(io::Error::other(format!(
         "{output} in {} was not compiled by tog (its header names another command), so \
-         rerunning the compile would rewrite it and the check cannot pass; delete it, run \
-         `tog` to compile it again, commit the result, then attest",
+         rerunning the compile would rewrite it and the check cannot pass; \
+         {recovery}, commit the result, then attest",
         project.path().display()
     )))
 }
@@ -561,6 +575,75 @@ mod tests {
         write(&root, "requirements.txt", "-r ../shared.txt\n");
         let held = ProjectRoot::open(&root).unwrap();
         assert!(has_external_includes(&held).unwrap());
+    }
+
+    #[test]
+    fn requirements_directory_and_configured_sources_are_covered() {
+        let temp = TempDir::named("py-directory-inputs");
+        let root = temp.0.join("proj");
+        write(&root, "requirements/cpu.txt", "-r common.txt\n");
+        write(&root, "requirements/common.txt", "six\n");
+        let held = ProjectRoot::open(&root).unwrap();
+        let inputs = resolution_inputs(&held).unwrap();
+        assert!(inputs.contains(&PathBuf::from("requirements/cpu.txt")));
+        assert!(inputs.contains(&PathBuf::from("requirements/common.txt")));
+        assert!(inputs.contains(&PathBuf::from("tog.toml")));
+        assert!(!has_external_includes(&held).unwrap());
+
+        write(&root, "tog.toml", "[python]\nrequirements = 'custom.in'\n");
+        write(&root, "custom.in", "-c pins.txt\nsix\n");
+        write(&root, "pins.txt", "six<2\n");
+        let inputs = resolution_inputs(&held).unwrap();
+        assert!(inputs.contains(&PathBuf::from("custom.in")));
+        assert!(inputs.contains(&PathBuf::from("pins.txt")));
+        write(&temp.0, "external.in", "six\n");
+        write(
+            &root,
+            "tog.toml",
+            "[python]\nrequirements = '../external.in'\n",
+        );
+        assert!(has_external_includes(&held).unwrap());
+    }
+
+    #[test]
+    fn the_resolution_basis_cannot_attest_a_replaced_planning_lock() {
+        let temp = TempDir::named("py-basis-race");
+        write(&temp.0, "uv.lock", "generation A");
+        let observed = ProjectRoot::open(&temp.0)
+            .unwrap()
+            .observing_inputs()
+            .unwrap();
+        observed.read_input(Path::new("uv.lock")).unwrap();
+        // Deterministically replace the input after consumption and before
+        // the producer builds its basis, rather than depending on timing.
+        write(&temp.0, "uv.lock", "generation B");
+        let error = resolution_basis(&observed).unwrap_err();
+        assert!(error.to_string().contains("changed while planning"));
+    }
+
+    #[test]
+    fn foreign_headers_name_recovery_for_the_actual_compiled_file() {
+        let temp = TempDir::named("py-header-recovery");
+        write(
+            &temp.0,
+            "requirements.txt",
+            "# foreign header\nsix==1.16.0\n",
+        );
+        write(
+            &temp.0,
+            "requirements.lock.txt",
+            "# foreign header\nsix==1.16.0\n",
+        );
+        let root = ProjectRoot::open(&temp.0).unwrap();
+        let pair = refuse_foreign_header(&root, "requirements.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(pair.contains("run `tog update`"));
+        assert!(!pair.contains("delete"));
+        let generated = refuse_foreign_header(&root, "requirements.lock.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(generated.contains("delete only requirements.lock.txt and run `tog`"));
     }
 
     /// The header uv writes for `--custom-compile-command tog`, and one a

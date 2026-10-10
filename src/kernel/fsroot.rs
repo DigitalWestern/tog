@@ -38,6 +38,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 mod held;
+mod observed;
 mod rename_in;
 use held::HeldEntry;
 pub(crate) use held::{held_root_for, start_in};
@@ -77,6 +78,7 @@ pub struct ProjectRoot {
     /// The files outside the project this root has read, shared with every
     /// root derived from it, so one command reads each once (#501).
     external: std::sync::Arc<crate::kernel::external_input::ExternalInputs>,
+    observed: Option<std::sync::Arc<observed::Inputs>>,
 }
 
 /// The held directory, for a caller that must issue a descriptor-relative
@@ -106,6 +108,7 @@ impl ProjectRoot {
             path,
             _held: Some(held),
             external: Default::default(),
+            observed: None,
         })
     }
 
@@ -126,6 +129,7 @@ impl ProjectRoot {
             dir,
             path,
             external: Default::default(),
+            observed: None,
         }))
     }
 
@@ -596,6 +600,7 @@ impl ProjectRoot {
             path: self.path.clone(),
             _held: held,
             external: self.external.clone(),
+            observed: self.observed.clone(),
         })
     }
 
@@ -692,6 +697,7 @@ impl ProjectRoot {
     /// absolute, since an absolute path would ignore the descriptor.
     pub fn read_input(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
         let Some(mut file) = self.open_input(relative)? else {
+            self.observe_input(relative, None)?;
             return Ok(None);
         };
         let mut bytes = Vec::new();
@@ -701,6 +707,7 @@ impl ProjectRoot {
                 format!("read {}: {error}", self.path.join(relative).display()),
             )
         })?;
+        self.observe_input(relative, Some(&bytes))?;
         Ok(Some(bytes))
     }
 
@@ -744,7 +751,15 @@ impl ProjectRoot {
     /// `input_entry(relative) == Entry::Regular`, with an unreadable
     /// parent read as absent, as `Path::is_file` reads it.
     pub fn is_input_file(&self, relative: &Path) -> bool {
-        matches!(self.input_entry(relative), Ok(Entry::Regular))
+        let regular = matches!(self.input_entry(relative), Ok(Entry::Regular));
+        if self.observed.is_some()
+            && (regular || matches!(self.input_entry(relative), Ok(Entry::Absent)))
+        {
+            // A boolean caller may ignore the read error. The observer
+            // remembers conflicts and verification still refuses them.
+            let _ = self.read_input(relative);
+        }
+        regular
     }
 
     /// `input_entry(relative) == Entry::Directory`, as `Path::is_dir`.
@@ -798,6 +813,7 @@ impl ProjectRoot {
                     path: display,
                     _held: Some(held),
                     external: self.external.clone(),
+                    observed: None,
                 }))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -828,6 +844,7 @@ impl ProjectRoot {
                     path,
                     _held: Some(held),
                     external: self.external.clone(),
+                    observed: None,
                 }))
             }
             Err(error)
@@ -897,6 +914,7 @@ impl ProjectRoot {
             dir,
             path: path.to_path_buf(),
             external: self.external.clone(),
+            observed: None,
         }))
     }
 
