@@ -294,7 +294,9 @@ proxy, and every fetch went into a ledger. The company policy
 lock without one (`unrecorded-resolution`). `tog attest` is how a
 repository's existing locks get records: it runs each ecosystem's own lock
 check confined and signs the result only when the lock comes out
-byte-unchanged.
+byte-unchanged. Some existing locks need migration first. A hand-pinned
+Python requirements file has no resolver provenance and must be recompiled
+through Tog before attestation. See [the attest migration rules](docs/human/CLI.md).
 
 Two setups. Both are verified the same way, against the `[signing]` keys
 in the machine policy.
