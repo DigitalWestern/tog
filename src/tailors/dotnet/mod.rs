@@ -10,10 +10,15 @@
 //! lock (not project obj/) is the only durable authority: every sandboxed
 //! build re-restores offline into scratch and builds --no-restore.
 
+mod door;
 pub mod edit;
 pub mod objects;
+pub(crate) mod registry;
+mod resolve;
 pub mod tailor;
 mod unpack;
+
+pub use resolve::{attest_project, generate_lock};
 
 #[cfg(test)]
 use unpack::extract_sdk_archive;
@@ -23,7 +28,6 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{cache_insert, download_toolchain_artifact_held, Digest};
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -395,9 +399,8 @@ pub const BUILD_VERBS: &[&str] = &[
 
 /// `tog run`'s guard is advisory: wrappers can bypass it. During
 /// realization and build, tog never evaluates project code outside the
-/// build sandbox. Missing-lock lock generation is the explicit host-side
-/// exception: config and environment are pinned, but project MSBuild code
-/// runs on the host.
+/// build sandbox. Missing-lock generation and attestation evaluate MSBuild
+/// in the confined resolution sandbox through the NuGet mirror.
 pub fn refused_run_command(cmd: &[String]) -> Option<String> {
     if cmd.first().map(String::as_str) != Some("dotnet") {
         return None;
@@ -866,71 +869,7 @@ fn parse_lock(text: &str) -> io::Result<ParsedLock> {
     })
 }
 
-/// What preflight checked: the canonical project file, and the lock's text
-/// and parse when the project has one (it may not exist until delegated
-/// planning writes it). Planning and realization take it as proof.
-#[derive(Debug)]
-pub struct Preflight {
-    pub csproj: PathBuf,
-    lock: Option<(String, ParsedLock)>,
-}
-
-/// Central v0 trust-boundary validation.
-///
-/// Project files are read through the held descriptor (a held root is a
-/// directory by construction); the returned paths are for messages and
-/// child-process arguments. Ancestors lie outside the project and are
-/// still inspected by path.
-pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflight> {
-    let project_dir = project.path();
-    let csproj_rel = find_project(project)?;
-    let csproj = project_dir.join(&csproj_rel);
-    if !regular_file_if_present(project, &csproj_rel, "csproj")? {
-        return Err(err(format!("csproj is missing: {}", csproj.display())));
-    }
-    validate_csproj(project, &csproj_rel)?;
-
-    let lock_rel = Path::new(LOCK_FILE);
-    regular_file_if_present(project, lock_rel, "packages.lock.json")?;
-    regular_file_if_present(project, Path::new("global.json"), "global.json")?;
-    check_global_json(project, sdk_version)?;
-
-    // Each directory above is reached from the held project, not its path.
-    for (depth, ancestor) in project.ancestors().enumerate() {
-        let ancestor = ancestor?;
-        let present = |name: &str| {
-            ancestor
-                .entry(Path::new(name))
-                .map(|entry| entry != Entry::Absent)
-        };
-        for name in [
-            "Directory.Packages.props",
-            "Directory.Build.rsp",
-            "packages.config",
-        ] {
-            if present(name)? {
-                return Err(err(format!(
-                    "{name} is not supported in the project or an SDK ancestor: {}",
-                    ancestor.path().join(name).display()
-                )));
-            }
-        }
-        if depth > 0 && present("global.json")? {
-            return Err(err(format!(
-                "ancestor global.json is not supported; SDK discovery would see {}",
-                ancestor.path().join("global.json").display()
-            )));
-        }
-    }
-    let lock = if project.is_input_file(lock_rel) {
-        let text = read_input_text(project, lock_rel)?;
-        let parsed = parse_lock(&text)?;
-        Some((text, parsed))
-    } else {
-        None
-    };
-    Ok(Preflight { csproj, lock })
-}
+pub use resolve::{preflight, Preflight};
 
 const LOCK_FILE: &str = "packages.lock.json";
 
@@ -946,48 +885,6 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
     }
 }
 
-/// `prepare`: packages.lock.json, written by a store-SDK `restore
-/// --use-lock-file` (named resolver mutation, isolated caches) when there
-/// is none. The one place the .NET tailor writes project inputs. The
-/// restore child runs in the project's path.
-pub fn generate_lock(
-    door: &mut ResolutionDoor<'_>,
-    project: &ProjectRoot,
-    sdk_obj: &Path,
-    selected: &Selected,
-) -> io::Result<()> {
-    let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    preflight(project, &sdk_version)?;
-    ui::note("no packages.lock.json; resolving with the store SDK...");
-    let scratch = door.store().stage_with_activity(door.lease())?;
-    let config = scratch.join("nuget.config");
-    fs::write(
-        &config,
-        "<configuration><packageSources><clear /><add key=\"nuget.org\" \
-         value=\"https://api.nuget.org/v3/index.json\" protocolVersion=\"3\" />\
-         </packageSources></configuration>",
-    )?;
-    let config = config.canonicalize()?;
-    let config_arg = config.to_string_lossy().into_owned();
-    let out = run_dotnet(
-        door,
-        sdk_obj,
-        project.path(),
-        &scratch.join("pkgs"),
-        &scratch,
-        &["restore", "--use-lock-file", "--configfile", &config_arg],
-    )?;
-    let ok = out.status.success();
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    if !ok {
-        return Err(err(format!(
-            "store dotnet restore --use-lock-file failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
 /// Plan from packages.lock.json (v1 only; tog makes the opt-in lock
 /// mandatory), as `checked` read and parsed it. The project is read
 /// through the held descriptor.
@@ -998,7 +895,7 @@ pub fn plan_dotnet(
 ) -> io::Result<(DotnetPlan, String)> {
     let lock_rel = Path::new(LOCK_FILE);
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    let Preflight { csproj, lock } = checked;
+    let Preflight { csproj, lock, .. } = checked;
     let Some((lock, ParsedLock { targets, packages })) = lock else {
         return Err(crate::tailors::missing_lock(project, LOCK_FILE));
     };
@@ -1020,35 +917,12 @@ pub fn plan_dotnet(
             "packages.lock.json changed while planning; re-run 'tog'",
         ));
     }
+    if resolve::resolution_basis(project)? != checked.basis {
+        return Err(err(
+            ".NET resolution inputs changed while planning; run `tog` again",
+        ));
+    }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
-}
-
-fn run_dotnet(
-    door: &mut ResolutionDoor<'_>,
-    sdk_obj: &Path,
-    cwd: &Path,
-    packages: &Path,
-    scratch: &Path,
-    args: &[&str],
-) -> io::Result<DelegateReport> {
-    // Host-only resolver path: currently used for missing-lock delegation;
-    // SDK probing does not use this helper. Realization uses run_build_spec.
-    fs::create_dir_all(packages)?;
-    fs::create_dir_all(scratch)?;
-    let home = scratch.join("home");
-    prepare_scratch(scratch)?;
-    let mut spec = DelegateSpec::new(sdk_obj.join("dotnet"));
-    spec.args(args).lock_root(cwd).env_clear();
-    spec.env("PATH", format!("{}:/usr/bin:/bin", sdk_obj.display()));
-    spec.env("TMPDIR", scratch).env("HOME", &home);
-    spec.force_env(
-        ENV_REMOVE_PREFIXES,
-        ENV_REMOVE,
-        &forced_env(sdk_obj, packages, scratch),
-    );
-    spec.capture();
-    door.run(spec)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store dotnet {args:?}: {e}")))
 }
 
 fn synthetic_csproj(plan: &DotnetPlan, tfm: &str) -> String {
@@ -1272,6 +1146,7 @@ pub fn project_dotnet_env(
     packages_obj: &Path,
     plan: &DotnetPlan,
     lock_sha256: &str,
+    resolution_basis: &crate::comforter::join::Digests,
     selected: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
@@ -1282,15 +1157,10 @@ pub fn project_dotnet_env(
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, activity, &sdk_obj)?;
     refs.object_path(&store, activity, &packages_obj)?;
-    crate::comforter::write_closure(
-        project,
-        "dotnet",
-        closure_body(&sdk_obj, &packages_obj, plan, lock_sha256, selected)?,
-        &store,
-        activity,
-        refs,
-        attribution,
-    )
+    let mut body = closure_body(&sdk_obj, &packages_obj, plan, lock_sha256, selected)?;
+    body[crate::comforter::join::BASIS_FIELD] =
+        crate::comforter::join::basis_value(resolution_basis);
+    crate::comforter::write_closure(project, "dotnet", body, &store, activity, refs, attribution)
 }
 
 /// The .NET closure body: the projection's objects and plan, plus the
@@ -2031,6 +1901,7 @@ mod tests {
             &store.object_path(&packages_id),
             &plan,
             &"c".repeat(64),
+            &Default::default(),
             &shipped_selection().unwrap(),
             &mut attribution,
         )

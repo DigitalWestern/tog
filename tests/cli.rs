@@ -5043,27 +5043,25 @@ fn project_files_hard_linked_to_the_signing_key_never_echo_it() {
 }
 
 /// `tog attest` refuses offline, before any tool or store, what it cannot
-/// sign: an ecosystem with no lock a resolution door produces, or a project
-/// with none at all.
+/// sign: a project with no ecosystem, or an ecosystem the project does not
+/// have. Every ecosystem has a resolution door since .NET's (#207), so a
+/// detected one is always checked.
 #[test]
-fn attest_refuses_an_ecosystem_without_a_resolution_door() {
+fn attest_refuses_a_project_with_nothing_to_attest() {
     let home = TempDir::boundary("cli-attest-unsupported");
     let project = TempDir::boundary("cli-attest-unsupported-project");
-    std::fs::write(project.0.join("app.csproj"), "<Project/>").unwrap();
-    let out = tog(&project.0, &home.0, &["attest", "dotnet"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
-    let stderr = text(&out.stderr);
-    assert!(
-        stderr.contains("tog attest does not support dotnet"),
-        "{stderr}"
-    );
     let out = tog(&project.0, &home.0, &["attest"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert!(
-        text(&out.stderr).contains("nothing to attest"),
+        text(&out.stderr).contains("no manifest found"),
         "{}",
         text(&out.stderr)
     );
+    std::fs::write(
+        project.0.join("go.mod"),
+        "module example.com/m\n\ngo 1.22\n",
+    )
+    .unwrap();
     let out = tog(&project.0, &home.0, &["attest", "node"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert!(

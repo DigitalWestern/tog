@@ -481,7 +481,10 @@ contentHash. The SDK is the extractor and part of the object identity. Builds
 are the strictest boundary: `tog run` refuses build-capable verbs
 (MSBuild executes arbitrary code and belongs only in the sandbox), and every
 `tog build` runs a fresh offline locked restore into scratch. `global.json`
-must be an exact pin with `rollForward = "disable"`.
+must be an exact pin with `rollForward = "disable"`. A missing lock and
+`tog attest` run restore confined through the resolution door
+(`dotnet/door.rs`), with a `nuget.config` whose one source is the
+session's NuGet mirror (`dotnet/registry.rs`).
 
 ## Toolchain lock
 

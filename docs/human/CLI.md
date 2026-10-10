@@ -1084,7 +1084,7 @@ before any record is written. With `TOG_SIGNING_KEY` unset it warns and
 writes the record unsigned, which no sync will attest. It reads
 `tog-toolchain.toml` the way `--frozen` does and never writes it, and it
 refuses `--frozen` (exit 2). An ecosystem with no resolution door is
-refused by name. Today six have one (.NET has none yet). Go's check is `go mod download -json
+refused by name. Every ecosystem has one. Go's check is `go mod download -json
 all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
 workspace root, run in the sandbox through tog's resolution proxy (TLS
 interception to crates.io), so its fetches are in the record's ledger. Run
@@ -1153,7 +1153,23 @@ rubygems.org only through the session's RubyGems mirror
 (`BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/`), so the lock keeps naming
 rubygems.org. Elixir's is `mix deps.get --check-locked`, with Hex pointed
 at the session's mirror of repo.hex.pm (`HEX_MIRROR`). Both run confined,
-like the others, and their fetches are in the record's ledger.
+like the others, and their fetches are in the record's ledger. .NET's is
+`dotnet restore --locked-mode` with a tog-written `nuget.config` whose one
+source is the session's NuGet mirror. Missing-lock restore and attestation
+require the resolution sandbox. MSBuild can read arbitrary project data, so
+.NET records every regular file visible in the resolver view, except `obj/`,
+`bin/`, `.git/` and `.tog/`. Changes or added files invalidate that evidence.
+Symlinks in this input set are refused. As with Ruby and Elixir, the staged
+resolver view uses file mode 0644 and directory mode 0755, and omits empty
+directories. The checkout's permissions and empty directories are preserved.
+Restore always names `packages.lock.json` explicitly. Project files containing
+`NuGetLockFilePath` or `TreatAsLocalProperty` are conservatively refused,
+including imported files and UTF-16/32 XML. Use Tog's default lock path.
+Existing .NET locks need a trusted resolution receipt under strict/company
+policy. Run `tog attest dotnet` with a signing key trusted by that policy,
+then commit `.tog/resolution/dotnet.json`. The mirror supports public
+api.nuget.org only. It records transport and package content hashes, without
+claiming publisher-signature verification.
 
 Hashes alone prove package bytes, not how the dependency set was resolved.
 To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`
