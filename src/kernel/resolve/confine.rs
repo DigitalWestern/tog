@@ -1013,6 +1013,17 @@ pub fn confined_run(
                 (env_reader.as_raw_fd(), relay::ENV_FD),
             ],
         );
+        #[cfg(test)]
+        super::container::BEFORE_RUN_FOR_TEST.with(|slot| {
+            if let Some(marker) = slot.borrow_mut().take() {
+                fs::write(marker.join("before-create"), "paused").unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+                while !marker.join("resume-before-create").exists() {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        });
         let result = start_confined(&mut command, activity, run.stdout);
         // The container is gone before anything it wrote is read, whatever
         // became of the podman client.

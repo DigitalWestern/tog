@@ -505,6 +505,8 @@ impl Removal {
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static BEFORE_RUN_FOR_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static REMOVE_PID_FOR_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     pub(super) static REMOVE_PROGRAM: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     pub(super) static NAME_FOR_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     pub(super) static FAIL_FINISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -569,6 +571,12 @@ fn remove(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let mut child = command.spawn()?;
+        #[cfg(test)]
+        REMOVE_PID_FOR_TEST.with(|slot| {
+            if let Some(path) = slot.borrow().as_ref() {
+                fs::write(path, child.id().to_string()).unwrap();
+            }
+        });
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Some(status) = child.try_wait()? {

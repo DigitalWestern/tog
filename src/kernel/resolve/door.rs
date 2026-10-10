@@ -1837,6 +1837,12 @@ exit 37
         let before = tree(&fx.project);
         super::super::container::NAME_FOR_TEST
             .with(|slot| *slot.borrow_mut() = Some(marker.join("container")));
+        super::super::container::REMOVE_PID_FOR_TEST
+            .with(|slot| *slot.borrow_mut() = Some(marker.join("remover-pid")));
+        if marker.join("pause-before-create").exists() {
+            super::super::container::BEFORE_RUN_FOR_TEST
+                .with(|slot| *slot.borrow_mut() = Some(marker.clone()));
+        }
         let script = format!(
             "trap '' INT TERM\necho ready > '{}/ready'\nwhile :; do sleep 1; done\n",
             cache.display()
@@ -1865,6 +1871,7 @@ exit 37
         child: std::process::Child,
         marker: PathBuf,
         config: super::super::container::EngineConfig,
+        podman: PathBuf,
     }
 
     impl std::ops::Deref for SignalHarness {
@@ -1880,17 +1887,46 @@ exit 37
     }
     impl Drop for SignalHarness {
         fn drop(&mut self) {
-            // The exact name was observed before the tool starts. Remove
-            // with the same controlled context before killing the harness.
-            if let Ok(name) = fs::read_to_string(self.marker.join("container")) {
-                let removal = super::super::container::Removal::new(
-                    Path::new("/usr/bin/podman"),
-                    name,
-                    self.config.clone(),
-                );
-                let _ = removal.finish();
+            // Release cooperative test hooks, stop every creator in the
+            // harness/client group, then remove the final exact identity.
+            #[cfg(target_os = "linux")]
+            let remover = fs::read_to_string(self.marker.join("remover-pid"))
+                .ok()
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .and_then(|pid| {
+                    use std::os::fd::{FromRawFd as _, OwnedFd};
+                    // SAFETY: integer arguments. ESRCH means already stopped.
+                    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+                    if fd < 0 {
+                        return None;
+                    }
+                    let held = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+                    let name = fs::read_to_string(self.marker.join("container")).ok()?;
+                    let args = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+                    args.split(|byte| *byte == 0)
+                        .any(|arg| arg == name.as_bytes())
+                        .then_some(held)
+                });
+            let _ = fs::write(self.marker.join("resume-removal"), "resume");
+            if self.child.try_wait().is_ok_and(|status| status.is_none()) {
+                // SAFETY: the unreaped child owns this private process group.
+                let _ = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
             }
-            let _ = self.child.kill();
+            #[cfg(target_os = "linux")]
+            if let Some(remover) = remover {
+                use std::os::fd::AsRawFd as _;
+                // SAFETY: the pinned test cleanup child was recorded by the
+                // harness. Its only child is a short-lived sleep.
+                let _ = unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        remover.as_raw_fd(),
+                        libc::SIGKILL,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0,
+                    )
+                };
+            }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while std::time::Instant::now() < deadline {
                 if self.child.try_wait().is_ok_and(|status| status.is_some()) {
@@ -1898,12 +1934,20 @@ exit 37
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            if let Ok(name) = fs::read_to_string(self.marker.join("container")) {
+                let removal =
+                    super::super::container::Removal::new(&self.podman, name, self.config.clone());
+                let _ = removal.finish();
+            }
         }
     }
 
-    fn signal_harness(marker: &TempDir, signal: i32) -> SignalHarness {
+    fn signal_harness(marker: &TempDir, signal: i32, activity: &StoreActivity) -> SignalHarness {
         use std::os::unix::process::CommandExt as _;
         let config = super::super::container::EngineConfig::new(&marker.0).unwrap();
+        let podman = super::super::container::preflight(activity)
+            .unwrap()
+            .to_path_buf();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -1920,6 +1964,7 @@ exit 37
             child,
             marker: marker.0.clone(),
             config,
+            podman,
         }
     }
 
@@ -1932,7 +1977,7 @@ exit 37
         }
         for signal in [libc::SIGINT, libc::SIGTERM] {
             let marker = TempDir::named("podman-signal-marker");
-            let mut child = signal_harness(&marker, signal);
+            let mut child = signal_harness(&marker, signal, &fx.harness.activity);
             let deadline = Instant::now() + Duration::from_secs(25);
             loop {
                 if let Ok(cache) = fs::read_to_string(marker.0.join("cache")) {
@@ -1963,9 +2008,11 @@ exit 37
                 std::thread::sleep(Duration::from_millis(10));
             }
             assert!(marker.0.join("stopped").is_file());
-            let output = std::process::Command::new("/usr/bin/podman")
+            let output = child
+                .config
+                .command(&child.podman)
+                .unwrap()
                 .args([
-                    "--remote=false",
                     "ps",
                     "--filter",
                     &format!("name=tog-resolve-{pid}-"),
@@ -1982,6 +2029,83 @@ exit 37
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn podman_parent_guard_stops_startup_and_delayed_removal_on_failure() {
+        use std::time::{Duration, Instant};
+        let fx = fixture("podman-guard-failure-parent");
+        if podman_relay("podman-guard-failure-parent", &fx.harness.activity).is_none() {
+            return;
+        }
+        for delayed in [false, true] {
+            let marker = TempDir::named("podman-parent-guard-failure");
+            fs::write(
+                marker.0.join(if delayed {
+                    "delay-removal"
+                } else {
+                    "pause-before-create"
+                }),
+                "pause",
+            )
+            .unwrap();
+            let child = signal_harness(&marker, libc::SIGTERM, &fx.harness.activity);
+            let wait = |path: &Path| {
+                let deadline = Instant::now() + Duration::from_secs(25);
+                while !path.exists() {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+            if delayed {
+                wait(&marker.0.join("cache"));
+                let cache = fs::read_to_string(marker.0.join("cache")).unwrap();
+                wait(&Path::new(&cache).join("ready"));
+                // SAFETY: the harness is still unreaped and owned here.
+                assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+                wait(&marker.0.join("removing"));
+            } else {
+                wait(&marker.0.join("before-create"));
+            }
+            let name = fs::read_to_string(marker.0.join("container")).unwrap();
+            let config = child.config.clone();
+            let engine = child.podman.clone();
+            let remover: Option<i32> = fs::read_to_string(marker.0.join("remover-pid"))
+                .ok()
+                .and_then(|p| p.parse().ok());
+            drop(child); // Simulate any parent panic/timeout without resuming hooks.
+            let output = config
+                .command(&engine)
+                .unwrap()
+                .args(["container", "exists", &name])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "owned container survived guard: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if let Some(pid) = remover {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+                    if state.as_ref().is_none_or(|s| {
+                        s.rfind(')')
+                            .and_then(|p| s[p + 1..].split_whitespace().next())
+                            .is_some_and(|state| state == "Z" || state == "X")
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "test removal shell survived its owner"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
     #[test]
     fn podman_cleanup_scope_carries_cancellation_into_a_later_client_session() {
         use std::time::{Duration, Instant};
@@ -1991,7 +2115,7 @@ exit 37
         }
         let marker = TempDir::named("podman-before-client");
         fs::write(marker.0.join("cancel-before-client"), "cancel").unwrap();
-        let mut child = signal_harness(&marker, libc::SIGTERM);
+        let mut child = signal_harness(&marker, libc::SIGTERM, &fx.harness.activity);
         let deadline = Instant::now() + Duration::from_secs(25);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -2007,6 +2131,7 @@ exit 37
         assert!(marker.0.join("stopped").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn podman_failed_removal_returns_with_a_live_descriptor_holder_and_refuses_outputs() {
         use std::time::{Duration, Instant};
@@ -2016,7 +2141,7 @@ exit 37
         }
         let marker = TempDir::named("podman-live-removal-failure");
         fs::write(marker.0.join("fail-removal"), "fail").unwrap();
-        let mut child = signal_harness(&marker, libc::SIGTERM);
+        let mut child = signal_harness(&marker, libc::SIGTERM, &fx.harness.activity);
         let deadline = Instant::now() + Duration::from_secs(25);
         loop {
             if let Ok(cache) = fs::read_to_string(marker.0.join("cache")) {
@@ -2027,8 +2152,57 @@ exit 37
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
-        // SAFETY: this test owns the unreaped supervisor child.
-        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+        // Kill only the owned engine client, not the supervisor. A normal
+        // TERM makes some Podman releases stop their container themselves.
+        // SIGKILL of the client leaves the live relay holding descriptors.
+        // Pin the client identity with pidfd before validating its argv so
+        // no PID reuse can send the fault to an unrelated process.
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        let name = fs::read_to_string(marker.0.join("container")).unwrap();
+        let mut killed = false;
+        for task in fs::read_dir(format!("/proc/{}/task", child.id())).unwrap() {
+            let task = task.unwrap();
+            let children = fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            for pid in children
+                .split_whitespace()
+                .filter_map(|pid| pid.parse::<i32>().ok())
+            {
+                // SAFETY: pidfd_open uses integer arguments and returns a new FD.
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+                if fd < 0 {
+                    continue;
+                }
+                // SAFETY: ownership of the newly returned FD moves here.
+                let held = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+                let args = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                if args
+                    .split(|byte| *byte == 0)
+                    .any(|arg| arg == name.as_bytes())
+                    && args.split(|byte| *byte == 0).any(|arg| arg == b"run")
+                {
+                    // SAFETY: the pinned process is the owned client. A null
+                    // siginfo asks the kernel to construct normal signal info.
+                    assert_eq!(
+                        unsafe {
+                            libc::syscall(
+                                libc::SYS_pidfd_send_signal,
+                                held.as_raw_fd(),
+                                libc::SIGKILL,
+                                std::ptr::null::<libc::siginfo_t>(),
+                                0,
+                            )
+                        },
+                        0
+                    );
+                    killed = true;
+                    break;
+                }
+            }
+            if killed {
+                break;
+            }
+        }
+        assert!(killed, "no owned Podman client found for fault injection");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -2043,7 +2217,7 @@ exit 37
         }
         assert!(marker.0.join("stopped").exists());
         let name = fs::read_to_string(marker.0.join("container")).unwrap();
-        let mut command = child.config.command(Path::new("/usr/bin/podman")).unwrap();
+        let mut command = child.config.command(&child.podman).unwrap();
         let output = command
             .args(["inspect", "--format", "{{.State.Running}}", &name])
             .output()
@@ -2064,7 +2238,7 @@ exit 37
         }
         let marker = TempDir::named("podman-delayed-removal");
         fs::write(marker.0.join("delay-removal"), "delay").unwrap();
-        let mut child = signal_harness(&marker, libc::SIGTERM);
+        let mut child = signal_harness(&marker, libc::SIGTERM, &fx.harness.activity);
         let wait_file = |name: &str| {
             let deadline = Instant::now() + Duration::from_secs(25);
             while !marker.0.join(name).exists() {
@@ -2119,7 +2293,7 @@ exit 37
         ];
         let mut children: Vec<_> = markers
             .iter()
-            .map(|marker| signal_harness(marker, libc::SIGTERM))
+            .map(|marker| signal_harness(marker, libc::SIGTERM, &fx.harness.activity))
             .collect();
         let deadline = Instant::now() + Duration::from_secs(25);
         for index in 0..2 {
