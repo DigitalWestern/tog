@@ -972,78 +972,85 @@ pub fn confined_run(
     let (offers, missing) = probe_tiers(activity)?;
     let tier = choose_tier(&offers, &missing, run.unconfined_denied, run.tool, run.why)?;
     let mounts = Mounts::check(store, activity, run)?;
-    let (mut command, removal) = match tier.engine {
-        Engine::Bubblewrap => {
-            let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
-            let args = proxy_args(run, &mounts, bwrap_disables_userns(bwrap, activity))?;
-            let mut command = sandbox::bwrap_command(bwrap)?;
-            command.args(&args);
-            (command, None)
+    let execute = || -> io::Result<ConfinedOutcome> {
+        let (mut command, removal) = match tier.engine {
+            Engine::Bubblewrap => {
+                let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
+                let args = proxy_args(run, &mounts, bwrap_disables_userns(bwrap, activity))?;
+                let mut command = sandbox::bwrap_command(bwrap)?;
+                command.args(&args);
+                (command, None)
+            }
+            Engine::Podman => {
+                let podman = super::container::preflight(activity)?;
+                let name = super::container::name();
+                let args = super::container::podman_args(run, &mounts, &name)?;
+                let config = super::container::EngineConfig::new(run.snapshot.stage())?;
+                let mut command = config.command(podman)?;
+                command.args(&args);
+                let removal = super::container::Removal::new(podman, name, config);
+                (command, Some(removal))
+            }
+        };
+        let env = relay::encode_env(&door_env(run, &mounts.scratch)?);
+        let (reader, writer) = pipe()?;
+        let (env_reader, env_writer) = pipe()?;
+        let (log_send, log) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = log_send.send(read_log(reader));
+        });
+        // A thread, because an environment larger than the pipe's buffer
+        // would otherwise block before bubblewrap starts reading it.
+        let (sent_send, sent) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent_send.send(fs::File::from(env_writer).write_all(&env));
+        });
+        // The relay's exec log at 3, the tool's environment at 4.
+        sandbox::pass_fds(
+            &mut command,
+            vec![
+                (writer.as_raw_fd(), relay::EXEC_LOG_FD),
+                (env_reader.as_raw_fd(), relay::ENV_FD),
+            ],
+        );
+        let result = start_confined(&mut command, activity, run.stdout);
+        // The container is gone before anything it wrote is read, whatever
+        // became of the podman client.
+        let cleanup = removal.map(|removal| removal.finish()).transpose();
+        drop(command);
+        drop(writer);
+        drop(env_reader);
+        // A failed cleanup must return before joining descriptors the surviving
+        // container might still hold. No output is consumed on this path.
+        cleanup?;
+        // The relay reads the whole environment before it starts the tool, so
+        // a write that failed means the tool never ran: the relay reported it.
+        let drain_timeout = std::time::Duration::from_secs(10);
+        let _ = sent.recv_timeout(drain_timeout).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the stopped resolution container retained its environment descriptor",
+            )
+        })?;
+        let log = log.recv_timeout(drain_timeout).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the stopped resolution container retained its exec log descriptor",
+            )
+        })?;
+        let (status, stderr, stdout) = result?;
+        let records = relay::parse_log(&log?)?;
+        let mut outcome = outcome(tier, status, &stderr, stdout, records)?;
+        if run.stdout == Stdout::Capture {
+            outcome.stderr = stderr;
         }
-        Engine::Podman => {
-            let podman = super::container::preflight(activity)?;
-            let name = super::container::name();
-            let args = super::container::podman_args(run, &mounts, &name)?;
-            let config = super::container::EngineConfig::new(run.snapshot.stage())?;
-            let mut command = config.command(podman)?;
-            command.args(&args);
-            let removal = super::container::Removal::new(podman, name, config);
-            (command, Some(removal))
-        }
+        Ok(outcome)
     };
-    let env = relay::encode_env(&door_env(run, &mounts.scratch)?);
-    let (reader, writer) = pipe()?;
-    let (env_reader, env_writer) = pipe()?;
-    let (log_send, log) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = log_send.send(read_log(reader));
-    });
-    // A thread, because an environment larger than the pipe's buffer
-    // would otherwise block before bubblewrap starts reading it.
-    let (sent_send, sent) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sent_send.send(fs::File::from(env_writer).write_all(&env));
-    });
-    // The relay's exec log at 3, the tool's environment at 4.
-    sandbox::pass_fds(
-        &mut command,
-        vec![
-            (writer.as_raw_fd(), relay::EXEC_LOG_FD),
-            (env_reader.as_raw_fd(), relay::ENV_FD),
-        ],
-    );
-    let result = start_confined(&mut command, activity, run.stdout);
-    // The container is gone before anything it wrote is read, whatever
-    // became of the podman client.
-    let cleanup = removal.map(|removal| removal.finish()).transpose();
-    drop(command);
-    drop(writer);
-    drop(env_reader);
-    // A failed cleanup must return before joining descriptors the surviving
-    // container might still hold. No output is consumed on this path.
-    cleanup?;
-    // The relay reads the whole environment before it starts the tool, so
-    // a write that failed means the tool never ran: the relay reported it.
-    let drain_timeout = std::time::Duration::from_secs(10);
-    let _ = sent.recv_timeout(drain_timeout).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "the stopped resolution container retained its environment descriptor",
-        )
-    })?;
-    let log = log.recv_timeout(drain_timeout).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "the stopped resolution container retained its exec log descriptor",
-        )
-    })?;
-    let (status, stderr, stdout) = result?;
-    let records = relay::parse_log(&log?)?;
-    let mut outcome = outcome(tier, status, &stderr, stdout, records)?;
-    if run.stdout == Stdout::Capture {
-        outcome.stderr = stderr;
+    if tier.engine == Engine::Podman {
+        crate::kernel::supervise::during_cleanup(execute)
+    } else {
+        execute()
     }
-    Ok(outcome)
 }
 
 /// Whether the installed bubblewrap has `--disable-userns` (0.8 and

@@ -1794,10 +1794,49 @@ exit 37
             .unwrap();
         let fx = fixture("podman-signal");
         let relay = podman_relay("podman-signal", &fx.harness.activity).unwrap();
+        if marker.join("cancel-before-client").exists() {
+            let result = crate::kernel::supervise::during_cleanup(|| {
+                // SAFETY: a valid signal in this isolated subprocess.
+                assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+                let mut command = std::process::Command::new("/usr/bin/true");
+                let error =
+                    crate::kernel::supervise::local_output(&mut command, &fx.harness.activity)
+                        .unwrap_err();
+                assert_eq!(
+                    crate::kernel::supervise::stop_signal(&error),
+                    Some(libc::SIGTERM)
+                );
+                Ok(())
+            });
+            assert_eq!(
+                crate::kernel::supervise::stop_signal(&result.unwrap_err()),
+                Some(libc::SIGTERM)
+            );
+            fs::write(marker.join("stopped"), "stopped").unwrap();
+            return;
+        }
+
+        if marker.join("fail-removal").exists() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let wrapper = marker.join("remove-fails.sh");
+            fs::write(&wrapper, "#!/bin/sh\nexit 42\n").unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+            super::super::container::REMOVE_PROGRAM.with(|slot| *slot.borrow_mut() = Some(wrapper));
+        }
+        if marker.join("delay-removal").exists() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let wrapper = marker.join("remove.sh");
+            fs::write(&wrapper, format!(
+                "#!/bin/sh\necho started > '{}/removing'\nwhile test ! -e '{}/resume-removal'; do /usr/bin/sleep 0.01; done\nexec /usr/bin/podman \"$@\"\n", marker.display(), marker.display())).unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+            super::super::container::REMOVE_PROGRAM.with(|slot| *slot.borrow_mut() = Some(wrapper));
+        }
         let cache = fx.harness.store.root.join("cache/signal");
         fs::create_dir(&cache).unwrap();
         fs::write(marker.join("cache"), cache.as_os_str().as_encoded_bytes()).unwrap();
         let before = tree(&fx.project);
+        super::super::container::NAME_FOR_TEST
+            .with(|slot| *slot.borrow_mut() = Some(marker.join("container")));
         let script = format!(
             "trap '' INT TERM\necho ready > '{}/ready'\nwhile :; do sleep 1; done\n",
             cache.display()
@@ -1806,18 +1845,86 @@ exit 37
             confined.cache_roots = vec![cache]
         });
         let error = outcome.result.unwrap_err();
-        assert_eq!(
-            crate::kernel::supervise::stop_signal(&error),
-            Some(signal),
-            "{error}"
-        );
+        if marker.join("fail-removal").exists() {
+            let name = fs::read_to_string(marker.join("container")).unwrap();
+            assert!(error.to_string().contains(&name), "{error}");
+            assert!(error.to_string().contains("unconfirmed"), "{error}");
+        } else {
+            assert_eq!(
+                crate::kernel::supervise::stop_signal(&error),
+                Some(signal),
+                "{error}"
+            );
+        }
         assert_eq!(tree(&fx.project), before);
         fs::write(marker.join("stopped"), "stopped").unwrap();
     }
 
+    /// Parent-owned cleanup survives every test assertion and partial spawn.
+    struct SignalHarness {
+        child: std::process::Child,
+        marker: PathBuf,
+        config: super::super::container::EngineConfig,
+    }
+
+    impl std::ops::Deref for SignalHarness {
+        type Target = std::process::Child;
+        fn deref(&self) -> &Self::Target {
+            &self.child
+        }
+    }
+    impl std::ops::DerefMut for SignalHarness {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.child
+        }
+    }
+    impl Drop for SignalHarness {
+        fn drop(&mut self) {
+            // The exact name was observed before the tool starts. Remove
+            // with the same controlled context before killing the harness.
+            if let Ok(name) = fs::read_to_string(self.marker.join("container")) {
+                let removal = super::super::container::Removal::new(
+                    Path::new("/usr/bin/podman"),
+                    name,
+                    self.config.clone(),
+                );
+                let _ = removal.finish();
+            }
+            let _ = self.child.kill();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if self.child.try_wait().is_ok_and(|status| status.is_some()) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    fn signal_harness(marker: &TempDir, signal: i32) -> SignalHarness {
+        use std::os::unix::process::CommandExt as _;
+        let config = super::super::container::EngineConfig::new(&marker.0).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "kernel::resolve::door::tests::podman_signal_harness",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("TOG_PODMAN_SIGNAL_MARKER", &marker.0)
+            .env("TOG_PODMAN_SIGNAL_NUMBER", signal.to_string())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        SignalHarness {
+            child,
+            marker: marker.0.clone(),
+            config,
+        }
+    }
+
     #[test]
     fn podman_door_cancellation_stops_the_container_for_int_and_term() {
-        use std::os::unix::process::CommandExt;
         use std::time::{Duration, Instant};
         let fx = fixture("podman-signal-parent");
         if podman_relay("podman-signal-parent", &fx.harness.activity).is_none() {
@@ -1825,18 +1932,7 @@ exit 37
         }
         for signal in [libc::SIGINT, libc::SIGTERM] {
             let marker = TempDir::named("podman-signal-marker");
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "kernel::resolve::door::tests::podman_signal_harness",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env("TOG_PODMAN_SIGNAL_MARKER", &marker.0)
-                .env("TOG_PODMAN_SIGNAL_NUMBER", signal.to_string())
-                .process_group(0)
-                .spawn()
-                .unwrap();
+            let mut child = signal_harness(&marker, signal);
             let deadline = Instant::now() + Duration::from_secs(25);
             loop {
                 if let Ok(cache) = fs::read_to_string(marker.0.join("cache")) {
@@ -1845,8 +1941,6 @@ exit 37
                     }
                 }
                 if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
-                    let _ = child.kill();
-                    let _ = child.wait();
                     panic!("Podman signal harness did not start its tool");
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -1864,8 +1958,6 @@ exit 37
                     break;
                 }
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
                     panic!("Podman cancellation hung for signal {signal}");
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -1891,8 +1983,131 @@ exit 37
     }
 
     #[test]
+    fn podman_cleanup_scope_carries_cancellation_into_a_later_client_session() {
+        use std::time::{Duration, Instant};
+        let fx = fixture("podman-before-client-parent");
+        if podman_relay("podman-before-client-parent", &fx.harness.activity).is_none() {
+            return;
+        }
+        let marker = TempDir::named("podman-before-client");
+        fs::write(marker.0.join("cancel-before-client"), "cancel").unwrap();
+        let mut child = signal_harness(&marker, libc::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "scope lost pre-spawn cancellation"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.0.join("stopped").exists());
+    }
+
+    #[test]
+    fn podman_failed_removal_returns_with_a_live_descriptor_holder_and_refuses_outputs() {
+        use std::time::{Duration, Instant};
+        let fx = fixture("podman-live-removal-failure-parent");
+        if podman_relay("podman-live-removal-failure-parent", &fx.harness.activity).is_none() {
+            return;
+        }
+        let marker = TempDir::named("podman-live-removal-failure");
+        fs::write(marker.0.join("fail-removal"), "fail").unwrap();
+        let mut child = signal_harness(&marker, libc::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            if let Ok(cache) = fs::read_to_string(marker.0.join("cache")) {
+                if Path::new(&cache).join("ready").exists() {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // SAFETY: this test owns the unreaped supervisor child.
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "joined a descriptor retained by a live container"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.0.join("stopped").exists());
+        let name = fs::read_to_string(marker.0.join("container")).unwrap();
+        let mut command = child.config.command(Path::new("/usr/bin/podman")).unwrap();
+        let output = command
+            .args(["inspect", "--format", "{{.State.Running}}", &name])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        // The ownership guard performs real checked removal before the
+        // marker/config directory is released, including on assertion failure.
+        drop(child);
+    }
+
+    #[test]
+    fn podman_cancellation_remains_caught_during_delayed_removal() {
+        use std::time::{Duration, Instant};
+        let fx = fixture("podman-delayed-removal-parent");
+        if podman_relay("podman-delayed-removal-parent", &fx.harness.activity).is_none() {
+            return;
+        }
+        let marker = TempDir::named("podman-delayed-removal");
+        fs::write(marker.0.join("delay-removal"), "delay").unwrap();
+        let mut child = signal_harness(&marker, libc::SIGTERM);
+        let wait_file = |name: &str| {
+            let deadline = Instant::now() + Duration::from_secs(25);
+            while !marker.0.join(name).exists() {
+                assert!(Instant::now() < deadline, "did not observe {name}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait_file("cache");
+        let cache = fs::read_to_string(marker.0.join("cache")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while !Path::new(&cache).join("ready").exists() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = child.id() as i32;
+        // SAFETY: the unreaped child and its private group belong to this test.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        wait_file("removing");
+        for target in [pid, -pid] {
+            // A repeated direct TERM and foreground INT while the removal
+            // child is live must leave mandatory cleanup running.
+            let signal = if target > 0 {
+                libc::SIGTERM
+            } else {
+                libc::SIGINT
+            };
+            assert_eq!(unsafe { libc::kill(target, signal) }, 0);
+        }
+        fs::write(marker.0.join("resume-removal"), "resume").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "delayed removal did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.0.join("stopped").exists());
+    }
+
+    #[test]
     fn podman_concurrent_sessions_do_not_remove_each_others_containers() {
-        use std::os::unix::process::CommandExt;
         use std::time::{Duration, Instant};
         let fx = fixture("podman-concurrent-parent");
         if podman_relay("podman-concurrent-parent", &fx.harness.activity).is_none() {
@@ -1904,20 +2119,7 @@ exit 37
         ];
         let mut children: Vec<_> = markers
             .iter()
-            .map(|marker| {
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "kernel::resolve::door::tests::podman_signal_harness",
-                        "--ignored",
-                        "--nocapture",
-                    ])
-                    .env("TOG_PODMAN_SIGNAL_MARKER", &marker.0)
-                    .env("TOG_PODMAN_SIGNAL_NUMBER", libc::SIGTERM.to_string())
-                    .process_group(0)
-                    .spawn()
-                    .unwrap()
-            })
+            .map(|marker| signal_harness(marker, libc::SIGTERM))
             .collect();
         let deadline = Instant::now() + Duration::from_secs(25);
         for index in 0..2 {
@@ -1928,10 +2130,6 @@ exit 37
                     }
                 }
                 if Instant::now() >= deadline || children[index].try_wait().unwrap().is_some() {
-                    for child in &mut children {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
                     panic!("concurrent Podman tool did not start");
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -1950,10 +2148,6 @@ exit 37
                     break;
                 }
                 if Instant::now() >= deadline {
-                    for child in &mut children {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
                     panic!("concurrent Podman cancellation hung");
                 }
                 std::thread::sleep(Duration::from_millis(10));

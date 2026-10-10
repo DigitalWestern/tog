@@ -197,7 +197,16 @@ fn probe_container(
         args.extend(mount(source, destination, true)?);
     }
     let socket = scratch.join("probe.sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&socket)?;
+    // Bind through a held parent so a long TMPDIR does not exceed the
+    // Unix socket address limit. The mount still uses its real pathname.
+    #[cfg(target_os = "linux")]
+    let parent = fs::File::open(scratch)?;
+    #[cfg(target_os = "linux")]
+    let bind_path =
+        PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd())).join("probe.sock");
+    #[cfg(not(target_os = "linux"))]
+    let bind_path = socket.clone();
+    let _listener = std::os::unix::net::UnixListener::bind(bind_path)?;
     let executable = std::env::current_exe()?;
     // A unit-test binary is not the CLI. Production always uses itself.
     #[cfg(test)]
@@ -246,9 +255,11 @@ fn probe_container(
         ],
     );
     let removal = Removal::new(podman, name, config);
-    let output = crate::kernel::supervise::local_output(&mut command, activity);
-    removal.finish()?;
-    let output = output?;
+    let output = crate::kernel::supervise::during_cleanup(|| {
+        let output = crate::kernel::supervise::local_output(&mut command, activity);
+        removal.finish()?;
+        output
+    })?;
     if output.status.success() {
         let records = relay::parse_log(&fs::read(log_path)?)?;
         if records
@@ -309,7 +320,14 @@ pub fn name() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    format!("tog-resolve-{}-{}-{nanos}", std::process::id(), sequence())
+    let name = format!("tog-resolve-{}-{}-{nanos}", std::process::id(), sequence());
+    #[cfg(test)]
+    NAME_FOR_TEST.with(|slot| {
+        if let Some(path) = slot.borrow().as_ref() {
+            fs::write(path, &name).unwrap();
+        }
+    });
+    name
 }
 
 /// `podman run` and the fence, up to the mounts.
@@ -487,6 +505,8 @@ impl Removal {
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static REMOVE_PROGRAM: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static NAME_FOR_TEST: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     pub(super) static FAIL_FINISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -535,38 +555,48 @@ fn remove(
     config: &EngineConfig,
     timeout: std::time::Duration,
 ) -> io::Result<()> {
-    let mut command = config.command(podman)?;
-    command
-        .args(["rm", "--force", "--time", "0", "--ignore", name])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let mut child = command.spawn()?;
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            if status.success() {
-                return Ok(());
-            }
-            return Err(io::Error::other(format!(
-                "cannot confirm removal of resolution container {name} ({status}); its outputs are refused; inspect it with podman")));
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            // Reap when the kernel delivers the kill, without blocking
-            // forever on an engine stuck in uninterruptible kernel I/O.
-            let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-            while std::time::Instant::now() < reap_deadline {
-                if child.try_wait()?.is_some() {
-                    break;
+    #[cfg(test)]
+    let replacement = REMOVE_PROGRAM.with(|slot| slot.borrow_mut().take());
+    #[cfg(test)]
+    let podman = replacement.as_deref().unwrap_or(podman);
+    let perform = || -> io::Result<()> {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = config.command(podman)?;
+        command.process_group(0);
+        command
+            .args(["rm", "--force", "--time", "0", "--ignore", name])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn()?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                if status.success() {
+                    return Ok(());
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                return Err(io::Error::other(format!(
+                "cannot confirm removal of resolution container {name} ({status}); its outputs are refused; inspect it with podman")));
             }
-            return Err(io::Error::new(io::ErrorKind::TimedOut, format!(
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                // Reap when the kernel delivers the kill, without blocking
+                // forever on an engine stuck in uninterruptible kernel I/O.
+                let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while std::time::Instant::now() < reap_deadline {
+                    if child.try_wait()?.is_some() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!(
                 "removing resolution container {name} timed out; its outputs are refused; inspect it with podman")));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    };
+    perform().map_err(|error| io::Error::new(error.kind(), format!(
+        "removal of resolution container {name} is unconfirmed; its outputs are refused; inspect it with podman: {error}")))
 }
 
 #[cfg(test)]
@@ -599,13 +629,15 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
-        assert!(remove(
+        let error = remove(
             &stage.0.join("absent"),
             "own-container",
             &config,
-            std::time::Duration::from_secs(1)
+            std::time::Duration::from_secs(1),
         )
-        .is_err());
+        .unwrap_err();
+        assert!(error.to_string().contains("own-container"));
+        assert!(error.to_string().contains("unconfirmed"));
     }
 
     #[test]

@@ -617,6 +617,12 @@ fn drain_notifications() {
     while unsafe { libc::read(fd, bytes.as_mut_ptr() as *mut libc::c_void, bytes.len()) } > 0 {}
 }
 
+thread_local! {
+    // Nested client sessions inherit cancellation since the enclosing
+    // cleanup scope began, including its registration-to-spawn interval.
+    static CLEANUP_START: Cell<Option<[u32; 4]>> = const { Cell::new(None) };
+}
+
 /// One supervised child's signal session: a registration among any number
 /// of live ones, with its own cursors into the global counters. Owned by
 /// the thread that supervises the child.
@@ -676,6 +682,14 @@ impl Session {
             old_mask: unsafe { std::mem::zeroed() },
             active: true,
         };
+        CLEANUP_START.with(|start| {
+            if let Some([term, int, hup, quit]) = start.get() {
+                session.term_cursor.set(term);
+                session.int_cursor.set(int);
+                session.hup_cursor.set(hup);
+                session.quit_cursor.set(quit);
+            }
+        });
         drop(registry);
         // SAFETY: a null set queries this thread's mask into the slot.
         let queried = unsafe {
@@ -877,6 +891,10 @@ impl Session {
     /// default, tog dies of it). A TERM every session forwarded does not
     /// re-raise: the child decides what it means.
     fn finish(&mut self) -> u32 {
+        self.finish_with_handled_cleanup(false)
+    }
+
+    fn finish_with_handled_cleanup(&mut self, cleanup_handled: bool) -> u32 {
         if !self.active {
             return 0;
         }
@@ -884,14 +902,16 @@ impl Session {
         self.clear_child();
         self.reconcile();
         let mut registry = registry();
-        if self.unconsumed_terms.get() != 0 {
+        if !cleanup_handled && self.unconsumed_terms.get() != 0 {
             registry.term_orphaned = true;
         }
         pause_boundary("before-deregister");
         let packed = SESSION_TERM.fetch_sub(ONE_SESSION, Ordering::SeqCst);
         let unseen = term_count(packed) != self.term_cursor.get();
         if unseen {
-            registry.term_orphaned = true;
+            if !cleanup_handled {
+                registry.term_orphaned = true;
+            }
             self.received
                 .set(self.received.get() | signal_bit(libc::SIGTERM));
         }
@@ -905,9 +925,15 @@ impl Session {
                 self.received.set(self.received.get() | signal_bit(signal));
             }
         }
+        // This scope has completed mandatory cleanup for every signal it
+        // observed. Even orphaned cancellation from a nested client/drain
+        // session is now handled as an interruption, rather than re-raised.
+        if cleanup_handled {
+            registry.term_orphaned = false;
+        }
         let mut reraise = false;
         if live_sessions(packed) == 1 {
-            reraise = registry.term_orphaned || unseen;
+            reraise = !cleanup_handled && (registry.term_orphaned || unseen);
             registry.term_orphaned = false;
         }
         if reraise {
@@ -963,6 +989,43 @@ fn assert_term_handler_is_tog_s() {
             "something replaced tog's SIGTERM handler after its first supervised child; \
              supervision would stop forwarding TERM"
         );
+    }
+}
+
+/// Keep cancellation caught continuously across a supervised client and its
+/// mandatory bounded cleanup. Cleanup may start after cancellation. It must
+/// not forward signals to its own isolated process group. Ordinary sessions
+/// retain their existing orphan-signal behavior.
+pub(crate) fn during_cleanup<T>(work: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    use std::os::unix::process::ExitStatusExt as _;
+    struct Restore(Option<[u32; 4]>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CLEANUP_START.with(|start| start.set(self.0));
+        }
+    }
+    let mut session = Session::new()?;
+    session.reject_pending_before_spawn()?;
+    let _restore = Restore(CLEANUP_START.with(|start| {
+        start.replace(Some([
+            session.term_cursor.get(),
+            session.int_cursor.get(),
+            session.hup_cursor.get(),
+            session.quit_cursor.get(),
+        ]))
+    }));
+    let result = work();
+    let signal = record_stop(session.finish_with_handled_cleanup(true));
+    match (result, signal) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Some(signal)) => Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            Interrupted {
+                signal,
+                status: ExitStatus::from_raw(signal),
+            },
+        )),
+        (Ok(value), None) => Ok(value),
     }
 }
 
