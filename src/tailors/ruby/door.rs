@@ -73,7 +73,22 @@ pub(crate) fn ruby_tool(selected: &Selected) -> io::Result<crate::kernel::resolv
 /// Ruby alone on `PATH` beside the system directories, its output
 /// captured. The gem paths are the run's scratch, set by the wiring.
 fn spec(run: &RubyRun<'_>) -> DelegateSpec {
-    let mut spec = DelegateSpec::new(run.ruby_obj.join("bin").join(run.args[0]));
+    // RubyGems' bundle launcher starts /bin/sh. Ubuntu's dash drops
+    // environment keys containing ':' or '/', including Bundler's mirror
+    // key. Execute its Ruby section directly so the forced mirror survives.
+    let bundle = run.args[0] == "bundle";
+    let mut spec =
+        DelegateSpec::new(
+            run.ruby_obj
+                .join("bin")
+                .join(if bundle { "ruby" } else { run.args[0] }),
+        );
+    if bundle {
+        spec.args([
+            OsString::from("-x"),
+            run.ruby_obj.join("bin/bundle").into_os_string(),
+        ]);
+    }
     spec.args(&run.args[1..]).lock_root(run.lock_root);
     spec.env(
         "PATH",
@@ -239,6 +254,13 @@ mod tests {
             publish: RubyPublish::Detached,
         };
         let command = format!("{:?}", spec(&run).command());
+        let spec = spec(&run);
+        let direct = spec.command();
+        assert_eq!(direct.get_program(), "/store/obj/ruby/bin/ruby");
+        assert_eq!(
+            direct.get_args().collect::<Vec<_>>(),
+            vec!["-x", "/store/obj/ruby/bin/bundle", "lock"],
+        );
         assert!(
             command.contains("PATH=\"/store/obj/ruby/bin:/usr/bin:/bin\""),
             "{command}"
