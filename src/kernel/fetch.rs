@@ -385,7 +385,6 @@ fn network_cause(error: &ureq::Error) -> String {
     }
 }
 
-///
 /// A transport failure (offline, DNS, a refused or reset connection, a
 /// timeout) is the `Network` failure class, exit 6: running it again may
 /// work. A status keeps its code for [`http_status`], and only a status a
@@ -601,7 +600,7 @@ pub(crate) fn download_unpinned(url: &str, dest: &Path, max: u64) -> io::Result<
 /// read error. Every message names `url` as `shown_url` shows it.
 fn copy_unpinned(url: &str, dest: &Path, max: u64, reader: Box<dyn Read>) -> io::Result<()> {
     let mut file = fs::File::create(dest)?;
-    let copied = io::copy(&mut reader.take(max + 1), &mut file);
+    let copied = copy_unpinned_stream(url, max, reader, &mut file);
     drop(file);
     let refusal = match copied {
         Ok(copied) if copied <= max => return Ok(()),
@@ -609,10 +608,32 @@ fn copy_unpinned(url: &str, dest: &Path, max: u64, reader: Box<dyn Read>) -> io:
             "download {}: longer than {max} bytes; refusing",
             shown_url(url)
         )),
-        Err(e) => read_failure(url, e),
+        Err(e) => e,
     };
     let _ = fs::remove_file(dest);
     Err(refusal)
+}
+
+/// Classify only errors from the network reader. Destination write errors
+/// keep their local cause and remain ordinary failures.
+fn copy_unpinned_stream(
+    url: &str,
+    max: u64,
+    reader: Box<dyn Read>,
+    writer: &mut impl Write,
+) -> io::Result<u64> {
+    struct Source<'a> {
+        url: &'a str,
+        reader: Box<dyn Read>,
+    }
+    impl Read for Source<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reader
+                .read(buf)
+                .map_err(|error| read_failure(self.url, error))
+        }
+    }
+    io::copy(&mut Source { url, reader }.take(max + 1), writer)
 }
 
 /// `url` parsed the way the fetcher parses it (ureq, through the `url`
@@ -2473,6 +2494,39 @@ mod integrity_tests {
         ] {
             assert!(!retryable_transport(kind), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn an_unpinned_download_keeps_local_write_failures_ordinary() {
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::StorageFull))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = copy_unpinned_stream("https://x/a", 1024, Box::new(&b"hello"[..]), &mut Full)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(crate::kernel::error::class_of(&error), None);
+        assert!(!error.to_string().contains("read https"), "{error}");
+
+        let error = copy_unpinned_stream(
+            "https://x/a",
+            1024,
+            Box::new(DroppedStream {
+                head: b"hel",
+                served: 0,
+            }),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Network)
+        );
     }
 
     /// An unpinned download stops reading one byte past its cap, so a
