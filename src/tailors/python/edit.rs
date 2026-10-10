@@ -5,13 +5,14 @@
 //! store uv. Poetry, PDM, setup.py and a `requirements/` directory are not
 //! pinned tools, so those refuse with the exact edit to make.
 
-use super::pypi;
+use super::door::{self, Builds, Index, Uv, UvRun, UvTarget};
+use super::{pypi, resolve};
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
-use crate::kernel::ui;
+use crate::kernel::resolve::ResolutionDoor;
 use crate::tailors::edit::{
-    other, registry_latest, run_inherited, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
+    other, registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
 };
+use std::ffi::OsString;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -97,7 +98,7 @@ pub(crate) fn edit_manifest(
 ) -> io::Result<EditOutcome> {
     Ok(EditOutcome {
         files: edit_files(edit, door)?,
-        sync_root: edit.project.to_path_buf(),
+        sync_root: edit_root(edit.project)?,
     })
 }
 
@@ -183,7 +184,8 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
             }
             let lock = project.join("requirements.lock.txt");
             let mut files = vec![file];
-            if verb == EditVerb::Update && lock.is_file() {
+            let external = resolve::has_external_includes(&ProjectRoot::open(project)?)?;
+            if verb == EditVerb::Update && lock.is_file() && !external {
                 uv_compile(edit, door, &path, &lock, &upgrade_flags(verb, names))?;
                 files.push("requirements.lock.txt".to_string());
             } else {
@@ -199,6 +201,16 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
             }
             Ok(files)
         }
+    }
+}
+
+/// `Tailor::edit_root` for Python: a uv project listed as a uv workspace
+/// member syncs at the workspace root, where its lock is; anything else in
+/// the project itself.
+pub(crate) fn edit_root(project: &Path) -> io::Result<PathBuf> {
+    match python_shape(project) {
+        Ok(PyShape::Uv) => resolve::lock_root(project),
+        _ => Ok(project.to_path_buf()),
     }
 }
 
@@ -467,33 +479,69 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// The store uv, run in the project on the project's interpreter, with
-/// the user's index settings removed. Also returns the interpreter, which
-/// each subcommand is given as `--python`: `uv pip compile` ignores
-/// `UV_PYTHON` (#210).
-fn uv_spec(
-    edit: &ManifestEdit<'_>,
-    door: &ResolutionDoor<'_>,
-) -> io::Result<(DelegateSpec, String, PathBuf)> {
-    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
+/// The store uv and the interpreter version the project's toolchain
+/// selects, for an edit's door runs.
+fn edit_uv(edit: &ManifestEdit<'_>, door: &ResolutionDoor<'_>) -> io::Result<(Uv, String)> {
     let toolchain = edit.host.toolchain(edit.project, "python")?;
     let version = toolchain.version("cpython")?.to_string();
-    let uv = super::realize_uv(store, activity, platform, &toolchain)?.join("uv");
-    let interpreter = super::uv_interpreter(store, activity, platform, &toolchain)?;
-    let mut spec = DelegateSpec::new(uv);
-    spec.lock_root(edit.project)
-        .env("UV_PYTHON", &interpreter)
-        .env("UV_PYTHON_DOWNLOADS", "never")
-        .env_remove("UV_INDEX_URL")
-        .env_remove("UV_DEFAULT_INDEX")
-        .env_remove("UV_EXTRA_INDEX_URL")
-        .env_remove("PIP_INDEX_URL")
-        .env_remove("PIP_EXTRA_INDEX_URL")
-        .env_remove("PIP_TRUSTED_HOST")
-        .env_remove("PIP_FIND_LINKS");
-    Ok((spec, version, interpreter))
+    Ok((Uv::for_door(door, &toolchain)?, version))
 }
 
+/// One edit's uv run at `lock_root` (in `cwd` below it), published with
+/// its signed record: the probe, then a build only when policy allows
+/// `resolution-build`. A requirements file including one outside the
+/// project publishes the lock without a record, which a sync then records
+/// as `unrecorded-resolution`.
+fn edit_run(
+    door: &mut ResolutionDoor<'_>,
+    uv: &Uv,
+    lock_root: &Path,
+    cwd: Option<PathBuf>,
+    args: Vec<OsString>,
+    index: Index,
+    what: &str,
+) -> io::Result<()> {
+    let held = ProjectRoot::open(lock_root)?;
+    let outputs = resolve::resolution_outputs(&held)?;
+    let record = if resolve::has_external_includes(&held)? {
+        None
+    } else {
+        let shown: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+        Some(crate::tailors::record_spec(
+            &super::tailor::Python,
+            &held,
+            uv.tool(),
+            &refs,
+        )?)
+    };
+    door::run_uv_checked(
+        door,
+        UvRun {
+            uv,
+            lock_root,
+            cwd,
+            args,
+            index,
+            outputs,
+            target: UvTarget::Project {
+                record,
+                slot: Default::default(),
+            },
+            builds: Builds::Probe,
+            capture: false,
+            policy: None,
+        },
+        &format!("{what} failed; nothing was synced"),
+    )
+    .map(drop)
+}
+
+/// Recompile `input` into `output` (both in the project) with `extra`
+/// (the upgrade flags), the same compile the missing-lock door runs.
 fn uv_compile(
     edit: &ManifestEdit<'_>,
     door: &mut ResolutionDoor<'_>,
@@ -501,56 +549,79 @@ fn uv_compile(
     output: &Path,
     extra: &[String],
 ) -> io::Result<()> {
-    let (mut spec, version, python) = uv_spec(edit, door)?;
-    spec.args(["pip", "compile"])
-        .arg(input)
-        .arg("--generate-hashes")
-        .arg("--python")
-        .arg(&python);
-    if !ui::verbose() {
-        spec.arg("--quiet");
+    let held = ProjectRoot::open(edit.project)?;
+    if resolve::has_external_includes(&held)? {
+        return Err(other(format!(
+            "{} includes a requirements file outside the project, which the confined uv \
+             cannot read; move it into the project, or edit the requirements and run 'tog', \
+             which compiles the flattened text",
+            input.display()
+        )));
     }
-    spec.args(["--python-version", &version])
-        .args(["--index-url", "https://pypi.org/simple"])
-        .arg("-o")
-        .arg(output)
-        .args(extra);
-    run_inherited(door, spec, "store uv pip compile")
+    let (uv, version) = edit_uv(edit, door)?;
+    let name = |path: &Path| -> String {
+        path.strip_prefix(edit.project)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut args = resolve::compile_args(&name(input), &name(output), &version);
+    args.extend(extra.iter().map(OsString::from));
+    edit_run(
+        door,
+        &uv,
+        edit.project,
+        None,
+        args,
+        Index::PipCompile,
+        "store uv pip compile",
+    )
 }
 
 fn python_uv(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Result<Vec<String>> {
     let texts = &edit.texts();
-    let (mut spec, _, python) = uv_spec(edit, door)?;
+    let (uv, _) = edit_uv(edit, door)?;
+    let mut args: Vec<OsString> = Vec::new();
     match edit.verb {
-        EditVerb::Add => {
-            spec.args(["add", "--no-sync", "--python"]).arg(&python);
+        EditVerb::Add | EditVerb::Remove => {
+            args.push(
+                if edit.verb == EditVerb::Add {
+                    "add"
+                } else {
+                    "remove"
+                }
+                .into(),
+            );
+            args.push("--no-sync".into());
             if edit.dev {
-                spec.arg("--dev");
+                args.push("--dev".into());
             }
             if !texts.is_empty() {
-                spec.arg("--").args(texts);
-            }
-        }
-        EditVerb::Remove => {
-            spec.args(["remove", "--no-sync", "--python"]).arg(&python);
-            if edit.dev {
-                spec.arg("--dev");
-            }
-            if !texts.is_empty() {
-                spec.arg("--").args(texts);
+                args.push("--".into());
+                args.extend(texts.iter().map(OsString::from));
             }
         }
         EditVerb::Update => {
-            spec.args(["lock", "--python"]).arg(&python);
+            args.push("lock".into());
             if texts.is_empty() {
-                spec.arg("--upgrade");
+                args.push("--upgrade".into());
             }
             for name in texts {
-                spec.args(["--upgrade-package", name]);
+                args.push("--upgrade-package".into());
+                args.push(name.into());
             }
         }
     }
-    run_inherited(door, spec, "store uv")?;
+    // A uv workspace member's edit writes the member's manifest and the
+    // workspace's lock: uv runs in the member, at the workspace root.
+    let lock_root = resolve::lock_root(edit.project)?;
+    let cwd = edit
+        .project
+        .strip_prefix(&lock_root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(Path::to_path_buf);
+    edit_run(door, &uv, &lock_root, cwd, args, Index::Project, "store uv")?;
     Ok(vec!["pyproject.toml".to_string(), "uv.lock".to_string()])
 }
 

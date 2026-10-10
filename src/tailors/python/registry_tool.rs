@@ -5,7 +5,7 @@
 use crate::comforter::status::canonical_symlink_target;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
@@ -92,7 +92,7 @@ impl RegistryTool for PythonTool {
         toolchain: &Selected,
         helpers: &std::collections::BTreeMap<String, Selected>,
     ) -> io::Result<()> {
-        let (store, activity, platform) = (door.store(), door.lease(), door.platform());
+        let (activity, platform) = (door.lease(), door.platform());
         fs::create_dir_all(root)?;
         // The environment runs on the runtime the caller resolved, not on
         // the global default: inside a project with a lock that is the
@@ -112,35 +112,30 @@ impl RegistryTool for PythonTool {
         let output = root.join("requirements.txt");
         fs::write(&input, &spec)?;
         ui::note(&format!("resolving {} with the store uv...", spec.trim()));
-        // The bundle names the uv build this environment resolves with.
-        let uv = python::realize_uv(store, activity, platform, toolchain)?.join("uv");
-        let python = python::uv_interpreter(store, activity, platform, toolchain)?;
-        let mut uv_spec = DelegateSpec::new(uv);
-        uv_spec
-            .args(["pip", "compile"])
-            .arg(&input)
-            .arg("--generate-hashes");
-        if !ui::verbose() {
-            uv_spec.arg("--quiet").capture();
-        }
-        uv_spec
-            .args(["--python-version", pin.version])
-            .arg("--python")
-            .arg(&python)
-            .env("UV_PYTHON_DOWNLOADS", "never")
-            .args(["--index-url", "https://pypi.org/simple"])
-            .arg("-o")
-            .arg(&output)
-            .lock_root(root)
-            .env_remove("UV_INDEX_URL")
-            .env_remove("UV_DEFAULT_INDEX")
-            .env_remove("UV_EXTRA_INDEX_URL")
-            .env_remove("PIP_INDEX_URL")
-            .env_remove("PIP_EXTRA_INDEX_URL")
-            .env_remove("PIP_TRUSTED_HOST")
-            .env_remove("PIP_FIND_LINKS");
-        uv_spec.trace();
-        let report = door.run(uv_spec)?;
+        // The bundle names the uv build this environment resolves with. It
+        // runs confined through this `x` door, detached: the cache root is
+        // the lock root and takes the accepted lock back, and the ledger is
+        // rooted under it, so GC keeps it with the root.
+        let uv = python::door::Uv::for_door(door, toolchain)?;
+        let report = python::door::run_uv(
+            door,
+            python::door::UvRun {
+                uv: &uv,
+                lock_root: root,
+                cwd: None,
+                args: python::resolve::compile_args(
+                    "requirements.in",
+                    "requirements.txt",
+                    pin.version,
+                ),
+                index: python::door::Index::PipCompile,
+                outputs: vec![PathBuf::from("requirements.txt")],
+                target: python::door::UvTarget::Detached,
+                builds: python::door::Builds::Probe,
+                capture: !ui::verbose(),
+                policy: None,
+            },
+        )?;
         if !report.status.success() {
             return Err(python::uv_failure(
                 &format!("could not resolve '{}' from PyPI", spec.trim()),
@@ -148,6 +143,7 @@ impl RegistryTool for PythonTool {
                 &report.stderr,
             ));
         }
+        python::door::root_ledger(door, root, &report)?;
         let text = fs::read_to_string(&output)?;
         let plan = pypi::plan_python(platform, &text, pin.version)?;
         let env = env::realize_env_with(door, &plan, toolchain, helpers.get("rust"))?;

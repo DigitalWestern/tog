@@ -10,7 +10,7 @@
 //! type next. Tog edits a file itself in exactly one case: a plain
 //! requirements file, where the "tool" is a text append.
 
-use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use std::fs;
@@ -135,26 +135,6 @@ pub struct PackageRegistry {
 
 pub(crate) fn other(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
-}
-
-/// Run an edit's tool with the user watching, through `door`; a failure
-/// says nothing was synced.
-pub(crate) fn run_inherited(
-    door: &mut ResolutionDoor<'_>,
-    spec: DelegateSpec,
-    what: &str,
-) -> io::Result<()> {
-    spec.trace();
-    let status = door
-        .run(spec)
-        .map_err(|error| io::Error::new(error.kind(), format!("run {what}: {error}")))?
-        .status;
-    if !status.success() {
-        return Err(other(format!(
-            "{what} failed (exit status {status}); nothing was synced"
-        )));
-    }
-    Ok(())
 }
 
 /// `Tailor::registry_exists` over a registry's JSON API: `Some(latest

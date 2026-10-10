@@ -3,7 +3,7 @@
 //! fallback), cutting the plan (Plan) the kernel realizes.
 
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateSpec, DoorKind, ResolutionDoor};
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::types::{ArtifactKind, LockedPackage, Plan};
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::ffi::CStr;
@@ -792,12 +792,10 @@ pub(crate) fn lock_requirement_text_with_uv(
     selected: &crate::kernel::toolchain::Selected,
     constraints: Option<&str>,
 ) -> io::Result<String> {
-    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let python_version = selected.version("cpython")?;
-    let uv = crate::tailors::python::realize_uv(store, activity, platform, selected)?.join("uv");
-    let python = crate::tailors::python::uv_interpreter(store, activity, platform, selected)?;
+    let uv = crate::tailors::python::door::Uv::for_door(door, selected)?;
     // One lease covers the scratch directory and the uv child.
-    let scratch = store.stage_with_activity(activity)?;
+    let scratch = door.store().stage_with_activity(door.lease())?;
     let input = scratch.join("requirements.in");
     let output = scratch.join("requirements.lock.txt");
     let constraints_path = scratch.join("constraints.txt");
@@ -806,34 +804,49 @@ pub(crate) fn lock_requirement_text_with_uv(
         if let Some(constraints) = constraints {
             fs::write(&constraints_path, format!("{constraints}\n"))?;
         }
-        let mut spec = DelegateSpec::new(&uv);
-        spec.args([
+        let mut args: Vec<std::ffi::OsString> = [
             "pip",
             "compile",
             "--generate-hashes",
             "--python-version",
             python_version,
-            // Build requirements are metadata inputs, not permission to run
-            // arbitrary backends. Build-only sdists fail loudly instead.
-            "--no-build",
-            "--python",
-        ])
-        .arg(&python)
-        .env("UV_PYTHON_DOWNLOADS", "never");
+        ]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
         if constraints.is_some() {
-            spec.args([
-                "-c",
-                constraints_path.to_str().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "constraints path is not UTF-8")
-                })?,
-            ]);
+            args.extend(["-c".into(), "constraints.txt".into()]);
         }
-        let uv_output = {
-            spec.arg(&input).args(["-o"]).arg(&output).capture();
-            door.reopen(DoorKind::Planner).run(spec).map_err(|e| {
-                io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display()))
-            })?
-        };
+        args.extend([
+            "requirements.in".into(),
+            "-o".into(),
+            "requirements.lock.txt".into(),
+        ]);
+        // Confined through a planner door in the scratch directory, which
+        // takes the accepted lock back. Build requirements are metadata
+        // inputs, not permission to run arbitrary backends: `--no-build`
+        // only, so a build-only sdist fails loudly instead.
+        let mut planner = door.reopen(DoorKind::Planner);
+        let uv_output = crate::tailors::python::door::run_uv(
+            &mut planner,
+            crate::tailors::python::door::UvRun {
+                uv: &uv,
+                lock_root: &scratch,
+                cwd: None,
+                args,
+                index: crate::tailors::python::door::Index::PipCompile,
+                outputs: vec![std::path::PathBuf::from("requirements.lock.txt")],
+                target: crate::tailors::python::door::UvTarget::Detached,
+                builds: crate::tailors::python::door::Builds::Never,
+                capture: true,
+                policy: None,
+            },
+        )?;
+        // The ledger is evidence of this sync's planning: the sync roots
+        // it under the project, as it does an sdist's Cargo.lock's.
+        if let Some(objects) = uv_output.ledger.clone() {
+            planner.keep_ledger(objects);
+        }
         if !uv_output.status.success() {
             let names = requirements_text
                 .lines()

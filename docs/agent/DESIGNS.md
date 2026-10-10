@@ -1429,7 +1429,7 @@ under the seccomp filter.
 | npm | `--git=/usr/bin/git` (the host git on the sandbox's read-only system roots; `/nonexistent/git` on a host without one, so only a git dependency fails; PR 6), `--script-shell=/bin/sh`, `--shell=/bin/sh` (the host shell, required), `--ignore-scripts`, `--node-options=`, `--node-gyp=` (a nonexistent path), `--editor`, `--browser`, and `--viewer` set to `false` | `git` (the lock-only install of a git dependency runs it). `script-shell`, `shell`, `node-gyp`, `editor`, `browser`, `viewer`, and `node-options` did not fire, and a git dependency's `prepare` script did not run under `--ignore-scripts` | no marker ran, exit 0 |
 | pnpm | `--config.script-shell=/bin/sh`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--config.ignore-scripts=true` (PR 0 measured `--ignore-scripts` on `install`; `pnpm remove` rejects the flag, and the `--config.` spelling is the one every verb takes; PR 6), `--config.node-options=`, and **added by PR 0**: `--config.pnpmfile=.pnpmfile.cjs`, `--config.global-pnpmfile=`, `--config.manage-package-manager-versions=false` (the last from pnpm's docs: otherwise pnpm may download another pnpm named by `packageManager`). A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it | `pnpmfile` and `global-pnpmfile` (both name a JavaScript file pnpm loads). `script-shell` and `node-options` did not fire | only the by-design `.pnpmfile.cjs` ran, exit 0 |
 | cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registry.credential-provider="cargo:token"` (crates.io's own slot), `registries.<name>.credential-provider="cargo:token"` for every registry in the config (strings, since PR 5: cargo concatenates a `--config` array with a config-file array, so an array let the project's provider run after ours; the global slot must stay a list, and a project that sets it, or a per-registry slot, as an array now stops cargo with a merge error, which fails closed), `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
-| uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` plus the project's `[tool.uv]` read by tog and passed as flags | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so tog must still read those itself | no marker ran, exit 0 |
+| uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` (safe scalar resolver settings are not yet preserved, a review follow-up) | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so tog must still read those itself | no marker ran, exit 0 |
 | git | carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE` (the tools start git, so `-c` flags cannot reach it): `credential.helper=`, `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.sshCommand=false` with `GIT_SSH_COMMAND` unset, `protocol.allow=never`, `protocol.https.allow=always`, `protocol.file.allow=always`, and **added by PR 0**: `protocol.ext.allow=never`, `protocol.ssh.allow=never`, `protocol.git.allow=never`, `protocol.http.allow=never`, `core.gitProxy=`; also `uploadpack.packObjectsHook=`, `core.askPass=false` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` | `core.fsmonitor` (`status`), `core.sshCommand` (an `ssh://` remote), `core.gitProxy` (a `git://` remote), `credential.helper` and `core.askPass` (a 401 from an https remote), `core.hooksPath` (`commit`), and `protocol.ext.allow=always` (an `ext::` remote runs its command) | the design's set still ran the `ext::` marker: a repository's own `protocol.ext.allow=always` beats `protocol.allow=never`, which is only the default for unlisted protocols. With the per-protocol `never` entries above, no marker ran |
 | go | the census environment is built from empty: `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local`, `GOVCS=*:off` (modules come only through GOPROXY), `GOPROXY` the mirror with no `direct`, `GONOSUMDB=` and `GOPRIVATE=` unset, `CC` and `CXX` unset with `CGO_ENABLED=0`, and **added by PR 0**: `GOENV=off` (so a user `go.env` cannot set any of these), `GOAUTH=off`, `GOCACHEPROG` unset | `GOCACHEPROG` (go runs it as the build cache), `GOVCS` allowing git with `GOPROXY=direct` (runs `git` from `PATH`), and a `toolchain go1.99.0` line in `go.mod` under `GOTOOLCHAIN=auto` (requests `golang.org/toolchain/@v/v0.0.1-go1.99.0.linux-amd64.zip` from the mirror). `GOFLAGS=-toolexec=...`, `GOAUTH=command ...`, `CC`, and `CXX` did not fire in `go mod tidy`/`download` | no marker ran, no toolchain request, exit 0 |
 | Bundler, mix, dotnet | code-evaluating by design; the forced settings are the ones in their table rows (`BUNDLE_*` and `MIX_*` stripped, `BUNDLE_IGNORE_CONFIG=1`, `DOTNET_CLI_*` set, `--disable-build-servers`) and isolation is the control | Bundler: a `.bundle/config` naming another Gemfile fires without `BUNDLE_IGNORE_CONFIG=1` | the Gemfile, `mix.exs`, and an MSBuild `Exec` target in `Directory.Build.props` all ran, as designed, confined, exit 0 |
@@ -1961,22 +1961,20 @@ platforms:
    `Failed to build `<name> @ <url>`` followed by
    `Building source distributions for `<name>` is disabled`. The door
    parses the name out of either form.
-3. The project's own build (a workspace member with dynamic metadata) is
-   the project's code, not a third party's. PR 0 refuted the planned
-   exemption: `--no-build-package <member>` forbids that member's build
-   too (same error). The probe instead builds the members' metadata
-   first, in the run's own cache:
-   `uv pip compile --no-deps --only-binary <names in the member's build-system.requires> -e <member>`
-   (the build backend itself must come as a wheel, so only the project's
-   own code runs), then `uv lock --no-build` reuses the cached metadata
-   and passes (measured). A member whose build requirements are
-   themselves sdist-only fails that pre-step, and the door treats it as a
-   `resolution-build` naming that requirement.
-4. uv's caches are per run (see "Performance"), so a build cached earlier
-   cannot hide a build this run needed.
+3. **Owner correction, 2026-10-09, review of #622:** every metadata
+   preparation, including the project's own backend, requires
+   `resolution-build` permission. The earlier editable pre-step exemption
+   allowed dynamic and transitive build requirements to run third-party
+   source builds before the permission check. There is no metadata
+   pre-step. A build refusal names the project or distribution uv reported,
+   and an allowed rerun records `resolution-build` before publishing.
+4. uv's cache is private to each attempt. An allowed retry starts with
+   an empty uv cache, so the accepted run independently requests all its
+   metadata and artifacts and records their evidence and exceptions. The
+   proxy's verified persistent cache still avoids redundant downloads.
 
-The kind therefore means exactly "resolution could not complete without
-building a third-party source distribution, and the build was allowed".
+The kind means "resolution needed source builds or metadata preparation,
+and that execution of build code was allowed".
 On Linux the rerun's exec log is compared with the probe, and a build
 recorded without any interpreter exec from a uv build environment (or the
 reverse) is written to diagnostics for investigation. That is a
@@ -3595,6 +3593,70 @@ Node doors, each the flexible option that still fails closed:
 **PR 7: Python.** uv (edit, missing lock, build requirements, `x`,
 `attest`), the default index forced on every uv invocation (known gap 2),
 the `--no-build` probe, and `resolution-build`.
+
+**PR 7 as built (Linux, 2026-10-09, #205).** Decisions made moving the
+uv rows onto the door:
+
+- **One runner.** `tailors/python/door.rs` runs every uv operation:
+  `UvRun` names the lock root, the member to run in, the arguments, the
+  index flag, the outputs, and the target (a project with its record, or
+  a detached root). The door adds the forced default index
+  (`--index-url` or `--default-index`), `--no-build` for the probe, and
+  the forced row before any `--`.
+- **The probe.** Every operation runs `--no-build` first, captured. A
+  failure that names no build need is the answer. uv 0.12.7 wraps a long
+  message onto several lines behind box drawing, so the parser joins
+  them before reading the names. A need whose url is a `file://` path
+  is subject to the same `resolution-build` permission check, including
+  the project's own backend. No editable metadata pre-step runs before
+  that check. This is the owner's correction from the #622 review on
+  2026-10-09. If allowed, the rerun without `--no-build` carries that fact
+  into the signed receipt.
+- **One cache per attempt.** A private store stage is bound read-write
+  and named by `UV_CACHE_DIR`. An allowed retry has a new empty uv cache
+  so evidence from a failed probe cannot disappear behind cache reuse.
+  Each cache is removed when its attempt ends.
+- **The compiled lock's header.** `uv pip compile` writes its own
+  command line into the lock, which names the store interpreter (a path
+  that differs per machine) and the probe's `--no-build`. Every compile
+  passes `--custom-compile-command tog`, so the bytes are the same
+  everywhere and an attest rerun can leave them unchanged. A lock with
+  another header is refused by attest. Retain `requirements.txt` and run
+  `tog update` for a pip-compile pair. Delete only `requirements.lock.txt`
+  and run `tog` for generated locks.
+- **Attest.** `uv lock --locked` for `uv.lock`. For
+  `requirements.lock.txt`, the same compile planning runs, from the
+  input planning picks (`inputs::lock_compile_input`, which writes the
+  generated `.tog` input afresh), with `require_unchanged`. For a
+  pip-compile pair, `requirements.in` to `requirements.txt`. A
+  hand-pinned `requirements.txt` has no check and is refused.
+- **Resolution files.** Outputs: `pyproject.toml`, `uv.lock`,
+  `requirements.in`, `requirements.txt`, `requirements.lock.txt`, and each
+  uv workspace member's `pyproject.toml` (`[tool.uv.workspace]` members
+  globs minus `exclude`). Inputs: `setup.cfg`, `setup.py`, and every file
+  a top-level requirements file includes inside the project. An include
+  outside the project means the door publishes with no record (the
+  missing-lock door already compiles the flattened text then) and attest
+  refuses it. The sync takes the basis right after planning.
+- **uv workspaces.** A `[project]` directory that an ancestor's
+  `[tool.uv.workspace]` lists is edited at the workspace root with uv run
+  in the member, and syncs at the root (`Tailor::edit_root`).
+- **Detached doors.** The build-requirements planner runs in its store
+  scratch and keeps its ledger for the sync to root; `tog x` runs at the
+  cache root and roots its ledger there.
+- **raw.githubusercontent.com.** uv reads a GitHub dependency's
+  `pyproject.toml` at a commit before cloning. `intercept::git_fetch`
+  classifies a GET or HEAD of `/<owner>/<repo>/<40-hex>/<file>` there as a
+  git fetch of `https://github.com/<owner>/<repo>`.
+- **Tests.** In `tailors/python/door.rs` against the recorded PyPI rows:
+  `uv_compile_through_interception_publishes_the_lock_with_its_record`,
+  `a_third_party_build_is_refused_when_denied` (docopt, sdist only), and
+  `the_projects_own_metadata_is_refused_before_running_a_backend`
+  (a dynamic hatchling version is refused naming the project before its
+  backend runs). An allowed third-party build still needs additional
+  recorded upstream rows for an offline replay.
+  The stub-uv tests in `tailors/python/inputs.rs` now read what the stub
+  saw from the lock it writes, the one file a confined run may change.
 
 **PR 8: Ruby and Elixir.** Bundler mirror and Hex mirror, the visible
 refusals, the Ruby gate-1 helper and Elixir lock parser behind no-route

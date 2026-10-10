@@ -296,6 +296,33 @@ from every place a member can be named; its inputs are `.npmrc`,
 (`tailors/node/resolve.rs`). The pinned pnpm runs as `node <script>` from
 the store environment object its `tog x` cache root links into.
 
+Every uv run (`tog add`/`remove`/`update`, a missing
+`requirements.lock.txt`, an sdist's build requirements, `tog x`, and
+`tog attest`) goes through the same door, confined, at the lock root (the
+project, or the uv workspace root that lists it as a member, with uv run
+in the member) (`tailors/python/door.rs`). The proxy serves `pypi.org/simple`
+and `files.pythonhosted.org` through the `pypi` route
+(`tailors/python/registry.rs`: each index page's file hashes are claims
+its downloads are verified against, a sha1 hash is `weak-integrity`), git
+dependencies through the git row (GitHub's `raw.githubusercontent.com`
+metadata read at a commit is a git fetch too), and any other index or a
+direct URL as `unattested-index`. The default index is forced to PyPI on
+every invocation, so a project's `[[tool.uv.index]]` default never
+replaces it. Every run starts with `--no-build` (the probe): no
+third-party code runs in it. When uv refuses because something must be
+built or its metadata prepared, `resolution-build` permission is required
+before any backend runs, including the project's own. The permission also
+covers dynamic and transitive build requirements. A denial stops the
+operation. An allowed rerun records the exception in its receipt. uv's cache is private to each attempt. An allowed retry starts with an
+empty cache, so its receipt records every contributing fetch and exception. A compiled lock is headed by `tog` in
+place of uv's command line (`--custom-compile-command`), so the same
+resolution writes the same bytes on every machine. Python's resolution
+outputs are `pyproject.toml`, `uv.lock`, `requirements.in`,
+`requirements.txt`, `requirements.lock.txt`, and every uv workspace
+member's `pyproject.toml`; its inputs are `setup.cfg`, `setup.py`, and
+every file a requirements file includes inside the project
+(`tailors/python/resolve.rs`).
+
 `targets`, `components` and `profile` in `rust-toolchain(.toml)` are lock
 rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):
 lists sorted and deduplicated, each written only when present, so a lock

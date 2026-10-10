@@ -1078,7 +1078,7 @@ before any record is written. With `TOG_SIGNING_KEY` unset it warns and
 writes the record unsigned, which no sync will attest. It reads
 `tog-toolchain.toml` the way `--frozen` does and never writes it, and it
 refuses `--frozen` (exit 2). An ecosystem with no resolution door is
-refused by name. Today three have one. Go's check is `go mod download -json
+refused by name. Today four have one. Go's check is `go mod download -json
 all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
 workspace root, run in the sandbox through tog's resolution proxy (TLS
 interception to crates.io), so its fetches are in the record's ledger. Run
@@ -1093,6 +1093,44 @@ the pnpm `packageManager` pins for a `pnpm-lock.yaml`, each confined the
 same way, at the lock root: from a pnpm workspace member it is refused,
 naming the root. A `yarn.lock` has no check, since yarn is not a pinned
 tool, and a `file:` dependency outside the project is refused by name.
+Python resolution first runs uv with `--no-build`. If source builds or
+metadata preparation are needed, including the project's own backend,
+`resolution-build` permission is required before any backend runs. A denial
+names the package and publishes nothing. An allowed rerun records the
+exception in its signed resolution receipt. The project's own metadata is
+not exempt because its backend can request third-party source builds.
+The older `setup.py egg_info` path and reuse of its metadata cache also
+require permission and carry `resolution-build` provenance.
+PyPI wheel metadata sidecars are verified against the index's advertised
+digests before use. A missing digest records `weak-integrity`, which policy
+can deny. A mismatch always fails and is never cached.
+
+Python resolution runs uv with `--no-config`. Scalar uv settings from
+`uv.toml`, `[tool.uv]`, and `[tool.uv.pip]`, such as `resolution` and
+`prerelease`, currently use uv's defaults. Explicit dependency sources and
+indexes still apply through the proxy, with PyPI forced as the default.
+The door disables interpreter downloads and keyring programs and selects
+the store interpreter. Preserving safe resolver settings needs a reviewed
+allowlist so configuration cannot bypass these controls.
+
+Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
+lock the same `uv pip compile` tog ran to write it, which must leave it
+byte for byte the same: `requirements.lock.txt` from the requirements tog
+compiles it from, or `requirements.txt` from `requirements.in`. A
+compiled lock whose header names another command than `tog` (one written
+by uv or pip-tools directly) is refused. For a pip-compile pair, retain
+`requirements.txt` and run `tog update`. For a generated
+`requirements.lock.txt`, delete only that lock and run `tog` again.
+Commit the regenerated lock before attesting. A project with no lock a
+tool resolved (a hand-pinned
+`requirements.txt`) has no check and is refused, as is a requirements
+file that includes one outside the project.
+
+Hashes alone prove package bytes, not how the dependency set was resolved.
+To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`
+beside the existing file, then run a Python `tog update` to compile the pair.
+For example, `tog update --no-sync py:six` in a project that pins six writes
+the compiled lock and its resolution receipt before sync or attest.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.

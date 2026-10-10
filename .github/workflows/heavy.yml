@@ -223,9 +223,10 @@ jobs:
       # (downloads about 100 MB).
       SHARD_RUST: toolchain_lock cargo_e2e catalog_upstream
       # python, plus the ignored unit tests in src/ (--lib, [151]):
-      # build_isolation [299] fmt_e2e [145] native_libs [18] python_select
-      # [8] manifests [6] wheel_data [2] linux_python [1] kernel_smoke [0].
-      SHARD_PYTHON: build_isolation fmt_e2e native_libs python_select manifests wheel_data linux_python kernel_smoke
+      # source-package builds [299] in --lib, fmt_e2e [145], native_libs
+      # [18], python_select [8], manifests [6], wheel_data [2],
+      # linux_python [1], kernel_smoke [0].
+      SHARD_PYTHON: fmt_e2e native_libs python_select manifests wheel_data linux_python kernel_smoke
       # other, about 570 seconds: deps_e2e [250] go_e2e [118] dotnet_e2e
       # [114] ruby_e2e [86] sandbox_deny [4] elixir_e2e and the rest.
     steps:
@@ -243,8 +244,8 @@ jobs:
       - run: cargo build --locked
       # Every later step sees these. Scratch stores and toolchains go on
       # the runner's disk rather than /tmp. TOG_STORE is the store for the
-      # suites that read it (build_isolation and native_libs open it
-      # in-process and fail without it); most e2e suites make their own
+      # native_libs suite, which opens it in-process and fails without it.
+      # Most e2e suites make their own
       # store under TMPDIR. (Job-level `env` cannot read `runner.temp`.)
       - name: Scratch directory on the runner disk
         run: |

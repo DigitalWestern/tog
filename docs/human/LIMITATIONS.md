@@ -267,9 +267,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
   replacement after commit is undetected.
-- **Delegated planning runs unsandboxed with user privileges** (uv, bundler):
-  a hostile manifest executes code at PLAN time. Go's, Cargo's, and Node's run in the
-  sandbox.
+- **Delegated planning runs unsandboxed with user privileges** (bundler):
+  a hostile manifest executes code at PLAN time. Go's, Cargo's, Node's, and Python's
+  (uv) run in the sandbox.
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
@@ -327,9 +327,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
-  **Project-level `uv pip compile` in `src/commands/shared.rs` can still execute resolve-time metadata
-  builds outside the sandbox** — sdist build-requirement resolution rejects build-time sdists
-  instead.
+  **Resolving can build a source distribution that has no wheel** (its build backend runs,
+  confined, through the resolution door): it is recorded as `resolution-build`, which a
+  policy can deny to refuse it. This also covers metadata preparation by
+  the project's own backend because it can request third-party source builds.
+  sdist build-requirement resolution never builds.
 - **Lock markers are read as PEP 508 and `packaging` 25 read them, with these
   refusals.** Each is a marker tog will not guess at, so a lock that uses one fails
   to import, naming it:

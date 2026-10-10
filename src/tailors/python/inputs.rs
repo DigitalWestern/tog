@@ -6,14 +6,16 @@ use crate::comforter;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
-use crate::kernel::resolve::{DelegateSpec, DoorKind, ResolutionDoor};
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
 use crate::kernel::types;
 use crate::kernel::ui;
 use crate::tailors::python;
+use crate::tailors::python::door::{Builds, Index, Uv, UvRun, UvTarget};
 use crate::tailors::python::manifest;
 use crate::tailors::python::pypi;
 use crate::tailors::python::pyselect;
+use crate::tailors::python::resolve;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -220,31 +222,7 @@ pub fn read_plan(
     }
 
     let generated_input =
-        if as_is && (input.starts_with("requirements") || is_fully_pinned(&source)) {
-            None
-        } else {
-            // The compile input is named to uv by pathname, but tog writes it
-            // through the held project descriptor so a symlinked `.tog` is
-            // refused rather than followed.
-            let path = dir.join(MANIFEST_REQUIREMENTS);
-            let mut text = if manifest.has_constraints() {
-                project.write_file(
-                    Path::new(MANIFEST_CONSTRAINTS),
-                    manifest.constraints_text().as_bytes(),
-                )?;
-                format!(
-                    "{}-c {MANIFEST_CONSTRAINTS_NAME}\n",
-                    manifest.normalized_requirements_text(),
-                )
-            } else {
-                resolver_source.clone()
-            };
-            if text.is_empty() {
-                text.push('\n');
-            }
-            project.write_file(Path::new(MANIFEST_REQUIREMENTS), text.as_bytes())?;
-            Some(path)
-        };
+        generated_compile_input(project, &manifest, &input, &source, &resolver_source, as_is)?;
     let compile_path = if generated_input.is_some() {
         generated_input.as_deref()
     } else {
@@ -393,6 +371,77 @@ pub fn is_fully_pinned(text: &str) -> bool {
     any
 }
 
+/// The requirements text tog writes under `.tog` for uv to compile, when
+/// the manifest is not a requirements file uv can read as it is (a
+/// pyproject or setup.cfg, an external include): its path, or `None` when
+/// uv compiles the manifest's own file.
+fn generated_compile_input(
+    project: &ProjectRoot,
+    manifest: &manifest::Manifest,
+    input: &str,
+    source: &str,
+    resolver_source: &str,
+    as_is: bool,
+) -> io::Result<Option<PathBuf>> {
+    if as_is && (input.starts_with("requirements") || is_fully_pinned(source)) {
+        return Ok(None);
+    }
+    // The compile input is named to uv by pathname, but tog writes it
+    // through the held project descriptor so a symlinked `.tog` is
+    // refused rather than followed.
+    let mut text = if manifest.has_constraints() {
+        project.write_file(
+            Path::new(MANIFEST_CONSTRAINTS),
+            manifest.constraints_text().as_bytes(),
+        )?;
+        format!(
+            "{}-c {MANIFEST_CONSTRAINTS_NAME}\n",
+            manifest.normalized_requirements_text(),
+        )
+    } else {
+        resolver_source.to_string()
+    };
+    if text.is_empty() {
+        text.push('\n');
+    }
+    project.write_file(Path::new(MANIFEST_REQUIREMENTS), text.as_bytes())?;
+    Ok(Some(project.path().join(MANIFEST_REQUIREMENTS)))
+}
+
+/// The file uv compiles a project's `requirements.lock.txt` from, relative
+/// to the project, as planning names it: `tog attest` reruns that compile.
+/// A generated input is written afresh, as planning would.
+pub(crate) fn lock_compile_input(
+    project: &ProjectRoot,
+    selected: &Selected,
+    door: &mut ResolutionDoor<'_>,
+) -> io::Result<String> {
+    let version = selected.version("cpython")?;
+    let mut manifest = manifest::discover(door.platform(), project, version)?;
+    if manifest.requires_setup() {
+        manifest.prepare_setup(project, selected, door)?;
+    }
+    let input = manifest.input.clone();
+    let source = manifest.requirements_text();
+    let (resolver_source, as_is) = resolver_input(project, &manifest);
+    let generated =
+        generated_compile_input(project, &manifest, &input, &source, &resolver_source, as_is)?;
+    let path = generated.or_else(|| manifest.source_path.clone());
+    Ok(compile_name(project, path.as_deref(), &input))
+}
+
+/// How uv, started in the held project directory, is told the compile
+/// input: relative to the project, so a directory swapped in at the
+/// project's path is never the one read (#499). An external requirements
+/// file never reaches here: planning hands uv the flattened text under
+/// `.tog` instead (#501).
+fn compile_name(project: &ProjectRoot, path: Option<&Path>, input: &str) -> String {
+    path.map(|path| path.strip_prefix(project.path()).unwrap_or(path))
+        .and_then(Path::to_str)
+        .unwrap_or(input)
+        .to_string()
+}
+
 /// Resolve ranged requirements to a hash-pinned lock via uv, cached in
 /// requirements.lock.txt and regenerated when the source input changes.
 /// uv runs in the project by path; the lock it writes is read back through
@@ -434,56 +483,54 @@ pub fn locked_requirements(
     ui::note(&format!(
         "{input} is not hash-pinned; resolving with the store uv..."
     ));
-    // Store-pinned uv, not host uv: a bare machine needs only tog.
-    let uv = python::realize_uv(door.store(), door.lease(), door.platform(), selected)?.join("uv");
-    let python = python::uv_interpreter(door.store(), door.lease(), door.platform(), selected)?;
-    // uv starts inside the held project directory, so an input in the
-    // project is named relative to it: a directory swapped in at the
-    // project's path is never the one read (#499). An external
-    // requirements file never reaches here: `read_plan` hands uv the
-    // flattened text under `.tog` instead (#501).
-    let compile_input = compile_path
-        .map(|path| path.strip_prefix(dir).unwrap_or(path))
-        .and_then(Path::to_str)
-        .unwrap_or(input);
-    let mut spec = DelegateSpec::new(&uv);
-    spec.args(["pip", "compile", compile_input, "--generate-hashes"]);
-    if !ui::verbose() {
-        // Quiet on success; on failure its words go into tog's error.
-        spec.arg("--quiet").capture();
-    }
-    spec.args(["--python-version", pyver])
-        .arg("--python")
-        .arg(&python)
-        .env("UV_PYTHON_DOWNLOADS", "never")
-        // Manifest index directives and ambient pip/uv index variables are
-        // never trusted. Resolution is explicitly public PyPI only.
-        .args(["--index-url", "https://pypi.org/simple"])
-        .args(["-o", "requirements.lock.txt"])
-        .lock_root(dir)
-        .env_remove("UV_INDEX_URL")
-        .env_remove("UV_DEFAULT_INDEX")
-        .env_remove("UV_EXTRA_INDEX_URL")
-        .env_remove("PIP_INDEX_URL")
-        .env_remove("PIP_EXTRA_INDEX_URL")
-        .env_remove("PIP_TRUSTED_HOST")
-        .env_remove("PIP_FIND_LINKS");
-    spec.trace();
-    let report = door
-        .reopen(DoorKind::MissingLock)
-        .run(spec)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store uv ({}): {e}", uv.display())))?;
-    if !report.status.success() {
-        return Err(python::uv_failure(
-            "uv pip compile failed",
-            report.status,
-            &report.stderr,
-        ));
-    }
+    // Store-pinned uv, not host uv: a bare machine needs only tog. It runs
+    // confined through a missing-lock door, and the lock is published with
+    // its signed record (none when an include lies outside the project).
+    let compile_input = compile_name(project, compile_path, input);
+    let uv = Uv::for_door(door, selected)?;
+    let args = resolve::compile_args(&compile_input, "requirements.lock.txt", pyver);
+    let record = if resolve::has_external_includes(project)? {
+        None
+    } else {
+        let shown: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+        Some(crate::tailors::record_spec(
+            &python::tailor::Python,
+            project,
+            uv.tool(),
+            &refs,
+        )?)
+    };
+    let mut missing_lock = door.reopen(DoorKind::MissingLock);
+    python::door::run_uv_checked(
+        &mut missing_lock,
+        UvRun {
+            uv: &uv,
+            lock_root: dir,
+            cwd: None,
+            args,
+            index: Index::PipCompile,
+            outputs: resolve::resolution_outputs(project)?,
+            target: UvTarget::Project {
+                record,
+                slot: Default::default(),
+            },
+            builds: Builds::Probe,
+            // Quiet on success; on failure its words go into tog's error.
+            capture: !ui::verbose(),
+            policy: None,
+        },
+        "uv pip compile failed",
+    )?;
+    drop(missing_lock);
+    project.regenerated_input(lock_path);
     // The stamp is the only file tog writes here, and it goes through the
     // held project descriptor, so a `.tog` swapped for a symlink is refused
-    // rather than followed. `requirements.lock.txt` beside it is uv's own
-    // write by pathname.
+    // rather than followed. `requirements.lock.txt` beside it is the door's
+    // publication.
     project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())?;
     project.read_input_string(lock_path)?.ok_or_else(|| {
         io::Error::new(
@@ -636,7 +683,9 @@ mod tests {
     }
 
     /// Plant the pinned uv as a script that writes the lock uv would have
-    /// produced, and an empty stand-in for the CPython uv is given as
+    /// produced, headed by the arguments it ran with (`# args:`) and the
+    /// input it read (`# input:`), the lock being the one file a confined
+    /// run may write; and an empty stand-in for the CPython uv is given as
     /// `--python`. Realization returns store objects it already has, so
     /// `locked_requirements` reaches its stamp write with no network.
     fn store_with_stub_uv(root: &Path) -> store::Store {
@@ -656,8 +705,8 @@ mod tests {
         let uv = staged.join("uv");
         std::fs::write(
             &uv,
-            "#!/bin/sh\necho \"$@\" > uv-args.txt\ncp \"$3\" uv-input.txt\n\
-             echo 'six==1.17.0 --hash=sha256:aaaa' > requirements.lock.txt\n",
+            "#!/bin/sh\n{ echo \"# args: $*\"; sed 's/^/# input: /' \"$3\"; \
+             echo 'six==1.17.0 --hash=sha256:aaaa'; } > requirements.lock.txt\n",
         )
         .unwrap();
         std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -687,8 +736,46 @@ mod tests {
         store
     }
 
+    /// The confined door's relay for a stub-uv test, cleared when the guard
+    /// drops; `None` (after a skip) when the host cannot confine a door.
+    fn stub_relay(test: &str) -> Option<RelayGuard> {
+        let relay = crate::kernel::resolve::testing::relay(test)?;
+        crate::kernel::resolve::door::RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        Some(RelayGuard)
+    }
+
+    struct RelayGuard;
+
+    impl Drop for RelayGuard {
+        fn drop(&mut self) {
+            crate::kernel::resolve::door::RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    /// What the stub uv recorded in the lock it wrote in `dir`: its
+    /// arguments, and the input it read.
+    fn stub_args(dir: &Path) -> String {
+        stub_lines(dir, "# args: ").trim_end().to_string()
+    }
+
+    fn stub_input(dir: &Path) -> String {
+        stub_lines(dir, "# input: ")
+    }
+
+    fn stub_lines(dir: &Path, prefix: &str) -> String {
+        std::fs::read_to_string(dir.join("requirements.lock.txt"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .map(|line| format!("{line}\n"))
+            .collect()
+    }
+
     #[test]
     fn lock_stamp_behind_a_symlinked_tog_is_refused() {
+        let Some(_relay) = stub_relay("lock_stamp_behind_a_symlinked_tog_is_refused") else {
+            return;
+        };
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -713,20 +800,9 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("not a real directory"), "{error}");
-        // uv's own lock landed in the project; only tog's stamp was refused.
-        assert!(project_dir.join("requirements.lock.txt").is_file());
-        // uv builds any sdist on tog's CPython, named explicitly: `uv pip
-        // compile` ignores UV_PYTHON (#210).
-        let python = store
-            .object_path(
-                &python::cpython_object_id(&selected(), Platform::host().unwrap()).unwrap(),
-            )
-            .join("bin/python3");
-        let args = std::fs::read_to_string(project_dir.join("uv-args.txt")).unwrap();
-        assert!(
-            args.contains(&format!("--python {}", python.display())),
-            "{args}"
-        );
+        // The door's transaction journals under `.tog`, so it refuses the
+        // whole publication: not even uv's lock lands.
+        assert!(!project_dir.join("requirements.lock.txt").exists());
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "wrote the lock stamp through the symlinked .tog"
@@ -738,6 +814,9 @@ mod tests {
     /// project's path is never the one compiled (#499).
     #[test]
     fn uv_compiles_the_held_project_inputs_after_a_swap() {
+        let Some(_relay) = stub_relay("uv_compiles_the_held_project_inputs_after_a_swap") else {
+            return;
+        };
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -749,7 +828,7 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
         std::fs::write(project_dir.join("requirements.txt"), "decoy==1.0\n").unwrap();
 
-        let _ = read_plan(
+        let result = read_plan(
             &project,
             &selected(),
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -759,13 +838,29 @@ mod tests {
                 crate::kernel::resolve::DoorKind::Planner,
             ),
         );
-        let args = std::fs::read_to_string(held.join("uv-args.txt")).unwrap();
+        drop(result);
+        let args = stub_args(&held);
         assert!(args.starts_with("pip compile requirements.txt "), "{args}");
-        assert_eq!(
-            std::fs::read_to_string(held.join("uv-input.txt")).unwrap(),
-            "six==1.17.0\n"
+        // uv builds any sdist on tog's CPython, named explicitly by the
+        // forced row: `uv pip compile` ignores UV_PYTHON (#210). The probe
+        // forbids every build, and the index is PyPI's.
+        let python = store
+            .object_path(
+                &python::cpython_object_id(&selected(), Platform::host().unwrap()).unwrap(),
+            )
+            .join("bin/python3");
+        assert!(
+            args.contains(&format!("--python {}", python.display())),
+            "{args}"
         );
-        assert!(!project_dir.join("uv-args.txt").exists());
+        assert!(args.contains("--no-build"), "{args}");
+        assert!(args.contains("--no-config"), "{args}");
+        assert!(
+            args.contains("--index-url https://pypi.org/simple"),
+            "{args}"
+        );
+        assert_eq!(stub_input(&held), "six==1.17.0\n");
+        assert!(!project_dir.join("requirements.lock.txt").exists());
     }
 
     /// A project whose `tog.toml` names a requirements file outside it.
@@ -826,6 +921,9 @@ mod tests {
     /// compiles the text tog read, written under `.tog` (#501).
     #[test]
     fn uv_compiles_the_external_requirements_tog_read() {
+        let Some(_relay) = stub_relay("uv_compiles_the_external_requirements_tog_read") else {
+            return;
+        };
         let temp = crate::kernel::testutil::TempDir::new();
         let (project_dir, external) = external_requirements_project(&temp.0);
         let store = store_with_stub_uv(&temp.0.join("store"));
@@ -843,15 +941,12 @@ mod tests {
                 crate::kernel::resolve::DoorKind::Planner,
             ),
         );
-        let args = std::fs::read_to_string(project_dir.join("uv-args.txt")).unwrap();
+        let args = stub_args(&project_dir);
         assert!(
             args.starts_with(&format!("pip compile {MANIFEST_REQUIREMENTS} ")),
             "{args}"
         );
-        assert_eq!(
-            std::fs::read_to_string(project_dir.join("uv-input.txt")).unwrap(),
-            "six==1.17.0\n"
-        );
+        assert_eq!(stub_input(&project_dir), "six==1.17.0\n");
     }
 
     /// An in-project requirements file whose include lies beside the
@@ -860,6 +955,10 @@ mod tests {
     /// read, so the include replaced after that read is not seen (#501).
     #[test]
     fn uv_compiles_the_flattened_text_when_an_include_is_external() {
+        let Some(_relay) = stub_relay("uv_compiles_the_flattened_text_when_an_include_is_external")
+        else {
+            return;
+        };
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -889,15 +988,12 @@ mod tests {
                 crate::kernel::resolve::DoorKind::Planner,
             ),
         );
-        let args = std::fs::read_to_string(project_dir.join("uv-args.txt")).unwrap();
+        let args = stub_args(&project_dir);
         assert!(
             args.starts_with(&format!("pip compile {MANIFEST_REQUIREMENTS} ")),
             "{args}"
         );
-        assert_eq!(
-            std::fs::read_to_string(project_dir.join("uv-input.txt")).unwrap(),
-            "six==1.17.0\n"
-        );
+        assert_eq!(stub_input(&project_dir), "six==1.17.0\n");
     }
 
     /// A `setup.py egg_info` probe that cannot run must not abort planning:
