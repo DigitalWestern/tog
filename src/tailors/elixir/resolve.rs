@@ -13,7 +13,6 @@ use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -74,7 +73,6 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             online: true,
-            hex_home: None,
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -106,7 +104,6 @@ pub(crate) fn update(
             lock_root: project.path(),
             args,
             online: true,
-            hex_home: None,
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -118,16 +115,15 @@ pub(crate) fn update(
 
 /// The consistency gate: `mix deps.get --check-locked`, exit status only
 /// (it evaluates mix.exs, delegated trust and never artifact authority).
-/// It needs the Hex registry, so it reaches the mirror, with a persistent
-/// planner `HEX_HOME` to keep the registry cache warm. Nothing in the
+/// It needs the Hex registry, so it reaches the mirror. Its Hex home is
+/// private scratch: project code must never seed configuration or code for
+/// another run. Registry reuse belongs to the proxy cache. Nothing in the
 /// project may change.
 fn check_locked(
     door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     beam_obj: &Path,
 ) -> io::Result<()> {
-    let planner_home = door.store().root.join("planner-hexhome");
-    fs::create_dir_all(&planner_home)?;
     let out = run_mix(
         door,
         MixRun {
@@ -135,7 +131,6 @@ fn check_locked(
             lock_root: project.path(),
             args: &["mix", "deps.get", "--check-locked"],
             online: true,
-            hex_home: Some(planner_home.canonicalize()?),
             files: Vec::new(),
             publish: MixPublish::Detached,
         },
@@ -167,7 +162,6 @@ fn parse_lock(
             lock_root: project.path(),
             args: &["elixir", &helper, "lock", &lock_copy],
             online: false,
-            hex_home: None,
             files: vec![
                 (PathBuf::from("helper.exs"), HELPER.as_bytes().to_vec()),
                 (PathBuf::from("mix.lock"), lock.as_bytes().to_vec()),
@@ -273,7 +267,6 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             online: true,
-            hex_home: None,
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, slot.clone())),
@@ -303,6 +296,7 @@ mod tests {
     use crate::kernel::resolve::DoorKind;
     use crate::kernel::testutil::TempDir;
     use crate::tailors::elixir::registry::REPO_HOST;
+    use std::fs;
 
     /// A harness whose upstream answers repo.hex.pm from the recorded Hex
     /// rows, and whose proxy every door in this thread uses while it
@@ -410,11 +404,27 @@ mod tests {
             "deps were fetched into the project"
         );
 
+        // A prior project's writable Hex home must never enter this run.
+        let shared = harness.store.root.join("planner-hexhome");
+        fs::create_dir_all(&shared).unwrap();
+        let marker = dir.join("cross-project-code-ran");
+        fs::write(
+            shared.join("hex.config"),
+            format!(
+                "File.write!({:?}, \"injected\"); []",
+                marker.to_str().unwrap()
+            ),
+        )
+        .unwrap();
         let ((planned, ledgers), recorded) = through_door(harness, DoorKind::Planner, |door| {
             let planned = plan_elixir(door, &held, &beam, &selected);
             (planned, door.take_kept_ledgers())
         });
         let (plan, _, basis) = planned.unwrap();
+        assert!(
+            !marker.exists(),
+            "a previous project injected Hex config code"
+        );
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(plan.deps.len(), 1, "{:?}", plan.deps);
         assert_eq!(plan.deps[0].version, "1.4.5");

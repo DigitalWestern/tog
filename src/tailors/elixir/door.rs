@@ -49,9 +49,6 @@ pub(crate) struct MixRun<'a> {
     /// Reach repo.hex.pm through the mirror. `false` is a run with no route
     /// at all and `HEX_OFFLINE=1`.
     pub online: bool,
-    /// A persistent `HEX_HOME` under the store (the planner's registry
-    /// cache), bound read-write. `None` keeps Hex's home in the scratch.
-    pub hex_home: Option<PathBuf>,
     /// Files written into the scratch directory before the run, relative
     /// to it.
     pub files: Vec<(PathBuf, Vec<u8>)>,
@@ -81,9 +78,6 @@ fn spec(run: &MixRun<'_>) -> DelegateSpec {
     if run.online {
         set.retain(|(key, _)| key != "HEX_OFFLINE");
     }
-    if let Some(home) = &run.hex_home {
-        set.push(("HEX_HOME".to_string(), home.display().to_string()));
-    }
     spec.force_env(ENV_REMOVE_PREFIXES, ENV_REMOVE, &set);
     spec.capture();
     spec
@@ -107,7 +101,6 @@ fn in_scratch(arg: &OsString, scratch: &Path) -> OsString {
 fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     let mut confined = ConfinedSpec::new("elixir", "mix", WHY);
     confined.store_reads = vec![run.beam_obj.to_path_buf()];
-    confined.cache_roots = run.hex_home.iter().cloned().collect();
     confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
@@ -118,17 +111,14 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
         Vec::new()
     };
     let online = run.online;
-    let own_hex_home = run.hex_home.is_none();
     let files = std::mem::take(&mut run.files);
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
         let at = |sub: &str| OsString::from(wire.scratch.join(sub));
         let mut env: Vec<(OsString, OsString)> = vec![
             ("MIX_DEPS_PATH".into(), at("deps")),
             ("MIX_HOME".into(), at("mix")),
+            ("HEX_HOME".into(), at("hex")),
         ];
-        if own_hex_home {
-            env.push(("HEX_HOME".into(), at("hex")));
-        }
         // A run with no route gets no proxy at all: Hex is offline.
         if online {
             env.extend(
@@ -208,23 +198,22 @@ pub(crate) fn run_mix_checked(
 mod tests {
     use super::*;
 
-    fn run(online: bool, hex_home: Option<PathBuf>) -> MixRun<'static> {
+    fn run(online: bool) -> MixRun<'static> {
         MixRun {
             beam_obj: Path::new("/store/obj/beam"),
             lock_root: Path::new("/work/project"),
             args: &["mix", "deps.get"],
             online,
-            hex_home,
             files: Vec::new(),
             publish: MixPublish::Detached,
         }
     }
 
     /// Online, Hex is not offline and its home is the scratch's (set by
-    /// the wiring); offline, `HEX_OFFLINE=1`. A planner home is named.
+    /// the wiring); offline, `HEX_OFFLINE=1`.
     #[test]
     fn the_spec_sets_offline_only_without_a_route() {
-        let online = format!("{:?}", spec(&run(true, None)).command());
+        let online = format!("{:?}", spec(&run(true)).command());
         assert!(!online.contains("HEX_OFFLINE"), "{online}");
         assert!(!online.contains("HEX_HOME"), "{online}");
         assert!(!online.contains(SCRATCH), "{online}");
@@ -232,16 +221,8 @@ mod tests {
             online.contains("MIX_ARCHIVES=\"/store/obj/beam/archives\""),
             "{online}"
         );
-        let offline = format!("{:?}", spec(&run(false, None)).command());
+        let offline = format!("{:?}", spec(&run(false)).command());
         assert!(offline.contains("HEX_OFFLINE=\"1\""), "{offline}");
-        let homed = format!(
-            "{:?}",
-            spec(&run(true, Some(PathBuf::from("/store/planner-hexhome")))).command()
-        );
-        assert!(
-            homed.contains("HEX_HOME=\"/store/planner-hexhome\""),
-            "{homed}"
-        );
     }
 
     #[test]

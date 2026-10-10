@@ -3692,8 +3692,9 @@ Bundler and mix onto the door:
   and tog verifies both checksums from mix.lock when it realizes the
   deps. No `http_proxy` is set, for the same reason as Bundler's.
   `MIX_DEPS_PATH`, `MIX_HOME` and `HEX_HOME` are the run's scratch;
-  the planner gate keeps its persistent `planner-hexhome` as a cache
-  root. The mix forced row now unsets only `MIX_EXS`: it unset tog's own
+  the planner gate also gets a fresh Hex home. The proxy caches registry
+  responses without sharing executable Hex configuration between projects.
+  The mix forced row now unsets only `MIX_EXS`: it unset tog's own
   `MIX_ARCHIVES` too, which left mix without Hex.
 - **The planner.** Ruby's two helper modes (`check`, `plan`) and
   Elixir's lock parse run with no route and `HEX_OFFLINE=1`. Elixir's
