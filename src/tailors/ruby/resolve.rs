@@ -335,11 +335,14 @@ mod tests {
                 reply.text()
             );
             let report = session.finish();
-            assert!(report
-                .facts
-                .exceptions
-                .iter()
-                .any(|fact| fact.kind == policy::WEAK_INTEGRITY));
+            assert_eq!(
+                report
+                    .facts
+                    .exceptions
+                    .iter()
+                    .any(|fact| fact.kind == policy::WEAK_INTEGRITY),
+                !denied
+            );
             assert_eq!(report.facts.failure().is_some(), denied);
         }
         let selected = super::super::shipped_selection().unwrap();
