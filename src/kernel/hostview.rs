@@ -1059,9 +1059,12 @@ pub(crate) fn host_build_inputs() -> io::Result<String> {
 /// `host` with the tree at `dev` folded in, by the same stat-based walk.
 fn with_dev_files(host: &str, dev: &Path) -> io::Result<String> {
     use sha2::Digest as _;
+    // The resolver starts at `/`. Preserve symlinks so a linked fixture
+    // root is still refused, while giving relative paths their real base.
+    let dev = std::path::absolute(dev)?;
     let mut digest = Fingerprint::dev_files(host);
-    if digest.entry(dev, dev)? {
-        digest.tree(dev, dev)?;
+    if digest.entry(&dev, &dev)? {
+        digest.tree(&dev, &dev)?;
     }
     Ok(hex::encode(digest.digest.finalize()))
 }
@@ -1401,6 +1404,43 @@ mod tests {
         with_dev_files(&host, &dev).unwrap();
         symlink("loop.h", dev.join("loop.h")).unwrap();
         assert!(with_dev_files(&host, &dev).is_err());
+    }
+
+    #[test]
+    fn relative_dev_files_refuse_root_and_nested_directory_links() {
+        use std::os::unix::fs::symlink;
+        let temp = temp_dir("relative-dev-files");
+        let dev = temp.0.join("dev");
+        let real = temp.0.join("real");
+        fs::create_dir(&dev).unwrap();
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("probe.h"), b"int probe;\n").unwrap();
+        // Build a relative spelling without changing the process-wide cwd.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(temp.0.strip_prefix("/").unwrap());
+        let host = "0".repeat(64);
+        symlink("../real/probe.h", dev.join("probe.h")).unwrap();
+        let before = with_dev_files(&host, &relative.join("dev")).unwrap();
+        fs::write(real.join("probe.h"), b"int probe;\nint changed;\n").unwrap();
+        assert_ne!(
+            with_dev_files(&host, &relative.join("dev")).unwrap(),
+            before
+        );
+        symlink("../real", dev.join("include")).unwrap();
+        symlink("dev", temp.0.join("dev-link")).unwrap();
+        for fixture in [relative.join("dev"), relative.join("dev-link")] {
+            let error = with_dev_files(&host, &fixture).unwrap_err();
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Refused),
+                "{error}"
+            );
+            assert!(error.to_string().contains("symlink to a directory"));
+        }
     }
 
     /// A fake host with one of each entry the `RuntimeOnly` rules decide
