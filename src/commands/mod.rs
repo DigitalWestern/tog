@@ -276,7 +276,7 @@ fn writes_closures(command: &cli::Command) -> bool {
 /// load in the process reads it, so no verb can load a policy without it.
 pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> {
     use cli::Command::*;
-    crate::kernel::policy::request_strict(sync.strict);
+    let _strict = crate::kernel::policy::request_strict(sync.strict);
     install_tailor_tables(&command);
     // Maintenance commands need no host-platform validation here: GC must
     // stay usable on a copied store from a host that cannot realize its

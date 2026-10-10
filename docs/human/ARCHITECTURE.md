@@ -690,7 +690,12 @@ Scopes belong to their creating thread and cannot be moved or shared with
 other threads. Dropping a scope restores the enclosing scope on that thread,
 and a read outside every scope on that thread sees the default policy plus
 the requested strictness. Workers receive an explicit policy snapshot.
-An early read never pins the policy for a later operation. Object-affecting exceptions are written into store metadata and
+An early read never pins the policy for a later operation. Each dispatch
+holds its own thread-bound `--strict` guard, so a later dispatch and nested
+dispatch can choose their own flag. This supports synchronous scopes.
+Interleaved tasks on one thread and automatic worker inheritance need
+explicit operation Context settings. Attribution still serializes owners
+through its process-global frame stack. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional

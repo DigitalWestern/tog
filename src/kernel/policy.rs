@@ -693,21 +693,49 @@ fn apply_requested_strictness(
     }
 }
 
-/// Whether `--strict` was on the command line. Recorded once by the
-/// dispatcher before any verb runs, so every policy load in the process
-/// reads the same answer whichever verb loads first.
-static REQUESTED_STRICT: OnceLock<bool> = OnceLock::new();
+thread_local! {
+    static STRICT_SCOPES: std::cell::RefCell<Vec<(u64, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
-/// Record `--strict` for every policy load in this process. The first call
-/// wins: the dispatcher calls it once, before any verb, and
-/// nothing else should, because a second answer would mean two loads in
-/// one process could disagree about the flag.
-pub fn request_strict(strict: bool) {
-    let _ = REQUESTED_STRICT.set(strict);
+/// The command-line strict flag for one dispatch on the creating thread.
+/// Policy loads snapshot it while this guard is held. Nested dispatches
+/// restore their enclosing flag, and workers receive explicit policies.
+///
+/// ```compile_fail
+/// let guard = tog::kernel::policy::request_strict(true);
+/// std::thread::spawn(move || drop(guard));
+/// ```
+///
+/// ```compile_fail
+/// let guard = tog::kernel::policy::request_strict(true);
+/// std::thread::scope(|scope| { scope.spawn(|| println!("{guard:?}")); });
+/// ```
+#[must_use = "the strict flag is in force only while its dispatch guard is held"]
+#[derive(Debug)]
+pub struct StrictScope {
+    id: u64,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for StrictScope {
+    fn drop(&mut self) {
+        STRICT_SCOPES.with(|scopes| scopes.borrow_mut().retain(|(id, _)| *id != self.id));
+    }
+}
+
+/// Install `--strict` for this dispatch, including an explicit false flag.
+/// A later dispatch loads its own flag rather than inheriting the first one.
+pub fn request_strict(strict: bool) -> StrictScope {
+    let id = NEXT_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
+    STRICT_SCOPES.with(|scopes| scopes.borrow_mut().push((id, strict)));
+    StrictScope {
+        id,
+        _thread_bound: std::marker::PhantomData,
+    }
 }
 
 fn requested_strict() -> bool {
-    REQUESTED_STRICT.get().copied().unwrap_or(false)
+    STRICT_SCOPES.with(|scopes| scopes.borrow().last().is_some_and(|(_, strict)| *strict))
 }
 
 /// The policy one operation loaded, in force from `init` until this is
@@ -2377,6 +2405,67 @@ deny = ["git-dependency"]"#,
         })
         .is_err());
         assert!(denied(&effective(), WEAK_INTEGRITY));
+    }
+
+    #[test]
+    fn strict_scopes_follow_each_dispatch_and_restore() {
+        let _env = test_env_lock();
+        let _strict_env = EnvVarGuard::remove("TOG_STRICT");
+        for requested in [false, true, false] {
+            let _dispatch = request_strict(requested);
+            assert_eq!(requested_strict(), requested);
+            assert_eq!(strict(), requested);
+        }
+        assert!(!requested_strict());
+        let outer = request_strict(true);
+        {
+            let _inner = request_strict(false);
+            assert!(!strict());
+        }
+        assert!(strict());
+        let inner = request_strict(false);
+        drop(outer);
+        assert!(!strict());
+        drop(inner);
+        assert!(!requested_strict());
+        assert!(std::panic::catch_unwind(|| {
+            let _dispatch = request_strict(true);
+            assert!(strict());
+            panic!("dispatch unwind");
+        })
+        .is_err());
+        assert!(!strict());
+        let fail = || -> io::Result<()> {
+            let _dispatch = request_strict(true);
+            Err(io::Error::other("dispatch failure"))
+        };
+        assert!(fail().is_err());
+        assert!(!strict());
+    }
+
+    #[test]
+    fn strict_scopes_do_not_cross_dispatch_threads() {
+        let _env = test_env_lock();
+        let _strict_env = EnvVarGuard::remove("TOG_STRICT");
+        let _owner = request_strict(true);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let unscoped = strict();
+            let _other = request_strict(false);
+            let scoped = strict();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            (unscoped, scoped)
+        });
+        ready_rx.recv().unwrap();
+        let owner = strict();
+        release_tx.send(()).unwrap();
+        let (unscoped, scoped) = worker.join().unwrap();
+        assert!(owner);
+        assert!(!unscoped);
+        assert!(!scoped);
+        assert!(strict());
     }
 
     #[test]
