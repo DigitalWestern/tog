@@ -905,7 +905,10 @@ fn yarn_manifest_additions_and_removals_report_stale_in_json() {
         );
         assert_eq!(fs::read(project.path().join("yarn.lock")).unwrap(), lock);
         assert!(!project.path().join("tog-toolchain.toml").exists());
-        assert!(!project.path().join(".tog").exists());
+        assert_eq!(
+            fs::read_dir(project.path().join(".tog")).unwrap().count(),
+            0
+        );
     }
 }
 
