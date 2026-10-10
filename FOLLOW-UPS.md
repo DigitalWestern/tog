@@ -103,3 +103,5 @@ None open.
 
 - #649: Validate the documented signing workflow on fresh Linux runners and adversarial inputs.
 - #650: Publish trusted admission results on the exact verified candidate commit.
+
+- #257: Finish explicit Context ownership and independent attribution. Thread-bound policy, key and strictness scopes support synchronous operations.
