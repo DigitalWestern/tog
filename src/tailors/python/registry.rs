@@ -72,11 +72,9 @@ impl RegistryProtocol for PypiRegistry {
 
     fn classify(&self, url: &Url) -> RequestClass {
         if url.host_str() == Some(FILES_HOST) {
-            if url.path().ends_with(METADATA_SUFFIX) {
-                RequestClass::Metadata
-            } else {
-                RequestClass::Artifact
-            }
+            // Wheel metadata is immutable, claimed content too. Routing it
+            // as revalidatable metadata would bypass digest verification.
+            RequestClass::Artifact
         } else {
             RequestClass::Index
         }
@@ -120,7 +118,7 @@ impl RegistryProtocol for PypiRegistry {
 
     /// PyPI publishes a digest for every file it serves.
     fn expects_claim(&self, url: &Url) -> bool {
-        url.host_str() == Some(FILES_HOST) && !url.path().ends_with(METADATA_SUFFIX)
+        url.host_str() == Some(FILES_HOST)
     }
 }
 
@@ -392,9 +390,9 @@ mod tests {
         let metadata = Url::parse(&format!("https://{FILES_HOST}{WHEEL}.metadata")).unwrap();
         assert_eq!(PYPI_REGISTRY.classify(&page), RequestClass::Index);
         assert_eq!(PYPI_REGISTRY.classify(&wheel), RequestClass::Artifact);
-        assert_eq!(PYPI_REGISTRY.classify(&metadata), RequestClass::Metadata);
+        assert_eq!(PYPI_REGISTRY.classify(&metadata), RequestClass::Artifact);
         assert!(PYPI_REGISTRY.expects_claim(&wheel));
-        assert!(!PYPI_REGISTRY.expects_claim(&metadata));
+        assert!(PYPI_REGISTRY.expects_claim(&metadata));
         assert!(!PYPI_REGISTRY.expects_claim(&page));
     }
 
@@ -458,6 +456,94 @@ mod tests {
                 &body
             )
             .is_empty());
+    }
+
+    #[test]
+    fn mismatched_wheel_metadata_hard_fails_and_never_poison_caches() {
+        use crate::kernel::policy::Policy;
+        use crate::kernel::resolve::session::Mode;
+        use crate::kernel::resolve::testing::{
+            get, stored_rows, Harness, Reach, TEST_ORIGIN_PUBLIC,
+        };
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+        use sha2::{Digest as _, Sha256};
+        let rows = stored_rows("python", "pypi-metadata-mismatch");
+        let harness = Harness::serving(
+            "pypi-metadata-mismatch",
+            Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]),
+            &[INDEX_HOST, FILES_HOST],
+            &rows.0.to_string_lossy(),
+        );
+        let path = format!("{WHEEL}.metadata");
+        let poisoned = b"Name: six\nVersion: 1.16.0\nRequires-Dist: injected\n";
+        harness
+            .upstream
+            .set(&path, Behavior::Reply(Reply::new(200, poisoned)));
+        let mut config = harness.config(Policy::default(), Mode::Online);
+        config.routes = vec![route().unwrap()];
+        let (session, address) = harness.open(config);
+        let fetch = |path: &str| {
+            get(
+                &address,
+                &format!(
+                    "{}{}",
+                    url::Url::parse(&address.route_base(ROUTE_ID))
+                        .unwrap()
+                        .path(),
+                    path.trim_start_matches('/')
+                ),
+                "",
+            )
+        };
+        assert_eq!(fetch("/simple/six/").status, 200);
+        assert_eq!(fetch(&path).status, 502);
+        let report = session.finish();
+        assert!(!report.facts.hard_failures.is_empty());
+        let poisoned_hash = hex::encode(Sha256::digest(poisoned));
+        assert!(!harness
+            .store
+            .root
+            .join("cache/sha256")
+            .join(poisoned_hash)
+            .exists());
+        assert!(report
+            .ledger
+            .entries()
+            .any(|entry| entry.status == 502 && !entry.verified));
+
+        // A later session must fetch and verify the restored sidecar,
+        // rather than serving a poisoned metadata-cache copy.
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/proxy/registry/python");
+        let good = std::fs::read(fixtures.join(format!("{FILES_HOST}{path}.body"))).unwrap();
+        harness
+            .upstream
+            .set(&path, Behavior::Reply(Reply::new(200, &good)));
+        let mut config = harness.config(Policy::default(), Mode::Online);
+        config.routes = vec![route().unwrap()];
+        let (session, address) = harness.open(config);
+        let fetch = |path: &str| {
+            get(
+                &address,
+                &format!(
+                    "{}{}",
+                    url::Url::parse(&address.route_base(ROUTE_ID))
+                        .unwrap()
+                        .path(),
+                    path.trim_start_matches('/')
+                ),
+                "",
+            )
+        };
+        assert_eq!(fetch("/simple/six/").status, 200);
+        let response = fetch(&path);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, good);
+        assert!(session
+            .finish()
+            .ledger
+            .entries()
+            .any(|entry| entry.verified));
     }
 
     #[test]

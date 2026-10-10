@@ -310,11 +310,11 @@ direct URL as `unattested-index`. The default index is forced to PyPI on
 every invocation, so a project's `[[tool.uv.index]]` default never
 replaces it. Every run starts with `--no-build` (the probe): no
 third-party code runs in it. When uv refuses because something must be
-built, the project's own code has its metadata built first, with its
-backend from wheels only, and anything else is `resolution-build`,
-refused when policy denies it and otherwise recorded before the run is
-repeated with builds allowed. uv's cache is created for one door
-operation and removed after it. A compiled lock is headed by `tog` in
+built or its metadata prepared, `resolution-build` permission is required
+before any backend runs, including the project's own. The permission also
+covers dynamic and transitive build requirements. A denial stops the
+operation. An allowed rerun records the exception in its receipt. uv's cache is private to each attempt. An allowed retry starts with an
+empty cache, so its receipt records every contributing fetch and exception. A compiled lock is headed by `tog` in
 place of uv's command line (`--custom-compile-command`), so the same
 resolution writes the same bytes on every machine. Python's resolution
 outputs are `pyproject.toml`, `uv.lock`, `requirements.in`,
@@ -517,9 +517,11 @@ The census, by door kind:
 `tog x` resolves a registry tool into `~/.tog/x` through a door of its
 own kind, confined the same way.
 
-Not covered, by design: `tog build` and `tog run` run project code in the
-build sandbox, which has no network and records no ledger, and an install
-script runs there too. They are builds, not resolutions.
+`tog build` and installation builds run project code in the build sandbox,
+which denies network access and records no resolution ledger. `tog run`
+uses the projected runtime and dependencies but executes on the host,
+without a sandbox or network restriction. Run untrusted tests only in a
+separate disposable job that holds no signing key or other secrets.
 
 ## Toolchain lock
 

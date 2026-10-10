@@ -21,7 +21,7 @@ pub(crate) const OUTPUTS: [&str; 2] = ["Gemfile", "Gemfile.lock"];
 /// Installed gems and Bundler's own state in the project: never copied
 /// into the snapshot, never diffed. A lock-only Bundler reads neither
 /// (`BUNDLE_IGNORE_CONFIG=1`, gems in the run's scratch).
-const EXCLUDE: [&str; 2] = ["vendor/bundle", ".bundle"];
+pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".tog"];
 
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there, the one tog-written
@@ -50,6 +50,8 @@ pub(crate) struct RubyRun<'a> {
     /// Reach rubygems.org through the mirror. `false` is a run with no
     /// route at all: full network denial, for the helper's lock checks.
     pub online: bool,
+    /// The exact input generation this planner consumed, if any.
+    pub inputs: Option<&'a crate::comforter::join::Digests>,
     /// `BUNDLE_FROZEN`: false for an edit, which must write the lock.
     pub frozen: bool,
     /// Files written into the scratch directory before the run, relative
@@ -71,7 +73,22 @@ pub(crate) fn ruby_tool(selected: &Selected) -> io::Result<crate::kernel::resolv
 /// Ruby alone on `PATH` beside the system directories, its output
 /// captured. The gem paths are the run's scratch, set by the wiring.
 fn spec(run: &RubyRun<'_>) -> DelegateSpec {
-    let mut spec = DelegateSpec::new(run.ruby_obj.join("bin").join(run.args[0]));
+    // RubyGems' bundle launcher starts /bin/sh. Ubuntu's dash drops
+    // environment keys containing ':' or '/', including Bundler's mirror
+    // key. Execute its Ruby section directly so the forced mirror survives.
+    let bundle = run.args[0] == "bundle";
+    let mut spec =
+        DelegateSpec::new(
+            run.ruby_obj
+                .join("bin")
+                .join(if bundle { "ruby" } else { run.args[0] }),
+        );
+    if bundle {
+        spec.args([
+            OsString::from("-x"),
+            run.ruby_obj.join("bin/bundle").into_os_string(),
+        ]);
+    }
     spec.args(&run.args[1..]).lock_root(run.lock_root);
     spec.env(
         "PATH",
@@ -101,6 +118,8 @@ fn in_scratch(arg: &OsString, scratch: &Path) -> OsString {
 pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     let mut confined = ConfinedSpec::new("ruby", "bundler", WHY);
     confined.name = "bundler";
+    confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
+    confined.complete_inputs = true;
     confined.store_reads = vec![run.ruby_obj.to_path_buf()];
     confined.exclude = EXCLUDE
         .iter()
@@ -162,8 +181,17 @@ pub(crate) fn run_ruby(
     mut run: RubyRun<'_>,
 ) -> io::Result<DelegateReport> {
     let detached = matches!(run.publish, RubyPublish::Detached);
+    let held = crate::kernel::fsroot::ProjectRoot::held_at(run.lock_root)?
+        .map(Ok)
+        .unwrap_or_else(|| crate::kernel::fsroot::ProjectRoot::open(run.lock_root))?;
+    let captured = run
+        .inputs
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| super::resolve::resolution_basis(&held))?;
     let spec = spec(&run);
-    let confined = ruby_confined(&mut run)?;
+    let mut confined = ruby_confined(&mut run)?;
+    confined.expected_inputs = captured;
     let report = door.run_confined(spec, confined).map_err(|e| {
         io::Error::new(
             e.kind(),
@@ -220,11 +248,19 @@ mod tests {
             lock_root: Path::new("/work/project"),
             args: &["bundle", "lock"],
             online: true,
+            inputs: None,
             frozen: false,
             files: Vec::new(),
             publish: RubyPublish::Detached,
         };
         let command = format!("{:?}", spec(&run).command());
+        let spec = spec(&run);
+        let direct = spec.command();
+        assert_eq!(direct.get_program(), "/store/obj/ruby/bin/ruby");
+        assert_eq!(
+            direct.get_args().collect::<Vec<_>>(),
+            vec!["-x", "/store/obj/ruby/bin/bundle", "lock"],
+        );
         assert!(
             command.contains("PATH=\"/store/obj/ruby/bin:/usr/bin:/bin\""),
             "{command}"
