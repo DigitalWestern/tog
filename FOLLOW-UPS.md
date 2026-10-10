@@ -35,6 +35,8 @@ None open.
 
 ## Open work, each its own pull request
 
+- **#654: dev fixture root spellings.** Refuse linked roots with a trailing slash or final dot by normalizing components without resolving symlinks.
+
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
 - **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
