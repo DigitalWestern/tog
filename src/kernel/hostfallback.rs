@@ -20,7 +20,9 @@ use std::io;
 
 /// The `build_view` input of an identity whose native builds ran against
 /// the C runtime alone.
-pub(crate) const RUNTIME_ONLY_VIEW: &str = "runtime-only/2";
+// /3 invalidates builds that could link a lone lib*.so name before
+// hostview curated such directories outside the plugin allowlist (#559).
+pub(crate) const RUNTIME_ONLY_VIEW: &str = "runtime-only/3";
 /// The `build_view` input of an identity where at least one build fell
 /// back to the whole host.
 pub(crate) const HOST_FALLBACK_VIEW: &str = "host-fallback/1";

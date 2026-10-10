@@ -627,6 +627,18 @@ itself never writes one. CI that must not write a lock runs `tog --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
 single command, `tog --frozen build`, whose implicit sync runs frozen.
 
+On Linux, Ruby native extensions, Python sdists that use Rust or pinned native
+libraries, and Node install scripts first build with a restricted view of host
+libraries. A lone `lib*.so` symlink or linker script now makes its library
+subdirectory restricted too. Known plugin directories keep the names programs
+load. A plugin directory missing from the allowlist can fail until it is added.
+If the first build fails, a retry against the whole host requires policy to
+permit `host-build-inputs`, and records that exception. Policies can deny that
+retry. This change advances the shared view identity to `runtime-only/3`.
+The next sync rebuilds affected environments or wheels once instead of reusing
+objects built under the older view. See [host-view limitations](LIMITATIONS.md)
+for the plugin allowlist and the remaining explicitly reachable host paths.
+
 ## Inspect verbs
 
 **status** compares each closure's recorded inputs against the files on disk

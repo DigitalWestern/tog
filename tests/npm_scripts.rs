@@ -599,7 +599,7 @@ fn benign_install_script_runs_and_output_is_captured() {
         let inputs = object_inputs(dir, &env);
         assert_eq!(
             inputs["build_view"].as_str(),
-            Some("runtime-only/2"),
+            Some("runtime-only/3"),
             "{inputs:?}"
         );
         assert!(!inputs.contains_key("host_fallback"), "{inputs:?}");

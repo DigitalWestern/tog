@@ -1638,9 +1638,9 @@ mod tests {
             ),
             (
                 "192a4c7b501dd09eb3c76a3ebd427e8077fbda6e-ruby-3.4.6".to_string(),
-                // runtime-only/2: native extensions see the C runtime alone;
+                // runtime-only/3: native extensions see the C runtime alone;
                 // native none: the plan names no native library set.
-                "b20b2d01edb86ced8eb3b8d0a56c07a51a07a2d6-gems-1".to_string(),
+                "0aeb9ec439b4e6a0cb5ce2b150a4ab7d4d15541f-gems-1".to_string(),
             )
         );
     }
@@ -1651,7 +1651,7 @@ mod tests {
     fn linux_gem_identity_names_the_runtime_only_view() {
         let plan = linux_test_plan();
         let linux = ruby_gems_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu), &plan, None);
-        assert_eq!(linux.inputs["build_view"], "runtime-only/2");
+        assert_eq!(linux.inputs["build_view"], "runtime-only/3");
         let darwin = ruby_gems_identity(&pin_spec(Platform::Aarch64AppleDarwin), &plan, None);
         assert!(!darwin.inputs.contains_key("build_view"), "{darwin:?}");
     }
