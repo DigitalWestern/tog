@@ -44,6 +44,9 @@ None open.
 
 ## Open work, each its own pull request
 
+- **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
+- **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
+- **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
   - #615 design questions: SRI candidate choice, cargo's symlinked members, the ecosystem-arm check in `kernel/provider`, the `hard_link_target` doc.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
@@ -79,7 +82,7 @@ None open.
   unblocks the authenticated parts of `docs/agent/DESIGNS.md` §2 (WP3,
   #404) and §4 (WP5, #405); §2 PR 0, the provider evidence spike, comes
   first.
-- **#560: e2e layouts with HOME inside the project.** Python and Ruby tests that the PR 7 and PR 8 doors will refuse. One checklist.
+- **#560: e2e layouts with HOME inside the project.** The Python and Ruby tests moved their projects beside HOME in #205 and #206. Left: the harness guard in `tests/common/mod.rs`.
 - **macOS arm64 gate. Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
   (after #305); `tests/supervise_signals.rs` (#57) and the Mach allow-list

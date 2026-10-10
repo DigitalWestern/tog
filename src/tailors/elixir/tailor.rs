@@ -41,12 +41,15 @@ fn realize_and_project(
 ) -> io::Result<(PathBuf, PathBuf)> {
     let (activity, platform, store) = (&ctx.activity, ctx.platform, &ctx.store);
     let beam = elixir::realize_runtime(store, activity, platform, toolchain)?;
-    let (plan, lock_sha256) = elixir::plan_elixir(
-        &mut ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?,
-        project,
-        &beam,
-        toolchain,
-    )?;
+    let mut door = ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?;
+    let (plan, lock_sha256, basis) = elixir::plan_elixir(&mut door, project, &beam, toolchain)?;
+    // The planner checks ran detached; their ledgers are evidence of this
+    // sync's planning, rooted here so GC keeps them.
+    let ledgers = door.take_kept_ledgers();
+    drop(door);
+    for objects in &ledgers {
+        crate::kernel::resolve::ledger::root(store, activity, project, objects)?;
+    }
     let deps = elixir::realize_deps(store, activity, platform, &plan, &beam, toolchain)?;
     let projection = elixir::project_elixir_env(
         activity,
@@ -56,8 +59,10 @@ fn realize_and_project(
         &deps,
         &plan,
         &lock_sha256,
+        &basis,
         fresh,
         toolchain,
+        &ledgers,
         attribution,
     )?;
     Ok((beam, projection))
@@ -83,6 +88,30 @@ impl Tailor for Elixir {
 
     fn id(&self) -> &'static str {
         "elixir"
+    }
+
+    /// mix.exs and mix.lock: what `mix deps.get` resolves from and
+    /// writes. Hex's own configuration is the run's scratch, never the
+    /// host's.
+    fn resolution_outputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        Ok(vec!["mix.exs".into(), "mix.lock".into()])
+    }
+
+    /// The `config/*.exs` files mix evaluates before it reads the deps.
+    fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+        super::resolve::resolution_inputs(project)
+    }
+
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        elixir::attest_project(door, project, &beam, toolchain)
     }
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {
@@ -126,7 +155,7 @@ impl Tailor for Elixir {
             return Ok(());
         }
         let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        elixir::generate_lock(door, project, &beam)
+        elixir::generate_lock(door, project, &beam, toolchain)
     }
 
     fn plan(
@@ -139,7 +168,7 @@ impl Tailor for Elixir {
         let activity = &ctx.activity;
         elixir::require_lock(project)?;
         let beam = elixir::realize_runtime(&ctx.store, activity, ctx.platform, toolchain)?;
-        let (plan, _) = elixir::plan_elixir(door, project, &beam, toolchain)?;
+        let (plan, _, _) = elixir::plan_elixir(door, project, &beam, toolchain)?;
         Ok(Some(serde_json::to_string_pretty(&plan)?))
     }
 

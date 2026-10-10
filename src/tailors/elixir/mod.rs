@@ -11,9 +11,13 @@
 //! deps projection is a writable clonefile copy, recorded unattested.
 
 mod check_locked;
+mod door;
 pub mod edit;
+mod env;
 mod hextar;
 pub mod objects;
+pub(crate) mod registry;
+mod resolve;
 pub mod tailor;
 mod tool;
 mod unpack;
@@ -24,7 +28,6 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::BuildSpec;
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -33,7 +36,8 @@ use crate::kernel::toolchain::ArtifactRow;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
-use check_locked::{check_locked_inputs, check_locked_passed, record_check_locked};
+pub use env::project_elixir_env;
+pub use resolve::{attest_project, generate_lock, plan_elixir};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -41,8 +45,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-pub(crate) use tool::run_checked;
-use tool::{run_hexmark, run_mix};
+use tool::run_hexmark;
 
 // Linux relocation recipe revision: an identity input of the Linux toolchain
 // object and of the Linux BEAM fingerprint. Bump it whenever the Install
@@ -1210,143 +1213,6 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
     }
 }
 
-/// `prepare`: mix.lock, resolved by the store mix (planner scratch,
-/// network, unsandboxed) when there is none. The one place the Elixir
-/// tailor writes project inputs.
-pub fn generate_lock(
-    door: &mut ResolutionDoor<'_>,
-    project: &ProjectRoot,
-    beam_obj: &Path,
-) -> io::Result<()> {
-    if !project.is_input_file(Path::new("mix.exs")) {
-        return Err(err("mix.exs not found"));
-    }
-    ui::note("no mix.lock; resolving with the store mix (network, unsandboxed)...");
-    let scratch = door.store().stage_with_activity(door.lease())?;
-    let out = run_mix(
-        door,
-        beam_obj,
-        project.path(),
-        &scratch,
-        false,
-        &["mix", "deps.get"],
-    )?;
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    if !out.status.success() {
-        return Err(err(format!(
-            "store mix deps.get failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-/// Plan: AST-parse mix.lock under the pinned toolchain (lock-only, no
-/// eval). The project is read through the held descriptor; mix itself
-/// still runs in `project.path()`.
-pub fn plan_elixir(
-    door: &mut ResolutionDoor<'_>,
-    project: &ProjectRoot,
-    beam_obj: &Path,
-    selected: &Selected,
-) -> io::Result<(ElixirPlan, String)> {
-    let (store, activity) = (door.store(), door.lease());
-    if !project.is_input_file(Path::new("mix.exs")) {
-        return Err(err("mix.exs not found"));
-    }
-    require_lock(project)?;
-    let project_dir = project.path();
-    let lock = read_mix_lock(project)?;
-    let inputs = check_locked_inputs(project, beam_obj, &lock)?;
-    let unchanged = match &inputs {
-        Some(inputs) => check_locked_passed(store, project, inputs)?,
-        None => false,
-    };
-    if unchanged {
-        ui::trace("mix.exs and mix.lock unchanged since their last passing check");
-    } else {
-        // Consistency gate: exit status only (this evaluates mix.exs —
-        // delegated trust, never artifact authority). Network-permitted
-        // (plan-phase doctrine): --check-locked needs the hex registry; a
-        // persistent planner HEX_HOME keeps it warm.
-        let planner_home = store.root.join("planner-hexhome");
-        fs::create_dir_all(&planner_home)?;
-        let out = run_mix(
-            door,
-            beam_obj,
-            project_dir,
-            &planner_home,
-            false,
-            &["mix", "deps.get", "--check-locked"],
-        )?;
-        if !out.status.success() {
-            return Err(err(format!(
-                "mix.exs and mix.lock are out of sync; run `tog run mix \
-                 deps.get` and retry\n{}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        // Recorded only when the inputs still hash the same after the
-        // check, so the record names the bytes the check actually read.
-        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?;
-        if let (Some(before), Some(after)) = (&inputs, &after) {
-            if before == after {
-                record_check_locked(store, activity, project, before);
-            }
-        }
-    }
-    let scratch = store.stage_with_activity(activity)?;
-    let helper = scratch.join("helper.exs");
-    fs::write(&helper, HELPER)?;
-    // The helper parses a copy of the bytes read through the held
-    // descriptor, so what it parses is exactly what is hashed below.
-    let lock_copy = scratch.join("mix.lock");
-    fs::write(&lock_copy, &lock)?;
-    let out = run_mix(
-        door,
-        beam_obj,
-        project_dir,
-        &scratch,
-        true,
-        &[
-            "elixir",
-            helper
-                .to_str()
-                .ok_or_else(|| err("helper path not UTF-8"))?,
-            "lock",
-            lock_copy.to_str().ok_or_else(|| err("path not UTF-8"))?,
-        ],
-    )?;
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    if !out.status.success() {
-        return Err(err(format!(
-            "mix.lock analysis failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    #[derive(Deserialize)]
-    struct HelperOut {
-        entries: Vec<HexDep>,
-    }
-    let parsed: HelperOut =
-        serde_json::from_slice(&out.stdout).map_err(|e| err(format!("helper output: {e}")))?;
-    let mut deps = parsed.entries;
-    deps.sort_by(|a, b| a.app.cmp(&b.app));
-    let plan = ElixirPlan {
-        // The toolchain this plan was made under is the selected one, so
-        // the plan records the selection's versions, never the shipped pins.
-        otp_version: selected.version("otp")?.to_string(),
-        elixir_version: selected.version("elixir")?.to_string(),
-        deps,
-    };
-    validate_plan(&plan)?;
-    let now = read_mix_lock(project)?;
-    if now != lock {
-        return Err(err("mix.lock changed while planning; re-run 'tog'"));
-    }
-    Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
-}
-
 /// Realize the immutable deps-source object (kind "hex-deps"): every
 /// tarball dual-checksum-verified by tog (outer = sha256 of the .tar,
 /// inner = sha256(VERSION ++ metadata.config ++ contents.tar.gz)).
@@ -1436,78 +1302,6 @@ pub fn expected_projection(
         .join(key)
         .join(obj_id)
         .join("hex-deps"))
-}
-
-/// Project: clonefile the deps object into a writable per-project tree
-/// (native builds write into their source dirs — npm mutablePackages
-/// precedent; recorded unattested) + closure envelope.
-pub fn project_elixir_env(
-    activity: &StoreActivity,
-    platform: Platform,
-    project: &ProjectRoot,
-    beam_obj: &Path,
-    deps_obj: &Path,
-    plan: &ElixirPlan,
-    lock_sha256: &str,
-    fresh: bool,
-    selected: &Selected,
-    attribution: &mut crate::kernel::policy::Attribution,
-) -> io::Result<PathBuf> {
-    let spec = beam_spec(platform, selected)?;
-    let beam_obj = beam_obj.canonicalize()?;
-    let deps_obj = deps_obj.canonicalize()?;
-    let store = crate::comforter::store_from_object_path(&beam_obj)
-        .ok_or_else(|| err("BEAM object is not in a Tog store"))?;
-    let project_dir = project.path();
-    let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
-    let project_lock = store.project_lock_in(project)?;
-    store.ensure_namespace(Path::new("forests"))?;
-    let mut refs = crate::comforter::ClosureRefs::new();
-    refs.object_path(&store, activity, &beam_obj)?;
-    refs.object_path(&store, activity, &deps_obj)?;
-    refs.forest(&store, activity, &proj_dir)?;
-    // Protect the dependency projection before cloning or publishing it.
-    crate::comforter::persist_root_for_refs_with_project_lock(
-        project,
-        &store,
-        activity,
-        &refs,
-        &project_lock,
-    )?;
-    if fresh && proj_dir.exists() {
-        crate::kernel::store::remove_tree(&proj_dir)?;
-    }
-    if !proj_dir.exists() {
-        // Atomic publication: clone into a tmp sibling, then rename — a
-        // crashed clone must never be trusted as a complete forest.
-        let parent = proj_dir.parent().unwrap();
-        fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(
-            ".hex-deps.tmp.{}",
-            crate::kernel::fsroot::random_suffix()?
-        ));
-        crate::comforter::clone_tree_with_activity(activity, &deps_obj, &tmp, platform)?;
-        fs::rename(&tmp, &proj_dir)?;
-    }
-    crate::comforter::write_closure_with_project_lock(
-        project,
-        "elixir",
-        closure_body(
-            &beam_obj,
-            &deps_obj,
-            &proj_dir,
-            plan,
-            lock_sha256,
-            &spec,
-            selected,
-        )?,
-        &store,
-        activity,
-        refs,
-        &project_lock,
-        attribution,
-    )?;
-    Ok(proj_dir)
 }
 
 /// The Elixir closure body: the projection's objects and plan, the
@@ -2672,8 +2466,10 @@ exit 0
             &store.object_path(&deps_id),
             &plan,
             &"c".repeat(64),
+            &Default::default(),
             false,
             &shipped_selection().unwrap(),
+            &[],
             &mut attribution,
         )
         .unwrap();
@@ -2702,6 +2498,90 @@ exit 0
         let reimported = crate::kernel::store::reimport_root_for_test(&store, &project).unwrap();
         assert_eq!(reimported.objects, record.objects);
         assert_eq!(reimported.projections, record.projections);
+    }
+
+    #[test]
+    fn refused_fresh_sync_preserves_the_active_forest_and_closure() {
+        use crate::comforter::join;
+        use crate::kernel::policy::{self, Policy};
+        let _env = policy::test_env_lock();
+        let _serial = policy::attribution_test_lock();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                join::set_resolution_files_for_test(None);
+                join::set_policy_for_test(None);
+            }
+        }
+        let _reset = Reset;
+        join::set_resolution_files_for_test(Some(std::sync::Arc::new(|_, project| {
+            crate::tailors::resolution_files(&tailor::Elixir, project)
+        })));
+        let temp = TempDir::named("elixir-refused-fresh");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let beam =
+            store.publish_bare_test("beam", &format!("{OTP_VERSION}-elixir{ELIXIR_VERSION}"));
+        let deps = store.publish_bare_test("deps", "0");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::write(dir.join("mix.exs"), "manifest A").unwrap();
+        fs::write(dir.join("mix.lock"), "lock A").unwrap();
+        fs::write(dir.join(".tog/closures/elixir.json"), "previous closure").unwrap();
+        let held = ProjectRoot::open(&dir).unwrap();
+        let forest = expected_projection(&store, &dir, &store.object_path(&deps)).unwrap();
+        fs::create_dir_all(forest.join("jason")).unwrap();
+        fs::write(forest.join("jason/compiled.beam"), "previous compiled code").unwrap();
+        let plan = ElixirPlan {
+            otp_version: OTP_VERSION.into(),
+            elixir_version: ELIXIR_VERSION.into(),
+            deps: Vec::new(),
+        };
+        for changed in [false, true] {
+            let basis = resolve::resolution_basis(&held).unwrap();
+            join::set_policy_for_test(Some(if changed {
+                fs::write(dir.join("mix.lock"), "lock B").unwrap();
+                Policy::default()
+            } else {
+                policy::parse_file(Path::new("test-policy"), "deny = ['unrecorded-resolution']")
+                    .unwrap()
+            }));
+            let mut attribution = policy::Attribution::open("elixir").unwrap();
+            let error = project_elixir_env(
+                &activity,
+                Platform::host().unwrap(),
+                &held,
+                &store.object_path(&beam),
+                &store.object_path(&deps),
+                &plan,
+                &"c".repeat(64),
+                &basis,
+                true,
+                &shipped_selection().unwrap(),
+                &[],
+                &mut attribution,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(if changed {
+                    "changed"
+                } else {
+                    "unrecorded-resolution"
+                }),
+                "{error}"
+            );
+            assert_eq!(
+                fs::read(forest.join("jason/compiled.beam")).unwrap(),
+                b"previous compiled code"
+            );
+            assert_eq!(
+                fs::read(dir.join(".tog/closures/elixir.json")).unwrap(),
+                b"previous closure"
+            );
+            attribution.discard();
+        }
     }
 
     /// A project renamed mid-sync with another project put at its path:

@@ -267,9 +267,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   outlive a run. **Store objects are trusted from permissions + metadata, and all
   toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
   replacement after commit is undetected.
-- **Delegated planning runs unsandboxed with user privileges** (bundler):
-  a hostile manifest executes code at PLAN time. Go's, Cargo's, Node's, and Python's
-  (uv) run in the sandbox.
+- **Delegated planning runs in the resolution sandbox.** A Gemfile and a mix.exs are
+  code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler) and Elixir's (mix)
+  resolvers all run confined, reaching their registry only through tog's proxy. .NET's
+  restore does not yet (#207).
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,

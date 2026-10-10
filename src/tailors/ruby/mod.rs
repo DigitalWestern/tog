@@ -9,13 +9,19 @@
 //! env vars, so every tog-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
+mod door;
 pub mod edit;
 mod gem_home;
 mod native;
 mod native_libs;
 pub mod objects;
+pub(crate) mod registry;
+mod resolve;
 pub mod tailor;
 mod unpack;
+
+pub(crate) use door::ruby_tool;
+pub use resolve::{attest_project, generate_lock};
 
 use unpack::extract_ruby_bottle;
 #[cfg(test)]
@@ -28,7 +34,7 @@ use crate::kernel::fetch::{
 };
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::{DelegateSpec, ResolutionDoor};
 use crate::kernel::sandbox::{BuildSpec, HostView};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
@@ -387,65 +393,6 @@ pub fn run_env(
     )
 }
 
-/// Run a store Ruby tool for a delegated edit (`tog add` and friends):
-/// same environment as planning, failure carries the tool's stderr.
-pub(crate) fn run_checked(
-    door: &mut ResolutionDoor<'_>,
-    ruby_obj: &Path,
-    cwd: &Path,
-    gem_home: &Path,
-    args: &[&str],
-) -> io::Result<()> {
-    crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_ruby_edit(door, ruby_obj, cwd, gem_home, args)?;
-    if crate::kernel::ui::verbose() {
-        eprint!("{}", String::from_utf8_lossy(&out.stdout));
-    }
-    if !out.status.success() {
-        return Err(err(format!(
-            "store {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn run_ruby(
-    door: &mut ResolutionDoor<'_>,
-    ruby_obj: &Path,
-    cwd: &Path,
-    gem_home: &Path,
-    args: &[&str],
-) -> io::Result<DelegateReport> {
-    run_ruby_with_env(door, ruby_obj, cwd, args, forced_env(GEMFILE, gem_home))
-}
-
-fn run_ruby_edit(
-    door: &mut ResolutionDoor<'_>,
-    ruby_obj: &Path,
-    cwd: &Path,
-    gem_home: &Path,
-    args: &[&str],
-) -> io::Result<DelegateReport> {
-    let mut env = forced_env(GEMFILE, gem_home);
-    if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "BUNDLE_FROZEN") {
-        *value = "false".to_string();
-    }
-    run_ruby_with_env(door, ruby_obj, cwd, args, env)
-}
-
-fn run_ruby_with_env(
-    door: &mut ResolutionDoor<'_>,
-    ruby_obj: &Path,
-    cwd: &Path,
-    args: &[&str],
-    environment: Vec<(String, String)>,
-) -> io::Result<DelegateReport> {
-    door.run(ruby_tool_spec(ruby_obj, cwd, args, &environment))
-        .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
-}
-
 /// The helper's `spec` mode over a `.gem` tog already verified: it reads
 /// the embedded gemspec and needs no network, so it runs as a host-local
 /// helper rather than through the door.
@@ -801,35 +748,6 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
     }
 }
 
-/// `prepare`: Gemfile.lock, resolved by the store bundler when there is
-/// none. The one place the Ruby tailor writes project inputs.
-pub fn generate_lock(
-    door: &mut ResolutionDoor<'_>,
-    project: &ProjectRoot,
-    ruby_obj: &Path,
-) -> io::Result<()> {
-    if !project.is_input_file(Path::new("Gemfile")) {
-        return Err(err("Gemfile not found"));
-    }
-    ui::note("no Gemfile.lock; resolving with the store bundler...");
-    let scratch = door.store().stage_with_activity(door.lease())?;
-    let out = run_ruby(
-        door,
-        ruby_obj,
-        project.path(),
-        &scratch,
-        &["bundle", "lock"],
-    )?;
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    if !out.status.success() {
-        return Err(err(format!(
-            "store bundle lock failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
 /// selection, tog-pinned hashes (lock CHECKSUMS section when present, else
 /// the digest an earlier sync verified and recorded in the store, else the
@@ -842,50 +760,32 @@ pub fn plan_ruby(
     project: &ProjectRoot,
     ruby_obj: &Path,
     selected: &Selected,
-) -> io::Result<(RubyPlan, String)> {
-    let (store, activity) = (door.store(), door.lease());
-    let project_dir = project.path();
+) -> io::Result<(RubyPlan, String, crate::comforter::join::Digests)> {
     if !project.is_input_file(Path::new("Gemfile")) {
         return Err(err("Gemfile not found"));
     }
+    let observed = project.observing_inputs()?;
+    let project = &observed;
     require_lock(project)?;
+    let basis = resolve::resolution_basis(project)?;
     let lock = read_gemfile_lock(project)?;
     // No plan cache in the project: an editable cache with a predictable
     // key is forgeable authority. Planning re-derives from the lock every
     // sync; the store's digest records keep an unchanged lock off the
     // network, and its object cache makes realizes instant.
 
-    let scratch = store.stage_with_activity(activity)?;
-    let helper = scratch.join("helper.rb");
-    fs::write(&helper, HELPER)?;
-    let helper_path = helper
-        .to_str()
-        .ok_or_else(|| err("helper path not UTF-8"))?;
+    // Both gates run confined with no route: full network denial.
     // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
     // (delegated resolver trust) — exit status only, stdout untrusted.
-    let out = run_ruby(
-        door,
-        ruby_obj,
-        project_dir,
-        &scratch,
-        &["ruby", helper_path, "check", GEMFILE, GEMFILE_LOCK],
-    )?;
+    let out = resolve::helper(door, project, ruby_obj, "check", Some(&basis))?;
     if !out.status.success() {
-        let _ = crate::kernel::store::remove_tree(&scratch);
         return Err(err(format!(
             "Gemfile/Gemfile.lock validation failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
     // Gate 2: LOCK-ONLY closure derivation (never evaluates the Gemfile).
-    let out = run_ruby(
-        door,
-        ruby_obj,
-        project_dir,
-        &scratch,
-        &["ruby", helper_path, "plan", GEMFILE_LOCK],
-    )?;
-    let _ = crate::kernel::store::remove_tree(&scratch);
+    let out = resolve::helper(door, project, ruby_obj, "plan", Some(&basis))?;
     if !out.status.success() {
         return Err(err(format!(
             "bundler lock analysis failed: {}{}",
@@ -910,6 +810,7 @@ pub fn plan_ruby(
     let parsed: HelperOut =
         serde_json::from_slice(&out.stdout).map_err(|e| err(format!("helper output: {e}")))?;
 
+    let store = door.store();
     let mut gems = Vec::new();
     for g in parsed.gems {
         // Checked before any of them is placed in a rubygems.org URL: a
@@ -967,7 +868,15 @@ pub fn plan_ruby(
     if now != lock {
         return Err(err("Gemfile.lock changed while planning; re-run 'tog'"));
     }
-    Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
+    // The resolution files this plan was built from, so the resolution
+    // join binds a record to this generation of the Gemfile and its lock.
+    project.verify_observed_inputs()?;
+    if resolve::resolution_basis(project)? != basis {
+        return Err(err(
+            "Ruby resolution inputs changed while planning; run `tog` again",
+        ));
+    }
+    Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
 }
 
 /// The sha256 in one rubygems.org version reply, once the reply is shown to
@@ -1379,7 +1288,9 @@ pub fn project_ruby_env(
     gems_obj: &Path,
     plan: &RubyPlan,
     lock_sha256: &str,
+    resolution_basis: &crate::comforter::join::Digests,
     selected: &Selected,
+    ledgers: &[crate::kernel::resolve::ledger::LedgerObjects],
     attribution: &mut crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
     let ruby_obj = ruby_obj.canonicalize()?;
@@ -1395,10 +1306,23 @@ pub fn project_ruby_env(
     if let Some(id) = native_reference.as_ref().and_then(|r| r["id"].as_str()) {
         refs.object_id(&store, activity, id)?;
     }
+    // The planner doors' ledgers: evidence of what planning ran, kept as
+    // long as this closure is, and named in the body so a root rebuilt
+    // from the closure alone keeps them.
+    let mut ledger_refs = Vec::new();
+    for objects in ledgers {
+        for id in [&objects.ledger, &objects.diagnostics] {
+            refs.object_id(&store, activity, id)?;
+            ledger_refs.push(crate::comforter::object_ref(&store.object_path(id))?);
+        }
+    }
     let mut body = closure_body(&ruby_obj, &gems_obj, plan, lock_sha256, selected)?;
     if let Some(reference) = native_reference {
         body["native_libs"] = reference;
     }
+    body["resolution_ledgers"] = ledger_refs.into();
+    body[crate::comforter::join::BASIS_FIELD] =
+        crate::comforter::join::basis_value(resolution_basis);
     crate::comforter::write_closure(project, "ruby", body, &store, activity, refs, attribution)
 }
 
@@ -2068,7 +1992,9 @@ mod tests {
             &store.object_path(&gems_id),
             &linux_test_plan(),
             &"c".repeat(64),
+            &Default::default(),
             &shipped_selection().unwrap(),
+            &[],
             &mut attribution,
         )
         .unwrap();

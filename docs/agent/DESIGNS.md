@@ -3663,6 +3663,62 @@ refusals, the Ruby gate-1 helper and Elixir lock parser behind no-route
 doors, and mix `deps.get --check-locked` on ordinary syncs through the
 proxy (known gap 3, Elixir half). `attest` for both.
 
+**PR 8 as built (Linux, 2026-10-09, #206).** Decisions made moving
+Bundler and mix onto the door:
+
+- **Two runners.** `tailors/ruby/door.rs` (`RubyRun`) and
+  `tailors/elixir/door.rs` (`MixRun`) run every store Bundler and mix
+  operation: online through the mirror route, or with no route at all.
+  A Detached run (a planner check) keeps its ledger on the door, and the
+  sync roots each one and names it in the closure's
+  `resolution_ledgers`. Files a run needs (the helper, a copy of the lock
+  read through the held descriptor) are handed in through the wiring and
+  named as `@SCRATCH@/<file>` in the arguments.
+- **The RubyGems mirror.** `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/` names
+  the route, which serves the compact index (`/versions`, `/names`,
+  `/info/<gem>`, from index.rubygems.org) and `/gems/<file>.gem` (from
+  rubygems.org), claimed by each `/info` line's `checksum:`. Bundler sends
+  a plain-http URL through `http_proxy` with no loopback exception, and
+  the proxy refuses an absolute-form request, so the mirror's host is
+  `no_proxy` (measured: "Access token could not be authenticated").
+  Gems go to the run's scratch (`GEM_HOME`), and `vendor/bundle` and
+  `.bundle` are excluded from the snapshot.
+- **The Hex mirror.** `HEX_MIRROR` names the route, which serves
+  `/packages/<name>`, `/tarballs/<name>-<version>.tar`, `/names`,
+  `/versions` and Hex's update check from repo.hex.pm. The check
+  redirects to builds.hex.pm, which no route permits, so it fails closed
+  and Hex carries on. The registry is signed protobuf Hex verifies
+  itself, so the route claims nothing: a tarball streams through hashed,
+  and tog verifies both checksums from mix.lock when it realizes the
+  deps. No `http_proxy` is set, for the same reason as Bundler's.
+  `MIX_DEPS_PATH`, `MIX_HOME` and `HEX_HOME` are the run's scratch;
+  the planner gate also gets a fresh Hex home. The proxy caches registry
+  responses without sharing executable Hex configuration between projects.
+  The mix forced row now unsets only `MIX_EXS`: it unset tog's own
+  `MIX_ARCHIVES` too, which left mix without Hex.
+- **The planner.** Ruby's two helper modes (`check`, `plan`) and
+  Elixir's lock parse run with no route and `HEX_OFFLINE=1`. Elixir's
+  `--check-locked` gate runs through the mirror, still skipped when its
+  inputs hash as they did at the last pass.
+- **Attest.** Ruby: `bundle lock` with `BUNDLE_FROZEN=true`. Elixir:
+  `mix deps.get --check-locked`. Both with `require_unchanged`.
+- **Resolution files.** Ruby: outputs `Gemfile`, `Gemfile.lock`;
+  inputs are every other regular file visible in the project snapshot.
+  Elixir: outputs `mix.exs`, `mix.lock`, with the same conservative input
+  coverage. This includes `eval_gemfile`, umbrella app manifests, nested
+  configuration and data loaded by project code. The snapshot excludes
+  `.git`, `.tog` and each tailor's dependency/build caches. Symlinked inputs
+  cannot be represented by regular-file digests and are refused. Precise
+  discovery is a separate follow-up.
+- **Edits.** Every Bundler run of `tog add`/`remove`/`update` publishes
+  through the edit door with its own record, and `mix deps.update` does
+  the same.
+- **Tests.** `tailors/ruby/resolve.rs`
+  `bundler_resolves_through_the_rubygems_mirror` and
+  `tailors/elixir/resolve.rs` `mix_resolves_through_the_hex_mirror`,
+  against the recorded rows: a missing lock, the planner checks, an edit
+  (Ruby), an unchanged lock attested and a drifted manifest refused.
+
 **PR 9: .NET.** The `nuget.config` mirror with service-index rewriting,
 the no-Unix-socket restore settings, and missing-lock restore confined,
 which closes the LIMITATIONS row "Restore-time MSBuild evaluation runs

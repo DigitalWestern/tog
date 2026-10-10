@@ -360,7 +360,7 @@ const FORCED: &[ForcedRow] = &[
         flags: &[],
         per_registry: &[],
         env: &[],
-        unset: &["MIX_EXS", "MIX_DEPS_PATH", "MIX_HOME", "MIX_ARCHIVES"],
+        unset: &["MIX_EXS"],
     },
     ForcedRow {
         tool: "dotnet",

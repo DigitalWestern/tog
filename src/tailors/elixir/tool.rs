@@ -1,36 +1,13 @@
-//! Running the store mix and elixir: as a resolver through the door, or
-//! the helper's offline `hexmark` mode as a host-local helper.
+//! Running the store mix and elixir host-local: the helper's offline
+//! `hexmark` mode, and the OTP runtime probe. Resolution runs through the
+//! door (`door.rs`).
 
 use super::{beam_path, forced_env, ENV_REMOVE, ENV_REMOVE_PREFIXES};
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
+use crate::kernel::resolve::DelegateSpec;
 use std::io;
 use std::path::Path;
 use std::process::Command;
-
-/// Run the store mix for a delegated edit (`tog update`).
-pub(crate) fn run_checked(
-    door: &mut ResolutionDoor<'_>,
-    beam_obj: &Path,
-    cwd: &Path,
-    scratch: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<()> {
-    crate::kernel::ui::trace(&format!("run: {} (in {})", args.join(" "), cwd.display()));
-    let out = run_mix(door, beam_obj, cwd, scratch, offline, args)?;
-    if crate::kernel::ui::verbose() {
-        eprint!("{}", String::from_utf8_lossy(&out.stdout));
-    }
-    if !out.status.success() {
-        return Err(io::Error::other(format!(
-            "store {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
 
 /// The store mix or elixir with tog's forced environment, its output
 /// captured.
@@ -53,19 +30,6 @@ pub(super) fn mix_spec(
     spec.force_env(ENV_REMOVE_PREFIXES, ENV_REMOVE, &set);
     spec.capture();
     spec
-}
-
-/// The store mix as a resolver: through the door.
-pub(super) fn run_mix(
-    door: &mut ResolutionDoor<'_>,
-    beam_obj: &Path,
-    cwd: &Path,
-    scratch: &Path,
-    offline: bool,
-    args: &[&str],
-) -> io::Result<DelegateReport> {
-    door.run(mix_spec(beam_obj, cwd, scratch, offline, args))
-        .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
 }
 
 /// The helper's offline `hexmark` mode (`HEX_OFFLINE=1`): a host-local

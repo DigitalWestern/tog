@@ -6,7 +6,7 @@
 #   file <non-test lines> <path>
 #   fn <lines> <path>::<name>[#<nth occurrence in the file>]
 file 1787 src/tailors/dotnet/mod.rs
-file 1727 src/tailors/elixir/mod.rs
+file 1521 src/tailors/elixir/mod.rs
 fn 171 src/comforter/toolchain.rs::resolve
 fn 163 src/commands/audit.rs::render
 fn 159 src/commands/mod.rs::dispatch

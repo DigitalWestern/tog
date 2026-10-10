@@ -1007,9 +1007,15 @@ The closures a reviewer reads in the diff come from the protected job, or
 from a developer running a signing sync locally.
 
 On a runner without unprivileged user namespaces the build sandbox is
-unavailable, so a project that needs `tog build` or sdist compilation needs
-a runner that has them; `sync` of a wheel-only or lock-only project does
-not.
+unavailable, so `tog build` and source-package compilation need a runner
+with the sandbox prerequisites. Ruby and Elixir also require resolution
+isolation for ordinary sync and plan with committed locks, because their
+manifest checks and lock parsers run project code through the door. Edits,
+missing-lock generation and `tog attest` require it too. On Linux, enable
+unprivileged user namespaces and install bubblewrap. If the native runner
+is unavailable, these operations refuse before executing project code.
+Wheel-only Python sync with an existing recorded lock does not execute a
+resolution tool unless metadata preparation or resolution is needed.
 
 
 ## Maintain verbs
@@ -1078,7 +1084,7 @@ before any record is written. With `TOG_SIGNING_KEY` unset it warns and
 writes the record unsigned, which no sync will attest. It reads
 `tog-toolchain.toml` the way `--frozen` does and never writes it, and it
 refuses `--frozen` (exit 2). An ecosystem with no resolution door is
-refused by name. Today four have one. Go's check is `go mod download -json
+refused by name. Today six have one (.NET has none yet). Go's check is `go mod download -json
 all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
 workspace root, run in the sandbox through tog's resolution proxy (TLS
 interception to crates.io), so its fetches are in the record's ledger. Run
@@ -1125,6 +1131,29 @@ Commit the regenerated lock before attesting. A project with no lock a
 tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
 file that includes one outside the project.
+Ruby's is `bundle lock` with `BUNDLE_FROZEN=true`, which must leave the
+Gemfile and Gemfile.lock byte for byte the same. Ruby and Elixir manifests
+execute code that can load other project files. Their resolution records
+therefore cover every regular file visible in the resolver's project snapshot,
+including Ruby `eval_gemfile` inputs, umbrella app manifests and nested
+configuration. Editing one of these files requires a fresh resolution or
+`tog attest`, even if the lock still agrees. `.git`, `.tog`, Ruby's `.bundle`
+and `vendor/bundle`, and Elixir's `deps` and `_build` are excluded from that
+snapshot. During these Ruby and Elixir checks, project files have mode 0644,
+directories have mode 0755, and empty directories are absent. These rules
+apply only to the private resolver view. The checkout keeps its permissions
+and empty directories. Manifests must select dependencies from file names
+and contents. Invoke project helper scripts through their interpreter, since
+the resolver view removes their executable bit. Other project symlinks are refused because the receipt cannot
+cover them safely. Keep resolution inputs as regular files inside the project.
+Hex uses a fresh private home for every run, so executable configuration
+cannot persist between projects. Registry responses are reused through the
+proxy cache. Bundler reaches
+rubygems.org only through the session's RubyGems mirror
+(`BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/`), so the lock keeps naming
+rubygems.org. Elixir's is `mix deps.get --check-locked`, with Hex pointed
+at the session's mirror of repo.hex.pm (`HEX_MIRROR`). Both run confined,
+like the others, and their fetches are in the record's ledger.
 
 Hashes alone prove package bytes, not how the dependency set was resolved.
 To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`

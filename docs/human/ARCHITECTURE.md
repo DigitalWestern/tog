@@ -449,6 +449,10 @@ a later sync over the same store on a host in the same state reuse it
 (`ruby/native.rs`).
 Every tog invocation strips
 `BUNDLE_*`/`RUBYOPT` and forces `BUNDLE_FROZEN`, `GEM_HOME`/`GEM_PATH`.
+Every Bundler run (a missing lock, an edit, the planner's helper checks,
+`tog attest`) is confined through the resolution door (`ruby/door.rs`),
+reaching rubygems.org only through the session's RubyGems mirror
+(`ruby/registry.rs`); the helper's checks get no route at all.
 v0 gaps: non-rubygems.org sources, PATH/GIT gems.
 
 **elixir** (`tailors/elixir/`). mix.lock is an Elixir term literal that Mix itself
@@ -464,7 +468,10 @@ own sources. `tog build` sandboxes `mix compile`. The consistency gate,
 `mix deps.get --check-locked`, needs the Hex registry, so it runs only when
 its inputs (every `mix.exs`, mix.lock, the BEAM object, the project path)
 hash differently from its last pass in this project, which tog records in
-the store; an unchanged project re-syncs offline.
+the store; an unchanged project re-syncs offline. Every mix run (the gate,
+a missing lock, `deps.update`, `tog attest`) is confined through the
+resolution door (`elixir/door.rs`), reaching repo.hex.pm only through the
+session's Hex mirror (`elixir/registry.rs`); the lock parser gets no route.
 
 **dotnet** (`tailors/dotnet/`). NuGet's `packages.lock.json` is opt-in upstream;
 tog makes it mandatory. The lock's `contentHash` is a semantic hash, so
