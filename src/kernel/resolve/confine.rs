@@ -994,10 +994,16 @@ pub fn confined_run(
     let env = relay::encode_env(&door_env(run, &mounts.scratch)?);
     let (reader, writer) = pipe()?;
     let (env_reader, env_writer) = pipe()?;
-    let log = std::thread::spawn(move || read_log(reader));
+    let (log_send, log) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = log_send.send(read_log(reader));
+    });
     // A thread, because an environment larger than the pipe's buffer
     // would otherwise block before bubblewrap starts reading it.
-    let sent = std::thread::spawn(move || fs::File::from(env_writer).write_all(&env));
+    let (sent_send, sent) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent_send.send(fs::File::from(env_writer).write_all(&env));
+    });
     // The relay's exec log at 3, the tool's environment at 4.
     sandbox::pass_fds(
         &mut command,
@@ -1009,16 +1015,28 @@ pub fn confined_run(
     let result = start_confined(&mut command, activity, run.stdout);
     // The container is gone before anything it wrote is read, whatever
     // became of the podman client.
-    drop(removal);
+    let cleanup = removal.map(|removal| removal.finish()).transpose();
     drop(command);
     drop(writer);
     drop(env_reader);
+    // A failed cleanup must return before joining descriptors the surviving
+    // container might still hold. No output is consumed on this path.
+    cleanup?;
     // The relay reads the whole environment before it starts the tool, so
     // a write that failed means the tool never ran: the relay reported it.
-    let _ = sent.join();
-    let log = log
-        .join()
-        .map_err(|_| io::Error::other("the exec log reader panicked"))?;
+    let drain_timeout = std::time::Duration::from_secs(10);
+    let _ = sent.recv_timeout(drain_timeout).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the stopped resolution container retained its environment descriptor",
+        )
+    })?;
+    let log = log.recv_timeout(drain_timeout).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the stopped resolution container retained its exec log descriptor",
+        )
+    })?;
     let (status, stderr, stdout) = result?;
     let records = relay::parse_log(&log?)?;
     let mut outcome = outcome(tier, status, &stderr, stdout, records)?;
