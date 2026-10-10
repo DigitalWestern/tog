@@ -2816,7 +2816,7 @@ Per ecosystem, offline against fixtures (one per migration PR):
 - `bundle_add_through_mirror_keeps_rubygems_remote`
 - `bundle_other_source_is_refused_as_unattested_index`
 - `mix_deps_update_through_hex_mirror_keeps_signature_check`
-- `dotnet_missing_lock_restore_through_nuget_mirror`
+- `dotnet_restore_attest_without_unix_sockets_through_nuget_mirror`
 - `dotnet_restore_runs_without_unix_sockets`
 - `git_dependency_through_interception_records_commit`
 - `npm_url_dependency_is_intercepted_and_recorded`
@@ -3745,10 +3745,16 @@ restore onto the door:
   `require_unchanged`. Planning reads the lock alone, so a sync roots no
   ledger.
 - **Resolution files.** Outputs: the project's one `.csproj` and
-  `packages.lock.json`. Inputs: `global.json`, `Directory.Build.props` and
-  `Directory.Build.targets` when present.
+  `packages.lock.json`. Inputs: every other regular project file visible to
+  the snapshot, excluding `obj/`, `bin/`, `.git/` and `.tog/`. The captured
+  generation is checked against the immutable stage and carried from
+  preflight into the closure join. Symlinks are refused. Resolver files
+  have mode 0644 and directories 0755, with empty directories omitted.
+  Restore explicitly names `packages.lock.json`, and visible files naming
+  `NuGetLockFilePath` or `TreatAsLocalProperty` are conservatively refused,
+  including UTF-16/32 imported XML.
 - **Tests.** `tailors/dotnet/resolve.rs`
-  `dotnet_missing_lock_restore_through_nuget_mirror`, against the
+  `dotnet_restore_attest_without_unix_sockets_through_nuget_mirror`, against the
   recorded rows plus a served unsigned `Tog.Fixture` package and an empty
   vulnerability base (the recording kept neither body): a missing lock,
   an unchanged lock attested, a drifted csproj refused.
