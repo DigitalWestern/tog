@@ -1843,8 +1843,14 @@ exit 37
             super::super::container::BEFORE_RUN_FOR_TEST
                 .with(|slot| *slot.borrow_mut() = Some(marker.clone()));
         }
+        let wait = if marker.join("fail-removal").exists() {
+            // Builtins keep running when the failed door releases its mounts.
+            ":"
+        } else {
+            "sleep 1"
+        };
         let script = format!(
-            "trap '' INT TERM\necho ready > '{}/ready'\nwhile :; do sleep 1; done\n",
+            "trap '' INT TERM HUP PIPE\necho ready > '{}/ready'\nwhile :; do {wait}; done\n",
             cache.display()
         );
         let outcome = run_podman_door(&fx, relay, &script, |confined| {
@@ -1864,6 +1870,16 @@ exit 37
         }
         assert_eq!(tree(&fx.project), before);
         fs::write(marker.join("stopped"), "stopped").unwrap();
+        if marker.join("fail-removal").exists() {
+            // Keep the fixture and its staged root alive until the parent
+            // verifies the deliberately stranded container. Fixture teardown
+            // is a separate action and must not race that observation.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !marker.join("inspection-done").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     /// Parent-owned cleanup survives every test assertion and partial spawn.
@@ -1908,6 +1924,7 @@ exit 37
                         .then_some(held)
                 });
             let _ = fs::write(self.marker.join("resume-removal"), "resume");
+            let _ = fs::write(self.marker.join("inspection-done"), "done");
             if self.child.try_wait().is_ok_and(|status| status.is_none()) {
                 // SAFETY: the unreaped child owns this private process group.
                 let _ = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
@@ -2204,18 +2221,17 @@ exit 37
         }
         assert!(killed, "no owned Podman client found for fault injection");
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success());
-                break;
-            }
+        while !marker.0.join("stopped").exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "harness exited before inspection"
+            );
             assert!(
                 Instant::now() < deadline,
                 "joined a descriptor retained by a live container"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(marker.0.join("stopped").exists());
         let name = fs::read_to_string(marker.0.join("container")).unwrap();
         let mut command = child.config.command(&child.podman).unwrap();
         let output = command
@@ -2224,6 +2240,16 @@ exit 37
             .unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+        fs::write(marker.0.join("inspection-done"), "done").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "harness did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // The ownership guard performs real checked removal before the
         // marker/config directory is released, including on assertion failure.
         drop(child);
