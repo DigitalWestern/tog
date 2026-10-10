@@ -137,6 +137,13 @@ pub(crate) fn other(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
 
+/// The refusal for a project shape `tog add`/`remove`/`update` does not
+/// edit (Poetry, PDM, setup.py, Yarn, mix, .NET): the message names the
+/// edit to make by hand. `Unsupported`, so it exits with that class.
+pub(crate) fn by_hand(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, message.into())
+}
+
 /// `Tailor::registry_exists` over a registry's JSON API: `Some(latest
 /// version)` when `url` answers, `None` on 404, and `Some("?")` when it
 /// answers without a version `extract` can read.

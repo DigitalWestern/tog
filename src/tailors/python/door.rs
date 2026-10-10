@@ -430,7 +430,7 @@ fn probe_then_run(
         .to_string();
     let policy = run.policy.clone().unwrap_or_else(policy::effective);
     if policy::denied(&policy, policy::RESOLUTION_BUILD) {
-        return Err(io::Error::new(
+        return Err(crate::kernel::error::refused(
             io::ErrorKind::PermissionDenied,
             policy::refusal(&policy, policy::RESOLUTION_BUILD, &subject, &detail),
         ));
@@ -497,10 +497,7 @@ fn attempt(
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        io::Error::new(
-            error.kind(),
-            format!("store uv {}: {error}", shown.join(" ")),
-        )
+        crate::kernel::error::context(error, format_args!("store uv {}", shown.join(" ")))
     })
 }
 
@@ -1003,7 +1000,12 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
             },
         );
         done();
-        let error = report.unwrap_err().to_string();
+        let error = report.unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        let error = error.to_string();
         assert!(error.contains("resolution-build: spike:"), "{error}");
         assert!(recorded.is_empty(), "{recorded:?}");
         assert!(!dir.join("uv.lock").exists());

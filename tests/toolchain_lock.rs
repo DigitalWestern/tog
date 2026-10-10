@@ -363,7 +363,7 @@ fn stale_refusal_names_both_values() {
 
     let out = fixture.tog(&["sync"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("tog-toolchain.toml is stale for python"),
         "{stderr}"
@@ -410,7 +410,7 @@ fn added_higher_precedence_source_is_stale() {
     fixture.write(".python-version", &format!("{newest}\n"));
     let out = fixture.tog(&["sync"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("tog-toolchain.toml is stale for python"),
         "{stderr}"
@@ -440,7 +440,7 @@ fn a_lock_with_no_section_for_a_new_ecosystem_is_stale() {
     );
     let out = fixture.tog(&["sync"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(stderr.contains("no [toolchain.node] section"), "{stderr}");
     assert!(stderr.contains("tog update --toolchain node"), "{stderr}");
 }
@@ -458,7 +458,7 @@ fn frozen_validation_failure_precedes_all_writes() {
 
     let out = fixture.tog(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(stderr.contains("--frozen never creates it"), "{stderr}");
     assert!(stderr.contains("commit the file"), "{stderr}");
     assert!(fixture.lock_bytes().is_none(), "--frozen wrote a lock");
@@ -485,7 +485,7 @@ fn frozen_refuses_a_stale_lock_without_rewriting_it() {
 
     let out = fixture.tog(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("tog-toolchain.toml is stale for python"),
         "{stderr}"
@@ -542,7 +542,7 @@ fn frozen_never_evaluates_project_code() {
         &[("PATH", &path)],
     );
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     // Past the toolchain lock: the refusal is the dependency lock's.
     assert!(
         stderr.contains("Gemfile.lock is missing and --frozen never creates it"),
@@ -584,7 +584,7 @@ fn frozen_refuses_a_missing_dependency_lock_before_any_download() {
 
     let out = fixture.tog(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("Gemfile.lock is missing and --frozen never creates it"),
         "{stderr}"
@@ -623,7 +623,7 @@ fn frozen_refuses_a_node_project_without_a_lock() {
 
     let out = fixture.tog(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("package-lock.json is missing and --frozen never creates it"),
         "{stderr}"
@@ -704,7 +704,7 @@ fn update_toolchain_for_one_ecosystem_leaves_the_others_alone() {
     // that stale python row instead of realizing from it.
     let out = fixture.tog(&["update", "--toolchain", "node"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
         stderr.contains("tog-toolchain.toml is stale for python"),
         "{stderr}"
@@ -1405,7 +1405,7 @@ fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
     fixture.write(".tog/policy.toml", "deny = [\"external-toolchain\"]\n");
     let out = fixture.tog(&["sync"]);
     let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(
         stderr.contains("carries exception(s): external-toolchain"),
         "{stderr}"

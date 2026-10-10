@@ -37,8 +37,9 @@ pub mod commands;
 #[cfg(tog_dead_code)]
 pub mod boundary {
     // src/main.rs
+    pub use crate::kernel::error::class_of;
     pub use crate::kernel::supervise::stop_signal;
-    pub use crate::kernel::ui::{error_json_with_fix, error_with_fix, init};
+    pub use crate::kernel::ui::{error_with_fix, failure_json, init};
     // tests/npm_scripts.rs
     pub use crate::kernel::fetch::download_verified_digest;
     pub use crate::tailors::node::{ensure_node_for, project_node_env, realize_node_env};

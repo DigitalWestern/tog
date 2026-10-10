@@ -95,6 +95,26 @@ impl ProjectRoot {
     /// component at a time with O_NOFOLLOW, so an ancestor swapped for a
     /// symlink after canonicalization is refused rather than followed.
     pub fn open(project_dir: &Path) -> io::Result<Self> {
+        // An ordinary non-directory request is absent from detection. Decide
+        // this before the no-follow walk. A later walk refusal must never be
+        // reinterpreted by looking up its now-mutable pathname again.
+        if !fs::metadata(project_dir)
+            .map_err(|error| {
+                crate::kernel::error::context(
+                    error,
+                    format_args!("open project {}", project_dir.display()),
+                )
+            })?
+            .is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!(
+                    "open project {}: not a real directory",
+                    project_dir.display()
+                ),
+            ));
+        }
         let path = project_dir.canonicalize().map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -660,10 +680,10 @@ impl ProjectRoot {
     pub fn check_still_named(&self) -> io::Result<()> {
         let held = fd_stat(self.dir.as_raw_fd())?;
         let moved = |detail: String| {
-            io::Error::other(format!(
-                "{}: {detail}; run 'tog' again",
-                self.path.display()
-            ))
+            crate::kernel::error::refused(
+                io::ErrorKind::Other,
+                format!("{}: {detail}; run 'tog' again", self.path.display()),
+            )
         };
         // Only the identity is compared, so the directory is not opened
         // for reading again: a held ancestor that can be searched but not
@@ -1167,7 +1187,7 @@ impl ProjectRoot {
 }
 
 fn refusal(message: String) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+    crate::kernel::error::refused(io::ErrorKind::InvalidData, message)
 }
 
 /// Split a project-relative path into its parent components and its file
@@ -2236,6 +2256,8 @@ mod tests {
         let file = temp.0.join("file");
         fs::write(&file, b"x").unwrap();
         let error = ProjectRoot::open(&file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(crate::kernel::error::class_of(&error), None);
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -2271,6 +2293,10 @@ mod tests {
         fs::write(dir.join("extra.json"), b"impostor").unwrap();
 
         let error = root.check_still_named().unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         assert!(
             error.to_string().contains("moved or replaced during sync"),
             "{error}"
@@ -2443,6 +2469,10 @@ mod tests {
         fs::rename(&parent, &real).unwrap();
         symlink(&real, &parent).unwrap();
         let error = root.check_still_named().unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         assert!(error.to_string().contains("moved"), "{error}");
     }
 

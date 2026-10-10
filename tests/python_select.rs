@@ -189,7 +189,7 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     let output = tog(&project, &temp.0, &["sync"]);
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(5),
         "unexpected status: {output:?}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);

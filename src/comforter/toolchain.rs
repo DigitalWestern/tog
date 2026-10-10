@@ -131,6 +131,12 @@ fn invalid(what: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, what.into())
 }
 
+/// A committed lock that is stale, or missing where this run never writes
+/// one: the `Stale` class, so CI can tell it from a broken file.
+fn stale_lock(what: impl Into<String>) -> io::Error {
+    crate::kernel::error::stale(io::ErrorKind::InvalidData, what.into())
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -168,14 +174,12 @@ fn choose(
 /// lock describes the whole project, so a first `tog build cargo` still
 /// selects for a Python pin (#180).
 fn first_lock_needs_every(ecosystem: &str, error: io::Error) -> io::Error {
-    io::Error::new(
-        error.kind(),
-        format!(
-            "{error}\n(creating tog-toolchain.toml selects a toolchain for every ecosystem \
-             in the project, {ecosystem} included, so every sync and build here waits on \
-             this; fix the {ecosystem} toolchain error above, then run `tog`)"
-        ),
-    )
+    let message = format!(
+        "{error}\n(creating tog-toolchain.toml selects a toolchain for every ecosystem \
+         in the project, {ecosystem} included, so every sync and build here waits on \
+         this; fix the {ecosystem} toolchain error above, then run `tog`)"
+    );
+    crate::kernel::error::describe(error, message)
 }
 
 /// One selection read from a committed section, checked against the host.
@@ -280,7 +284,7 @@ pub fn resolve(
         for entry in &inputs {
             let ecosystem = entry.lock_ecosystem.as_str();
             let section = committed.ecosystem(ecosystem).ok_or_else(|| {
-                invalid(format!(
+                stale_lock(format!(
                     "tog-toolchain.toml has no [toolchain.{ecosystem}] section for the \
                      {ecosystem} project found here; run `tog update --toolchain {ecosystem}`"
                 ))
@@ -288,7 +292,7 @@ pub fn resolve(
             let stale = lock::stale_rows(&section.inputs(), rows_of(&discovered, ecosystem));
             if !stale.is_empty() {
                 let rows: Vec<String> = stale.iter().map(ToString::to_string).collect();
-                return Err(invalid(format!(
+                return Err(stale_lock(format!(
                     "tog-toolchain.toml is stale for {ecosystem}: {}; \
                      run `tog update --toolchain {ecosystem}`",
                     rows.join("; ")
@@ -308,13 +312,13 @@ pub fn resolve(
     } else {
         match &mode {
             Mode::Frozen => {
-                return Err(invalid(
+                return Err(stale_lock(
                     "tog-toolchain.toml is missing and --frozen never creates it; run `tog` \
                      (or `tog update --toolchain`) once without --frozen and commit the file",
                 ))
             }
             Mode::Writable if strict => {
-                return Err(invalid(
+                return Err(stale_lock(
                     "tog-toolchain.toml is missing and strict policy never creates it; run \
                      `tog` (or `tog update --toolchain`) once and commit the file",
                 ))

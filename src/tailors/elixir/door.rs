@@ -176,9 +176,9 @@ pub(crate) fn run_mix(
     let mut confined = mix_confined(&mut run)?;
     confined.expected_inputs = captured;
     let report = door.run_confined(spec, confined).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("store {}: {e}", run.args.join(" ").replace(SCRATCH, "")),
+        crate::kernel::error::context(
+            e,
+            format_args!("store {}", run.args.join(" ").replace(SCRATCH, "")),
         )
     })?;
     if let (true, Some(objects)) = (detached, &report.ledger) {

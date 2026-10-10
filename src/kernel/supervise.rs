@@ -202,9 +202,13 @@ impl std::error::Error for Interrupted {}
 
 /// The [`Interrupted`] record inside `error`, when it is the one a
 /// supervised call returned. Wrapping the error in a new message keeps the
-/// kind but drops the record, so callers that need the status look first.
+/// kind but drops the record unless it uses `error::context`. Retained typed
+/// wrappers preserve the record, so child status and signal handling agree.
 pub fn interrupted(error: &io::Error) -> Option<&Interrupted> {
-    error.get_ref()?.downcast_ref::<Interrupted>()
+    error
+        .get_ref()
+        .and_then(|payload| payload.downcast_ref::<Interrupted>())
+        .or_else(|| crate::kernel::error::inner(error).and_then(interrupted))
 }
 
 /// The first terminating signal in `received`, recorded for `stop_signal`.

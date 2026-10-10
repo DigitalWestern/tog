@@ -270,9 +270,9 @@ where
         Ok(before)
     });
     let before = prepared.map_err(|refusal| {
-        io::Error::new(
-            refusal.kind(),
-            format!("{attempts}, and it was not retried against the whole host: {refusal}"),
+        crate::kernel::error::context(
+            refusal,
+            format_args!("{attempts}, and it was not retried against the whole host"),
         )
     })?;
     // The retry's error first: it is the one left to fix, and a caller

@@ -35,7 +35,7 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
     let attribution = policy::Attribution::open(ecosystem)?;
     let lone = tailor
         .lone_file(ctx, &toolchain, &extension)
-        .map_err(|error| io::Error::new(error.kind(), format!("'{file}': {error}")))?
+        .map_err(|error| crate::kernel::error::context(error, format_args!("'{file}'")))?
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,

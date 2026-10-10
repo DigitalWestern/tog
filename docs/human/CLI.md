@@ -119,6 +119,29 @@ the program's status through. Which files tog reads per ecosystem:
   convention: Ctrl-C during a sync exits 130 and says it was interrupted.
   `tog run` and `tog x` exit with their child's code, so the child decides
   what an interrupt means there.
+- **The exit status says what kind of failure it was**, so a script or a CI
+  job can branch on it without reading the message:
+
+  | Status | Meaning | What to do |
+  |---|---|---|
+  | 0 | success | |
+  | 1 | any other failure | read the message |
+  | 2 | usage error (argv), or `audit`'s misconfigured gate | fix the command line |
+  | 3 | refused by rule: a policy denial, a store tog will not open, a project path swapped under it, `pip install` inside `tog run` | change the policy or the input; rerunning changes nothing |
+  | 4 | stale: a committed lock no longer matches its inputs, or is missing where `--frozen` or a strict policy never writes one | update the lock and commit it |
+  | 5 | unsupported here: a pin no catalog has, a runtime too old for the file, no isolation on this machine | change the pin or the machine |
+  | 128 + n | stopped by signal n (130 for Ctrl-C) | |
+
+  Under `--json` the failure object carries the same class as a key:
+  `{"error": "...", "class": "refused"}` (`refused`, `stale`,
+  `unsupported`), beside `fix` when there is one. `audit` keeps its own
+  verdict codes: 1 for a gate that denies, 2 for a misconfigured one.
+  `status` and `doctor` also return their report verdicts, including 1 for
+  a stale projection or a failed diagnostic. These are completed reports,
+  rather than classified command errors. Classification is being migrated
+  gradually. Remaining ordinary errors, including some proxy resolution
+  failures, exit 1 and omit `class`. Treat 1 as an unknown failure, without
+  assuming that retrying is safe or that it bypasses a policy denial.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
   and every subprocess command line — the bug-report mode. An error is never
   narration: `--quiet` redirects stderr but keeps a private copy of it, and
@@ -349,7 +372,9 @@ development dependencies (`remove --dev` only for uv and Cargo). The global
 verbs, including `update --toolchain` and `update --self`, because they
 exist to write the lock `--frozen` only checks. Refusals —
 Poetry, PDM, Yarn classic and Berry, setup.py, Elixir `mix add`, .NET —
-print the exact line and file to run yourself, exit 1, no writes. Every
+print the exact line and file to run yourself, exit 5 (unsupported), no writes
+when the edit reaches that unsupported project shape. Earlier input, lock or
+policy checks retain their own failure statuses. Every
 dependency argument is validated before delegation, and a request that would
 edit more than one project root (a pnpm member plus its workspace root) is
 refused with both roots named. Ecosystem choice, cheapest rung first:

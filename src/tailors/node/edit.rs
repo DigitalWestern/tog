@@ -14,7 +14,7 @@ use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::Publish;
 use crate::kernel::resolve::{record, DoorKind, ResolutionDoor};
 use crate::tailors::edit::{
-    other, registry_latest, CachedTool, EditHost, EditOutcome, EditVerb, ManifestEdit,
+    by_hand, other, registry_latest, CachedTool, EditHost, EditOutcome, EditVerb, ManifestEdit,
     PackageRegistry,
 };
 use std::fs;
@@ -390,12 +390,12 @@ fn is_yarn_berry(root: &Path) -> bool {
 
 fn yarn_refusal(root: &Path, verb: EditVerb, texts: &[String], dev: bool) -> io::Error {
     if is_yarn_berry(root) {
-        return other(
+        return by_hand(
             "this project uses Yarn Berry; Berry cache checksums are not npm tarball integrity values; convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only', then 'tog'",
         );
     }
     let tool_verb = verb.command();
-    other(format!(
+    by_hand(format!(
         "this project is locked by yarn (yarn.lock) and yarn is not a pinned tool; run 'yarn {tool_verb}{}{}', then 'tog' (it imports yarn.lock)",
         if dev && verb == EditVerb::Add { " -D" } else { "" },
         texts.iter().map(|text| format!(" {text}")).collect::<String>()

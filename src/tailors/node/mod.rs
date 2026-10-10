@@ -64,7 +64,7 @@ fn err(msg: impl Into<String>) -> io::Error {
 }
 
 fn wrap_ensure_node_error(error: io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("ensure node: {error}"))
+    crate::kernel::error::context(error, "ensure node")
 }
 
 #[cfg(test)]
@@ -1975,6 +1975,64 @@ mod tests {
             "ensure node: node: selected toolchain is python (cpython), not node (node)"
         );
         assert!(!store.root.exists());
+    }
+
+    #[test]
+    fn a_cached_runtime_policy_denial_keeps_its_class_through_environment_realization() {
+        use crate::kernel::{
+            error,
+            policy::{Exception, Policy, PolicyScope},
+        };
+        let temp = TempDir::named("node-cached-denial");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let platform = Platform::host().unwrap();
+        let selected = shipped_selection().unwrap();
+        let identity = node_identity_of(&node_row(&selected, platform).unwrap(), platform);
+        let staged = store.stage_with_activity(&activity).unwrap();
+        fs::create_dir(staged.join("bin")).unwrap();
+        let exception = Exception {
+            kind: "file-collision".into(),
+            subject: "node".into(),
+            detail: "fixture".into(),
+        };
+        store
+            .commit_with_activity_and_deps(
+                &activity,
+                &identity,
+                &staged,
+                &[exception],
+                &Default::default(),
+            )
+            .unwrap();
+        let _scope = PolicyScope::install(Policy {
+            deny: ["file-collision".into()].into(),
+            ..Policy::default()
+        });
+        let plan = NpmPlan {
+            node_version: selected.primary_version(),
+            packages: vec![],
+            links: vec![],
+            workspaces: vec![],
+            lock_source: "package-lock.json".into(),
+        };
+        let direct = realize_runtime(&store, &activity, platform, &selected).unwrap_err();
+        let wrapped = realize_node_env_for(
+            &store,
+            &activity,
+            platform,
+            &plan,
+            &[],
+            &selected,
+            &test_gyp_python(),
+        )
+        .unwrap_err();
+        assert_eq!(error::class_of(&direct), Some(error::Class::Refused));
+        assert_eq!(error::class_of(&wrapped), Some(error::Class::Refused));
+        assert_eq!(wrapped.kind(), direct.kind());
+        assert_eq!(wrapped.to_string(), format!("ensure node: {direct}"));
     }
 
     #[test]

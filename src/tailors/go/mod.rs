@@ -587,11 +587,14 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str, gosum: &str) -> io::Resu
 /// time: `prepare` would have tidied it, and the command layer skips
 /// `prepare` under `--frozen`.
 fn untidy(project: &ProjectRoot) -> io::Error {
-    err(format!(
-        "go.mod and go.sum in {} are not tidy and --frozen never updates them; run \
+    crate::kernel::error::stale(
+        io::ErrorKind::InvalidData,
+        format!(
+            "go.mod and go.sum in {} are not tidy and --frozen never updates them; run \
          `tog` once without --frozen and commit the result",
-        project.path().display()
-    ))
+            project.path().display()
+        ),
+    )
 }
 
 /// go.mod through the held descriptor. Absent is the NotFound a path read

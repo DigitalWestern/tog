@@ -914,7 +914,10 @@ pub fn record_with_fix(
                 ),
                 None => refusal(policy, kind, subject, detail),
             };
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
+            return Err(crate::kernel::error::refused(
+                io::ErrorKind::PermissionDenied,
+                message,
+            ));
         }
         let kind = canonical_kind(kind);
         // The record itself is progress: what to do about it depends on
@@ -1344,7 +1347,7 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
     if denied_kinds.is_empty() {
         return Ok(());
     }
-    Err(io::Error::new(
+    Err(crate::kernel::error::refused(
         io::ErrorKind::PermissionDenied,
         format!(
             "cached object {id} carries exception(s): {}; 'tog --fresh' will not help; rebuild the object under a permissive policy or fix the cause",
