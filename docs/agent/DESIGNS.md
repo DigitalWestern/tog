@@ -1871,7 +1871,6 @@ jobs:
           printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
           export TOG_POLICY="$RUNNER_TEMP/policy.toml"
           tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
-          tog audit
         env:
           TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
 
@@ -1893,6 +1892,12 @@ from forks, so a fork's `attest` job fails and its gate reports
 attested when a maintainer's run of the same commit signs it. The gate
 should be a required check whose workflow file is protected by branch
 rules, as with any CI gate. PR 10 puts this example in the README.
+
+This gate verifies signed resolution records during a fresh policy-enforced
+sync. The keyless sync writes unsigned closure records. `tog audit` under
+its trusted-key policy would refuse those closures, so it is not a step in
+this flow. A gate that requires signed closures needs a separate trusted
+closure-producing setup. Signed resolution receipts do not sign closures.
 
 **The bot-commit alternative.** A team that prefers committed records
 runs `tog attest` without `--record-out` in the same key-holding job and

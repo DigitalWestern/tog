@@ -336,7 +336,6 @@ jobs:
           printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
           export TOG_POLICY="$RUNNER_TEMP/policy.toml"
           tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
-          tog audit
         env:
           TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
 
@@ -355,6 +354,12 @@ requests, so a fork's `attest` job fails and its gate reports
 `unrecorded-resolution`. That is the fail-closed result: a maintainer's
 run of the same commit signs it. Make the gate a required check and
 protect its workflow file with branch rules.
+
+This gate verifies signed resolution records during a fresh policy-enforced
+sync. The keyless sync writes unsigned closure records. `tog audit` under
+its trusted-key policy would refuse those closures, so it is not a step in
+this flow. A gate that requires signed closures needs a separate trusted
+closure-producing setup. Signed resolution receipts do not sign closures.
 
 The alternative is a bot commit: the key-holding job runs `tog attest`
 without `--record-out` and commits `.tog/resolution/` back to the branch.
