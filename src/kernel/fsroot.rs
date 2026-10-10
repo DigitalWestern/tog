@@ -95,6 +95,15 @@ impl ProjectRoot {
     /// component at a time with O_NOFOLLOW, so an ancestor swapped for a
     /// symlink after canonicalization is refused rather than followed.
     pub fn open(project_dir: &Path) -> io::Result<Self> {
+        // An ordinary non-directory request is absent from detection. Decide
+        // this before the no-follow walk. A later walk refusal must never be
+        // reinterpreted by looking up its now-mutable pathname again.
+        if !fs::metadata(project_dir)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("open project {}: not a directory", project_dir.display()),
+            ));
+        }
         let path = project_dir.canonicalize().map_err(|error| {
             io::Error::new(
                 error.kind(),
