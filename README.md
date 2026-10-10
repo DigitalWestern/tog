@@ -370,7 +370,7 @@ jobs:
           attest_key_file=$(mktemp "$RUNNER_TEMP/tog-key.XXXXXX")
           trap 'rm -f "$attest_key_file"' EXIT
           record_dir=$(mktemp -d "$RUNNER_TEMP/tog-records.XXXXXX")
-          printf '%s\n' "$TOG_ATTEST_KEY" > "$attest_key_file"
+          printf '%s' "$TOG_ATTEST_KEY" > "$attest_key_file"
           unset TOG_ATTEST_KEY
           TOG_SIGNING_KEY="$attest_key_file" tog attest --record-out "$record_dir"
           printf 'records=%s\n' "$record_dir" >> "$GITHUB_OUTPUT"
