@@ -279,15 +279,24 @@ fn probe_container(
         ));
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let reason = stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no message");
+    let reason = probe_failure_reason(&stderr);
     Ok(Err(format!(
         "rootless podman cannot run a fenced container here ({}): {reason}",
         output.status
     )))
+}
+
+fn probe_failure_reason(stderr: &str) -> &str {
+    let lines = || {
+        stderr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+    };
+    lines()
+        .find(|line| line.starts_with("Error:") || line.contains("level=error"))
+        .or_else(|| lines().next())
+        .unwrap_or("no message")
 }
 
 /// The distro podman first, then `PATH`, as for bubblewrap.
@@ -646,6 +655,21 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("own-container"));
         assert!(error.to_string().contains("unconfirmed"));
+    }
+
+    #[test]
+    fn probe_reports_engine_failure_ahead_of_configuration_warnings() {
+        assert_eq!(
+            probe_failure_reason(
+                "warning: storage driver default\nError: private PID namespaces unavailable\n"
+            ),
+            "Error: private PID namespaces unavailable"
+        );
+        assert_eq!(
+            probe_failure_reason("\n permission denied\n"),
+            "permission denied"
+        );
+        assert_eq!(probe_failure_reason("\n"), "no message");
     }
 
     #[test]
