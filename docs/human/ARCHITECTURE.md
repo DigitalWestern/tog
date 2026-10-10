@@ -1057,7 +1057,8 @@ These keep the layout organized. The first is enforced by
    request are built with `kernel::error` (`refused`, `stale`, or the
    `Unsupported` kind), which `main` turns into exit statuses 3, 4 and 5
    (`docs/human/CLI.md`). Adding words to an error goes through
-   `error::context`, which keeps the class;
+   `error::context`, which retains the typed cause, class, store recovery
+   command and interruption record;
    `io::Error::new(e.kind(), format!(..))` keeps only the text.
 
 ## Layout

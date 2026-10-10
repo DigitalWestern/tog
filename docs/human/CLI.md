@@ -136,6 +136,12 @@ the program's status through. Which files tog reads per ecosystem:
   `{"error": "...", "class": "refused"}` (`refused`, `stale`,
   `unsupported`), beside `fix` when there is one. `audit` keeps its own
   verdict codes: 1 for a gate that denies, 2 for a misconfigured one.
+  `status` and `doctor` also return their report verdicts, including 1 for
+  a stale projection or a failed diagnostic. These are completed reports,
+  rather than classified command errors. Classification is being migrated
+  gradually. Remaining ordinary errors, including some proxy resolution
+  failures, exit 1 and omit `class`. Treat 1 as an unknown failure, without
+  assuming that retrying is safe or that it bypasses a policy denial.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
   and every subprocess command line — the bug-report mode. An error is never
   narration: `--quiet` redirects stderr but keeps a private copy of it, and
@@ -366,7 +372,9 @@ development dependencies (`remove --dev` only for uv and Cargo). The global
 verbs, including `update --toolchain` and `update --self`, because they
 exist to write the lock `--frozen` only checks. Refusals —
 Poetry, PDM, Yarn classic and Berry, setup.py, Elixir `mix add`, .NET —
-print the exact line and file to run yourself, exit 5 (unsupported), no writes. Every
+print the exact line and file to run yourself, exit 5 (unsupported), no writes
+when the edit reaches that unsupported project shape. Earlier input, lock or
+policy checks retain their own failure statuses. Every
 dependency argument is validated before delegation, and a request that would
 edit more than one project root (a pnpm member plus its workspace root) is
 refused with both roots named. Ecosystem choice, cheapest rung first:
