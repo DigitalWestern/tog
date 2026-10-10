@@ -26,11 +26,11 @@
   Action. Not in this repository, and not to be started here: anything
   that receives closures from many customers over a network (the
   cross-repo dashboard), the hosted toolchain catalog and publisher-key
-  service, and a hosted package mirror. Those are the business and go in
-  a separate, closed repository when they are built. The CLI may grow the
-  client side of each (a command that posts a closure, a configurable
-  catalog source) as long as it works without the hosted service.
-  docs/human/PRODUCT.md is the long form.
+  service, and a hosted package mirror. The CLI may grow the client side
+  of each (a command that posts a closure, a configurable catalog source)
+  as long as it works without the hosted service. Product and business
+  discussion stays out of this repository: its files, commits, issues and
+  pull requests.
 
 - After a pull request you worked on is merged, open a GitHub issue for
   every exception, problem, or needed fix you found along the way and did
