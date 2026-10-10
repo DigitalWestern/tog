@@ -517,9 +517,11 @@ The census, by door kind:
 `tog x` resolves a registry tool into `~/.tog/x` through a door of its
 own kind, confined the same way.
 
-Not covered, by design: `tog build` and `tog run` run project code in the
-build sandbox, which has no network and records no ledger, and an install
-script runs there too. They are builds, not resolutions.
+`tog build` and installation builds run project code in the build sandbox,
+which denies network access and records no resolution ledger. `tog run`
+uses the projected runtime and dependencies but executes on the host,
+without a sandbox or network restriction. Run untrusted tests only in a
+separate disposable job that holds no signing key or other secrets.
 
 ## Toolchain lock
 
