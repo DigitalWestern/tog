@@ -3,20 +3,19 @@
 //! --package-lock-only`, `cargo generate-lockfile`, `bundle lock`, a Gemfile
 //! check, and every other row of the census in the design).
 //!
-//! Every such child starts through [`ResolutionDoor::run`]. Host-local
+//! Every such child starts through [`ResolutionDoor::run_confined`]. Host-local
 //! helpers start through `kernel::supervise`'s `local_*` functions instead,
 //! which refuse a resolver program outside the reviewed offline forms
 //! ([`tripwire`]), and clippy refuses the unrestricted supervise primitives
 //! everywhere but the reviewed kernel sites. So a new resolver call site
 //! cannot bypass the door by accident.
 //!
-//! The door has two modes. [`ResolutionDoor::run`] is `Legacy`: it runs
-//! exactly the command the call site describes, unsandboxed, in the
-//! environment the site builds on top of tog's own, with no snapshot, and
-//! records nothing. [`ResolutionDoor::run_confined`] runs it isolated on a
-//! snapshot, through a proxy session, and publishes its declared outputs
-//! all or nothing ([`door`]). A call site moves from one to the other by
-//! adding a [`door::ConfinedSpec`]; its `DelegateSpec` keeps its shape.
+//! The door has one mode: [`ResolutionDoor::run_confined`] runs the tool
+//! isolated on a snapshot, through a proxy session, and publishes its
+//! declared outputs all or nothing ([`door`]). A call site describes the
+//! command as a [`DelegateSpec`] and the confinement as a
+//! [`door::ConfinedSpec`]. There is no unsandboxed way through it: a host
+//! that cannot isolate the tool refuses it, naming what is missing.
 //!
 //! The resolution proxy lives beside the door: the only network path of a
 //! delegated dependency tool. It forwards only to permitted registries,
@@ -94,15 +93,6 @@ impl DoorKind {
     }
 }
 
-/// How the door runs the tool. `Legacy` is today's behavior, kept exactly
-/// while the confined mode is built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    /// Unsandboxed, in the environment the spec builds on tog's own, in the
-    /// real directory, recording nothing.
-    Legacy,
-}
-
 /// The only way to run a dependency tool that may use the network or
 /// evaluate project code. Borrowing the attribution ties every fact the
 /// run produces to the scope that will publish (or discard) it.
@@ -112,7 +102,6 @@ pub struct ResolutionDoor<'a> {
     platform: Platform,
     kind: DoorKind,
     attribution: &'a mut Attribution,
-    mode: Mode,
     /// Ledgers of Detached runs made with no project at hand (an sdist's
     /// Cargo.lock), shared with every reopened door, for whoever opened
     /// this one to root under its project ([`Self::take_kept_ledgers`]).
@@ -135,7 +124,6 @@ impl<'a> ResolutionDoor<'a> {
             platform,
             kind,
             attribution,
-            mode: Mode::Legacy,
             kept: Rc::default(),
         })
     }
@@ -151,7 +139,6 @@ impl<'a> ResolutionDoor<'a> {
             platform: self.platform,
             kind,
             attribution: &mut *self.attribution,
-            mode: self.mode,
             kept: Rc::clone(&self.kept),
         }
     }
@@ -169,21 +156,11 @@ impl<'a> ResolutionDoor<'a> {
         std::mem::take(&mut *self.kept.borrow_mut())
     }
 
-    /// Run one tool invocation and report how it ended. A tool that exits
-    /// nonzero is a report, not an error: each call site words its own
-    /// failure. An error is one the supervisor returned (the tool could not
-    /// start, or tog was asked to stop while it ran), unchanged.
-    pub fn run(&mut self, spec: DelegateSpec) -> io::Result<DelegateReport> {
-        match self.mode {
-            Mode::Legacy => self.run_legacy(&spec),
-        }
-    }
-
     /// Run one tool invocation confined: isolated against a snapshot of
     /// its lock root, reaching the network only through a proxy session,
     /// its declared outputs published all or nothing (see [`door`]). A
-    /// tool that exits nonzero is a report, as with [`Self::run`], and
-    /// nothing is published. A policy refusal, an offline miss, an
+    /// tool that exits nonzero is a report, not an error (each call site
+    /// words its own failure), and nothing is published. A policy refusal, an offline miss, an
     /// undeclared write, a secret in an output, or a denied exception is
     /// an error, even when the tool exited 0.
     pub fn run_confined(
@@ -192,32 +169,6 @@ impl<'a> ResolutionDoor<'a> {
         confined: door::ConfinedSpec<'_>,
     ) -> io::Result<DelegateReport> {
         door::run(self, spec, confined)
-    }
-
-    // Reviewed site (tests/architecture.rs): the door: every census tool starts here.
-    #[allow(clippy::disallowed_methods)]
-    fn run_legacy(&mut self, spec: &DelegateSpec) -> io::Result<DelegateReport> {
-        let mut command = spec.command();
-        match spec.stdio {
-            DelegateStdio::Inherit => {
-                let status = crate::kernel::supervise::status(&mut command, self.activity)?;
-                Ok(DelegateReport {
-                    status,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    ledger: None,
-                })
-            }
-            DelegateStdio::Capture => {
-                let output = crate::kernel::supervise::output(&mut command, self.activity)?;
-                Ok(DelegateReport {
-                    status: output.status,
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                    ledger: None,
-                })
-            }
-        }
     }
 
     /// The scope this door records into, lent back to the caller between
@@ -255,8 +206,8 @@ pub enum DelegateStdio {
 /// One tool invocation, described rather than built, so the door decides
 /// how it runs. The builder methods mirror `std::process::Command`'s and
 /// keep its environment semantics (a map of edits over the inherited
-/// environment, or over nothing after `env_clear`), so `Legacy` rebuilds
-/// exactly the command a call site used to spawn itself.
+/// environment, or over nothing after `env_clear`), and the door applies
+/// them to the tool it starts in isolation.
 #[derive(Debug, Clone)]
 pub struct DelegateSpec {
     /// The tool's executable, normally a store object path.
@@ -354,7 +305,7 @@ impl DelegateSpec {
         crate::kernel::ui::trace_command(&self.command());
     }
 
-    /// The command this spec describes, as `Legacy` runs it. A host-local
+    /// The command this spec describes, run as written. A host-local
     /// helper built with the same spec (a Go extraction with the proxy off)
     /// hands it to `kernel::supervise`'s `local_*` functions.
     pub fn command(&self) -> Command {
@@ -386,8 +337,8 @@ pub struct DelegateReport {
     pub stderr: Vec<u8>,
     /// The ledger and its sidecar a confined run committed. A project run
     /// rooted them in the project's record; a detached run's caller roots
-    /// them itself before its store lease ends. `None` for `Legacy` and
-    /// for a tool that failed.
+    /// them itself before its store lease ends. `None` for a tool that
+    /// failed.
     pub ledger: Option<ledger::LedgerObjects>,
 }
 

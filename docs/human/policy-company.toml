@@ -87,7 +87,8 @@ deny = [
     # network fenced to tog's recording proxy, because this machine could
     # not give it a network namespace. The resolution ledger may therefore
     # miss traffic the tool sent. Denied: only fully confined resolutions
-    # pass; enable unprivileged user namespaces for bubblewrap.
+    # pass; enable unprivileged user namespaces for bubblewrap, or install
+    # rootless podman (`tog doctor --isolation` shows which works).
     "unconfined-resolution",
 ]
 
@@ -139,11 +140,13 @@ deny = [
 #                                    on every builder may add this kind to
 #                                    the list above and provide the library
 #                                    another way.
-#   resolution-build                 resolution needed a third-party source
-#                                    distribution built to read its metadata,
-#                                    and the build was allowed. It ran
-#                                    confined, and the lock it produced is
-#                                    verified at sync like any other lock.
+#   resolution-build                 resolution required permission to prepare
+#                                    executable metadata or build source code,
+#                                    including the project's own backend and
+#                                    reuse of setup.py metadata. The permitted
+#                                    preparation ran confined and its provenance
+#                                    is recorded. Add this kind to deny to refuse
+#                                    that preparation and its cached results.
 #   stale-resolution                 resolution metadata came from tog's
 #                                    last-good cache because the registry was
 #                                    unreachable. That gives an older lock,

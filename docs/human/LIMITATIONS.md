@@ -27,11 +27,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   inputs on disk, and that no recorded exception is denied or unknown. It reads `tog-toolchain.toml` the way
   `status` does: a missing lock, a missing section, a stale lock row, or a record built from
   another bundle than the lock names is `stale`. It does not prove the signer's sync was
-  honest or safe to run: it does not cover the doors that run unsandboxed with network
-  (`add`/`remove`/`update`, where the ecosystem's own tool edits the manifest and lock, and
-  missing-lock generation during `sync`/`plan`, where uv, bundler, mix resolve
-  with network; Go, Cargo, and Node (npm, pnpm) resolve confined through tog's proxy
-  instead, and `attest` re-checks their locks), nor does it re-verify store bytes, re-check
+  honest or safe to run. Every door that changes a lock (`add`/`remove`/`update`,
+  missing-lock generation during `sync`/`plan`, `attest`) runs the ecosystem's tool confined
+  through tog's proxy, and the signed resolution record says which ledger saw its traffic,
+  but audit judges the record, not the run. Nor does it re-verify store bytes, re-check
   object metadata, or judge what
   `tog run`/`x` executed. A job that runs untrusted project code must not hold a signing
   key. The machine policy is whatever `TOG_POLICY` or `$HOME` selects: the gate's
@@ -73,8 +72,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   root and the per-project lock are keyed on the canonical path the project was opened at,
   never resolved again, and the sync refuses once that path stops naming the held directory
   (after the store wait, before each ecosystem, before a root is registered, and after the
-  closure is renamed into place). The ecosystem tools a sync starts unsandboxed (uv, npm,
-  cargo, go, mix, bundle, dotnet, git) start in the held directory: the child enters it
+  closure is renamed into place). The host-local ecosystem tools a sync starts outside the
+  resolution sandbox (offline helpers of uv, npm, cargo, go, mix, bundle, dotnet, git) start
+  in the held directory: the child enters it
   through the descriptor (`fchdir`), not the path. A sandboxed child (the `setup.py` probe,
   a sandboxed build in the project) has the held directory bound in through its descriptor
   and starts there, and a confined resolution snapshots the held directory. The inputs a
@@ -126,10 +126,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the
   declarative file to add. Reading those sources means running project code, which is
   exactly what frozen promises not to do.
-- **`add` / `remove` / `update` delegate to store tools with network, unsandboxed** (uv,
-  bundler, mix) — the same trust boundary as missing-lockfile generation. Go, Cargo, and
-  Node (npm and the pinned pnpm) run theirs in the sandbox with no network of their own,
-  through tog's resolution proxy.
+- **`add` / `remove` / `update` run the ecosystem's tool in the resolution sandbox**, with
+  no network of its own, through tog's resolution proxy: Go, Cargo, Node (npm and the pinned
+  pnpm), Python (uv) and Ruby (Bundler). There is no unsandboxed fallback: a host where
+  neither bubblewrap nor rootless podman can isolate the tool refuses the edit and names
+  what is missing (`tog doctor --isolation`).
   Refusal rows: Poetry/PDM, setup.py, `requirements/` dirs, Elixir add/remove, Yarn, .NET.
 - **A Node `file:` or `link:` dependency outside the project is refused** by every door
   (edits, a missing lock, `attest`), naming the manifest and the path: the confined npm or

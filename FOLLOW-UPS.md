@@ -14,29 +14,19 @@ by position.
 
 ## Next up, in order
 
-The resolution proxy (#68), then the cleanup. Today Go, Cargo, Node, and
-Python resolve confined through the proxy (PRs 1 to 7: #198, #199, #200,
-#202, #203, #204, #205). Every other ecosystem's `add`, `remove`, `update`, and
-missing-lock generation runs through the door's unsandboxed `Legacy` mode
-with network, the largest gap in what tog promises. Design:
-`docs/agent/DESIGNS.md` §6 (#196), evidence in #209. One pull request
-each, in this order:
+The resolution proxy (#68) is built: every ecosystem resolves confined
+through it, and the door has no unsandboxed mode (#208). Left of it:
 
-1. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Edits
-   already resolve without installing (#211).
-2. **#207 (PR 9): .NET.** The `nuget.config` mirror.
-3. **#201 (PR 3b): the container backend and `tog-isolate`.** The podman
-   backend and `tog doctor --isolation` are built (#201's PR). Left:
-   docker (it cannot pass the relay's descriptors into a container) and
-   the setuid `tog-isolate` helper, which needs a root install to build
-   and test.
-4. **#208 (PR 10): remove `Legacy`.**
+1. **#201: docker and `tog-isolate`.** The podman backend and `tog doctor
+   --isolation` are built. Docker cannot pass the relay's descriptors
+   into a container, and the setuid `tog-isolate` helper needs a root
+   install to build and test.
 
 The macOS door (Seatbelt rules, the Mach allow-list from one run of
 `tools/proxy_spike/macos_mach.sh` on a Mac, tree freeze) is not one of
 these; it waits with the macOS gate below.
 
-After the proxy: what is left of the quality review (#264), under "Open
+Next: what is left of the quality review (#264), under "Open
 work", in its listed order.
 
 ## Decisions waiting on the owner
@@ -106,3 +96,8 @@ None open.
 - #641: Design policy-owned NuGet feeds, credentials, signatures and cache boundaries.
 - #642: Design declared MSBuild resolution inputs with conservative fallback.
 - #643: Cover unsupported future-tailor attest guards with focused unit tests.
+
+- #645: Design Docker relay descriptor transport and the privileged helper installation boundary.
+- #646: Design policy-owned Podman runtime and storage configuration with tenant boundaries.
+- #647: Design persisted owned-container recovery and stopped-process proof after crashes.
+- #648: Require a supported-Podman CI lane and forced-backend real ecosystem coverage.

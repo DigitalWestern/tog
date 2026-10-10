@@ -341,8 +341,7 @@ pub(super) fn run(
     }
     let facts = record_facts(&confined, &policy, &ran)?;
     if !status.success() {
-        // The call site words a failing tool, as it does for `Legacy`.
-        // Nothing was published and no ledger is kept.
+        // The call site words a failing tool. Nothing was published and no ledger is kept.
         let mut failed = report(status, ran.outcome, None);
         // Clients such as Bundler discard the body of a refused CONNECT.
         // Keep the proxy's redacted reason visible at the command boundary.
