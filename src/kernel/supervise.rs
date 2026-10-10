@@ -117,11 +117,11 @@ struct Registry {
     /// A session left with TERMs it could not forward (its child was
     /// already reaped). The last session to leave re-raises one TERM for
     /// them, so a TERM nobody delivered still stops tog.
-    term_orphaned: bool,
+    term_orphaned: Vec<Option<u64>>,
 }
 
 static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
-    term_orphaned: false,
+    term_orphaned: Vec::new(),
 });
 
 fn registry() -> std::sync::MutexGuard<'static, Registry> {
@@ -617,10 +617,16 @@ fn drain_notifications() {
     while unsafe { libc::read(fd, bytes.as_mut_ptr() as *mut libc::c_void, bytes.len()) } > 0 {}
 }
 
+#[derive(Clone, Copy)]
+struct CleanupStart {
+    owner: u64,
+    cursors: [u32; 4],
+}
+
 thread_local! {
     // Nested client sessions inherit cancellation since the enclosing
     // cleanup scope began, including its registration-to-spawn interval.
-    static CLEANUP_START: Cell<Option<[u32; 4]>> = const { Cell::new(None) };
+    static CLEANUP_START: Cell<Option<CleanupStart>> = const { Cell::new(None) };
 }
 
 /// One supervised child's signal session: a registration among any number
@@ -631,6 +637,7 @@ struct Session {
     /// thread reaps the child and only this thread forwards to it, so a
     /// reaped (possibly recycled) pid is never signalled.
     child_pid: Cell<i32>,
+    cleanup_owner: Option<u64>,
     term_cursor: Cell<u32>,
     int_cursor: Cell<u32>,
     hup_cursor: Cell<u32>,
@@ -670,6 +677,7 @@ impl Session {
         pause_boundary("after-register");
         let mut session = Self {
             child_pid: Cell::new(-1),
+            cleanup_owner: None,
             term_cursor: Cell::new(term_count(packed)),
             int_cursor: Cell::new(int_cursor),
             hup_cursor: Cell::new(hup_cursor),
@@ -683,7 +691,12 @@ impl Session {
             active: true,
         };
         CLEANUP_START.with(|start| {
-            if let Some([term, int, hup, quit]) = start.get() {
+            if let Some(CleanupStart {
+                owner,
+                cursors: [term, int, hup, quit],
+            }) = start.get()
+            {
+                session.cleanup_owner = Some(owner);
                 session.term_cursor.set(term);
                 session.int_cursor.set(int);
                 session.hup_cursor.set(hup);
@@ -903,14 +916,14 @@ impl Session {
         self.reconcile();
         let mut registry = registry();
         if !cleanup_handled && self.unconsumed_terms.get() != 0 {
-            registry.term_orphaned = true;
+            registry.term_orphaned.push(self.cleanup_owner);
         }
         pause_boundary("before-deregister");
         let packed = SESSION_TERM.fetch_sub(ONE_SESSION, Ordering::SeqCst);
         let unseen = term_count(packed) != self.term_cursor.get();
         if unseen {
             if !cleanup_handled {
-                registry.term_orphaned = true;
+                registry.term_orphaned.push(self.cleanup_owner);
             }
             self.received
                 .set(self.received.get() | signal_bit(libc::SIGTERM));
@@ -929,12 +942,14 @@ impl Session {
         // observed. Even orphaned cancellation from a nested client/drain
         // session is now handled as an interruption, rather than re-raised.
         if cleanup_handled {
-            registry.term_orphaned = false;
+            registry
+                .term_orphaned
+                .retain(|owner| *owner != self.cleanup_owner);
         }
         let mut reraise = false;
         if live_sessions(packed) == 1 {
-            reraise = !cleanup_handled && (registry.term_orphaned || unseen);
-            registry.term_orphaned = false;
+            reraise = !registry.term_orphaned.is_empty() || (!cleanup_handled && unseen);
+            registry.term_orphaned.clear();
         }
         if reraise {
             pause_boundary("before-reraise");
@@ -998,7 +1013,7 @@ fn assert_term_handler_is_tog_s() {
 /// retain their existing orphan-signal behavior.
 pub(crate) fn during_cleanup<T>(work: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     use std::os::unix::process::ExitStatusExt as _;
-    struct Restore(Option<[u32; 4]>);
+    struct Restore(Option<CleanupStart>);
     impl Drop for Restore {
         fn drop(&mut self) {
             CLEANUP_START.with(|start| start.set(self.0));
@@ -1006,13 +1021,19 @@ pub(crate) fn during_cleanup<T>(work: impl FnOnce() -> io::Result<T>) -> io::Res
     }
     let mut session = Session::new()?;
     session.reject_pending_before_spawn()?;
+    static NEXT_CLEANUP: AtomicU64 = AtomicU64::new(1);
+    let owner = NEXT_CLEANUP.fetch_add(1, Ordering::Relaxed);
+    session.cleanup_owner = Some(owner);
     let _restore = Restore(CLEANUP_START.with(|start| {
-        start.replace(Some([
-            session.term_cursor.get(),
-            session.int_cursor.get(),
-            session.hup_cursor.get(),
-            session.quit_cursor.get(),
-        ]))
+        start.replace(Some(CleanupStart {
+            owner,
+            cursors: [
+                session.term_cursor.get(),
+                session.int_cursor.get(),
+                session.hup_cursor.get(),
+                session.quit_cursor.get(),
+            ],
+        }))
     }));
     let result = work();
     let signal = record_stop(session.finish_with_handled_cleanup(true));
@@ -1564,6 +1585,61 @@ fn refuse_resolver(command: &Command, activity: &StoreActivity) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "isolated signal ownership harness"]
+    fn cleanup_orphan_harness() {
+        if std::env::var_os("TOG_CLEANUP_ORPHAN_HARNESS").is_none() {
+            return;
+        }
+        let mut other = Session::new().unwrap();
+        let mut orphan = Session::new().unwrap();
+        // SAFETY: this isolated process has two registered sessions.
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        orphan.finish();
+        other.reconcile();
+        other.unconsumed_terms.set(0);
+        during_cleanup(|| Ok(())).unwrap();
+        assert!(registry().term_orphaned.contains(&None));
+        other.finish();
+        panic!("unrelated orphan TERM was erased by cleanup");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn cleanup_preserves_an_earlier_unrelated_sessions_orphan_term() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "kernel::supervise::tests::cleanup_orphan_harness",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("TOG_CLEANUP_ORPHAN_HARNESS", "1");
+        // SAFETY: reset one disposition between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.signal(), Some(libc::SIGTERM));
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("orphan ownership harness hung");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn signal_counter_rollover_preserves_the_live_registration_count() {
