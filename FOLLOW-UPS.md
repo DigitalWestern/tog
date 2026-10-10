@@ -107,3 +107,5 @@ None open.
 - #257: Finish explicit Context ownership and independent attribution. Thread-bound policy, key and strictness scopes support synchronous operations.
 
 - #651: carry explicit operation Context settings and independently owned attribution through the CLI, completing #257.
+
+- **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.
