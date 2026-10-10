@@ -315,12 +315,14 @@ jobs:
       - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
       - run: |
           umask 077
+          trap 'rm -f "$RUNNER_TEMP/attest.key"' EXIT
           printf '%s\n' "$TOG_ATTEST_KEY" > "$RUNNER_TEMP/attest.key"
-          TOG_SIGNING_KEY="$RUNNER_TEMP/attest.key" tog attest --record-out resolution/
+          unset TOG_ATTEST_KEY
+          TOG_SIGNING_KEY="$RUNNER_TEMP/attest.key" tog attest --record-out "$RUNNER_TEMP/resolution-records"
         env:
           TOG_ATTEST_KEY: ${{ secrets.TOG_ATTEST_KEY }}
       - uses: actions/upload-artifact@v4
-        with: { name: resolution-records, path: resolution/ }
+        with: { name: resolution-records, path: "${{ runner.temp }}/resolution-records" }
 
   gate:                        # no key, verifies the records
     needs: attest
@@ -329,11 +331,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh
       - uses: actions/download-artifact@v4
-        with: { name: resolution-records, path: resolution/ }
+        with: { name: resolution-records, path: "${{ runner.temp }}/resolution-records" }
       - run: |
           printf '[signing]\ntrusted = ["%s"]\n' "$TOG_ATTEST_PUBKEY" > "$RUNNER_TEMP/policy.toml"
           export TOG_POLICY="$RUNNER_TEMP/policy.toml"
-          tog --strict sync --frozen --resolution-record resolution/
+          tog --strict sync --frozen --resolution-record "$RUNNER_TEMP/resolution-records"
           tog audit
         env:
           TOG_ATTEST_PUBKEY: ${{ vars.TOG_ATTEST_PUBKEY }}
