@@ -254,15 +254,18 @@ pub struct Signing {
     pub trusted: KeySet,
 }
 
-/// The policies of the operations in progress, innermost last. Each entry
-/// is owned by one [`PolicyScope`]: an operation installs its own policy
-/// and dropping the scope puts back whatever was in force before, so two
-/// operations in one process never share a first-loaded policy.
-static SCOPES: Mutex<Vec<(u64, Arc<Policy>)>> = Mutex::new(Vec::new());
+// The policies of the operations in progress, innermost last. Each entry
+// is owned by one [`PolicyScope`]: an operation installs its own policy
+// and dropping the scope puts back whatever was in force before, so two
+// operations in one process never share a first-loaded policy. The stack
+// belongs to the calling thread. Workers receive explicit policy snapshots.
+thread_local! {
+    static SCOPES: std::cell::RefCell<Vec<(u64, Arc<Policy>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 static NEXT_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn with_scopes<R>(f: impl FnOnce(&mut Vec<(u64, Arc<Policy>)>) -> R) -> R {
-    f(&mut SCOPES.lock().unwrap_or_else(|error| error.into_inner()))
+    SCOPES.with(|scopes| f(&mut scopes.borrow_mut()))
 }
 
 #[derive(Debug)]
@@ -711,10 +714,23 @@ fn requested_strict() -> bool {
 /// dropped. The operation holds it for as long as it runs (a verb binds it
 /// for its whole body). Dropping it removes its own entry wherever it sits,
 /// so an out-of-order drop cannot remove another operation's policy.
+/// The guard stays on its creating thread. A worker receives an explicit
+/// policy snapshot instead of borrowing or moving the ambient scope.
+///
+/// ```compile_fail
+/// let guard = tog::kernel::policy::PolicyScope::install(Default::default());
+/// std::thread::spawn(move || drop(guard));
+/// ```
+///
+/// ```compile_fail
+/// let guard = tog::kernel::policy::PolicyScope::install(Default::default());
+/// std::thread::scope(|scope| { scope.spawn(|| println!("{guard:?}")); });
+/// ```
 #[must_use = "the policy is in force only while its scope is held"]
 #[derive(Debug)]
 pub struct PolicyScope {
     id: u64,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl PolicyScope {
@@ -727,7 +743,10 @@ impl PolicyScope {
         }
         let id = NEXT_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
         with_scopes(|scopes| scopes.push((id, Arc::new(policy))));
-        Self { id }
+        Self {
+            id,
+            _thread_bound: std::marker::PhantomData,
+        }
     }
 }
 
@@ -2287,6 +2306,79 @@ deny = ["git-dependency"]"#,
     /// The fallback in `current` builds its policy with the same helper the
     /// loaders end on, so with no policy file in reach it must equal what
     /// `load` returns for the same flag and variable.
+    #[test]
+    fn policy_scopes_cannot_relax_another_threads_attribution() {
+        let _env = test_env_lock();
+        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _attribution = attribution_test_lock();
+        let _policy = PolicyScope::install(Policy {
+            deny: BTreeSet::from([WEAK_INTEGRITY.to_string()]),
+            ..Policy::default()
+        });
+        let owner = Attribution::open("scope-owner").unwrap();
+        let snapshot = effective();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let unscoped = denied(&effective(), WEAK_INTEGRITY);
+            let _foreign = PolicyScope::install(Policy::default());
+            let scoped = denied(&effective(), WEAK_INTEGRITY);
+            let frame_error = Attribution::open("other-operation").unwrap_err().kind();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            (
+                unscoped,
+                scoped,
+                frame_error,
+                denied(&snapshot, WEAK_INTEGRITY),
+            )
+        });
+        ready_rx.recv().unwrap();
+        let result = record(WEAK_INTEGRITY, "scope-owner", "must stay denied");
+        release_tx.send(()).unwrap();
+        let (unscoped, scoped, frame_error, explicit_snapshot) = worker.join().unwrap();
+        assert!(
+            !unscoped,
+            "a thread without a scope inherited another policy"
+        );
+        assert!(!scoped);
+        assert!(
+            explicit_snapshot,
+            "explicit worker policy handoff must remain intact"
+        );
+        assert_eq!(frame_error, io::ErrorKind::WouldBlock);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(owner.recorded().is_empty());
+        assert!(denied(&effective(), WEAK_INTEGRITY));
+        owner.discard();
+    }
+
+    #[test]
+    fn policy_scopes_restore_after_inner_drop_error_and_unwind() {
+        let _attribution = attribution_test_lock();
+        let _outer = PolicyScope::install(Policy {
+            deny: BTreeSet::from([WEAK_INTEGRITY.to_string()]),
+            ..Policy::default()
+        });
+        {
+            let _inner = PolicyScope::install(Policy::default());
+            assert!(!denied(&effective(), WEAK_INTEGRITY));
+        }
+        assert!(denied(&effective(), WEAK_INTEGRITY));
+        let fail = || -> io::Result<()> {
+            let _inner = PolicyScope::install(Policy::default());
+            Err(io::Error::other("early operation failure"))
+        };
+        assert!(fail().is_err());
+        assert!(denied(&effective(), WEAK_INTEGRITY));
+        assert!(std::panic::catch_unwind(|| {
+            let _inner = PolicyScope::install(Policy::default());
+            panic!("operation unwind");
+        })
+        .is_err());
+        assert!(denied(&effective(), WEAK_INTEGRITY));
+    }
+
     #[test]
     fn each_policy_scope_is_in_force_only_while_held() {
         let _env = test_env_lock();

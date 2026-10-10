@@ -684,11 +684,13 @@ Sync records recoverable verification gaps in each closure and continues;
 `.tog/policy.toml` denies named kinds (`install-script-failed`,
 `git-dependency`, ...). User and project policies are unioned; deny entries
 are only added. `TOG_STRICT=1` or `tog --strict` denies every
-exception. Each command loads the chain once and holds it as a
-`policy::PolicyScope` while it runs: a second operation in the same process
-loads its own, dropping a scope restores the one before it, and a read
-outside every scope sees the default policy plus the requested strictness,
-never a policy pinned by whichever command read first. Object-affecting exceptions are written into store metadata and
+exception. Each operation loads the chain and holds it as a
+`policy::PolicyScope` while it runs. A nested sync loads its own settings.
+Scopes belong to their creating thread and cannot be moved or shared with
+other threads. Dropping a scope restores the enclosing scope on that thread,
+and a read outside every scope on that thread sees the default policy plus
+the requested strictness. Workers receive an explicit policy snapshot.
+An early read never pins the policy for a later operation. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
