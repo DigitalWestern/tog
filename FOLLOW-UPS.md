@@ -47,7 +47,7 @@ None open.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml` (at that tag, change `@main` in `action.yml`'s header and in
-  CLI.md to it), and an opt-in store cache.
+  CLI.md to it). The opt-in store cache shipped.
 - **A shared system store at `/opt/tog/store`: review, then build (#69).**
   The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
   round, then its four implementation PRs in order.
@@ -107,3 +107,5 @@ None open.
 - #257: Finish explicit Context ownership and independent attribution. Thread-bound policy, key and strictness scopes support synchronous operations.
 
 - #651: carry explicit operation Context settings and independently owned attribution through the CLI, completing #257.
+
+- **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.

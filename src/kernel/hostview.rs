@@ -99,6 +99,53 @@ fn is_llvm_bin(name: &str, host_entry: &Path) -> bool {
             .is_some_and(is_llvm_tree)
 }
 
+/// Library subdirectories of plugins, which the programs that load them
+/// open by name, a `lib*.so` symlink included (`ld` opens
+/// `bfd-plugins/liblto_plugin.so`, GTK `gtk-3.0/modules/
+/// libcanberra-gtk-module.so`). Below one of these a `lib*.so` symlink or
+/// linker script is a plugin, not a `-devel` package's link name: it marks
+/// nothing (`marks_dev_dir`) and stays where it is when a header elsewhere
+/// in the directory gets it curated (`library_entry_placement`). The generic
+/// `modules` and `plugins` cover the many programs that name theirs so.
+const PLUGIN_DIRS: &[&str] = &[
+    "bfd-plugins",
+    "dri",
+    "sasl2",
+    "xtables",
+    "libibverbs",
+    "gconv",
+    "security",
+    "krb5",
+    "ossl-modules",
+    "pkcs11",
+    "vdpau",
+    "alsa-lib",
+    "modules",
+    "plugins",
+];
+
+/// Versioned plugin trees, by the prefix before their version
+/// (`gtk-3.0`, `gdk-pixbuf-2.0`, `gstreamer-1.0`, OpenSSL's `engines-3`).
+const PLUGIN_DIR_PREFIXES: &[&str] = &["gtk-", "gdk-pixbuf-", "gstreamer-", "engines-"];
+
+/// Whether the sandbox path `path` is in a plugin directory: a component
+/// below its library directory (the first `lib`, `lib64`, `lib32` or
+/// `libx32`) is a `PLUGIN_DIRS` name or starts with a
+/// `PLUGIN_DIR_PREFIXES` prefix. Only what is below counts, so the
+/// directory a test's fake host sits in can never make one.
+fn in_plugin_dir(path: &Path) -> bool {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .skip_while(|name| !matches!(name.as_ref(), "lib" | "lib64" | "lib32" | "libx32"))
+        .skip(1)
+        .any(|name| {
+            PLUGIN_DIRS.contains(&name.as_ref())
+                || PLUGIN_DIR_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        })
+}
+
 /// The suffixes of a header file in a library subdirectory
 /// (`Curation::Subtree`).
 const HEADER_SUFFIXES: &[&str] = &[".h", ".hh", ".hpp", ".hxx", ".h++", ".H", ".inl", ".tcc"];
@@ -447,6 +494,7 @@ fn library_entry_placement(
     name: &str,
     file_type: fs::FileType,
     host_entry: &Path,
+    inside_entry: &Path,
     curation: Curation,
 ) -> Placement {
     let subtree = curation == Curation::Subtree;
@@ -464,7 +512,7 @@ fn library_entry_placement(
     if file_type.is_dir() {
         return if is_compiler_dir(name)
             || is_llvm_bin(name, host_entry)
-            || !holds_dev_files(host_entry)
+            || !holds_dev_files(host_entry, inside_entry)
         {
             Placement::Keep
         } else {
@@ -475,7 +523,9 @@ fn library_entry_placement(
         return Placement::Drop;
     }
     if let Some(stem) = name.strip_suffix(".so") {
-        if c_runtime(C_RUNTIME_SHARED, stem) || (subtree && !name.starts_with("lib")) {
+        if c_runtime(C_RUNTIME_SHARED, stem)
+            || (subtree && (!name.starts_with("lib") || in_plugin_dir(inside_entry)))
+        {
             return Placement::Keep;
         }
         if file_type.is_file() && starts_with_elf_magic(host_entry) {
@@ -519,19 +569,29 @@ fn is_header(name: &str) -> bool {
     HEADER_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
-/// Whether a library subdirectory entry marks the subdirectory as holding
-/// a `-devel` package's files: a header, a static or libtool archive, a
-/// `pkgconfig`, `cmake` or `include` directory. Narrower than what
-/// curation then drops: a `lib*.so` symlink alone marks nothing, as plugin directories
-/// are full of them (`bfd-plugins/liblto_plugin.so`, which `ld` loads by
-/// that name, `sasl2`, `xtables`, `libibverbs`), and dropping them would
-/// break the programs that load them. A subdirectory whose only
-/// development file is such a symlink or linker script is bound whole.
-fn marks_dev_dir(name: &str, file_type: fs::FileType) -> bool {
+/// Whether the entry `name` at `host_entry` marks the library subdirectory
+/// holding it as holding a `-devel` package's files: a header, a static or
+/// libtool archive, a `pkgconfig`, `cmake` or `include` directory, and,
+/// outside a plugin directory (`PLUGIN_DIRS`), a `lib*.so` symlink or
+/// linker script, the link name a `-devel` package adds
+/// (`openmpi/lib/libmpi.so`). In a plugin directory that same name is a
+/// plugin its program opens, so it marks nothing.
+fn marks_dev_dir(
+    name: &str,
+    file_type: fs::FileType,
+    host_entry: &Path,
+    inside_entry: &Path,
+) -> bool {
     if file_type.is_dir() {
         return is_dev_dir(name);
     }
-    is_header(name) || name.ends_with(".a") || name.ends_with(".la")
+    if is_header(name) || name.ends_with(".a") || name.ends_with(".la") {
+        return true;
+    }
+    let link_name = name.starts_with("lib")
+        && name.ends_with(".so")
+        && (file_type.is_symlink() || (file_type.is_file() && !starts_with_elf_magic(host_entry)));
+    link_name && !in_plugin_dir(inside_entry)
 }
 
 /// Whether anything under the host directory `host` marks it as holding
@@ -539,7 +599,7 @@ fn marks_dev_dir(name: &str, file_type: fs::FileType) -> bool {
 /// are not followed. A directory tog cannot list may hold any of them, by
 /// a name the build can still open, so it counts as holding some: curated,
 /// it is an empty directory in the view (`classify_dir`).
-fn holds_dev_files(host: &Path) -> bool {
+fn holds_dev_files(host: &Path, inside: &Path) -> bool {
     let Ok(entries) = fs::read_dir(host) else {
         return true;
     };
@@ -548,8 +608,10 @@ fn holds_dev_files(host: &Path) -> bool {
             return false;
         };
         let name = entry.file_name();
-        marks_dev_dir(&name.to_string_lossy(), file_type)
-            || (file_type.is_dir() && holds_dev_files(&entry.path()))
+        let path = entry.path();
+        let inside_entry = inside.join(&name);
+        marks_dev_dir(&name.to_string_lossy(), file_type, &path, &inside_entry)
+            || (file_type.is_dir() && holds_dev_files(&path, &inside_entry))
     })
 }
 
@@ -956,7 +1018,7 @@ fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Ve
             }
             Curation::Headers | Curation::Empty => Placement::Drop,
             Curation::Libraries | Curation::Subtree => {
-                library_entry_placement(&text, file_type, &host_entry, curation)
+                library_entry_placement(&text, file_type, &host_entry, &inside_entry, curation)
             }
         };
         entries.push((name, file_type, nested, placement));
@@ -1715,14 +1777,20 @@ mod tests {
     /// files of a `-devel` package beside its runtime: Fedora's
     /// openmpi-devel (`pkgconfig/` beside a `libmpi.so` symlink, a linker
     /// script, an object, another libc's archive, a plugin), Debian's
-    /// libperl-dev under the multiarch `/usr/lib/x86_64-linux-gnu`, and a
-    /// plugin directory of `lib*.so` symlinks with no development file.
+    /// libperl-dev under the multiarch `/usr/lib/x86_64-linux-gnu`, two
+    /// plugin directories of `lib*.so` symlinks with no development file
+    /// (`bfd-plugins`, GTK's `gtk-3.0/modules`), and two directories whose
+    /// only development file is a link name: a symlink (`linkonly`) and a
+    /// linker script (`scripted`).
     fn subtree_fake_host(test_name: &str) -> TempDir {
         let root = temp_dir(test_name);
         for directory in [
             "usr/lib64/openmpi/lib/pkgconfig",
             "usr/lib64/openmpi/lib/openmpi",
             "usr/lib64/bfd-plugins",
+            "usr/lib64/gtk-3.0/modules",
+            "usr/lib64/linkonly",
+            "usr/lib64/scripted",
             "usr/lib/x86_64-linux-gnu/perl/5.34/CORE",
         ] {
             fs::create_dir_all(root.0.join(directory)).unwrap();
@@ -1755,6 +1823,27 @@ mod tests {
         link(
             "liblto_plugin.so.0",
             "usr/lib64/bfd-plugins/liblto_plugin.so",
+        );
+        write(
+            "usr/lib64/gtk-3.0/modules/libcanberra-gtk3-module.so",
+            b"\x7fELF\x02\x01\x01",
+        );
+        link(
+            "libcanberra-gtk3-module.so",
+            "usr/lib64/gtk-3.0/modules/libcanberra-gtk-module.so",
+        );
+        write(
+            "usr/lib64/linkonly/liblinkonly.so.1",
+            b"\x7fELF\x02\x01\x01",
+        );
+        link("liblinkonly.so.1", "usr/lib64/linkonly/liblinkonly.so");
+        write(
+            "usr/lib64/scripted/libscripted.so.2",
+            b"\x7fELF\x02\x01\x01",
+        );
+        write(
+            "usr/lib64/scripted/libscripted.so",
+            b"/* GNU ld script */\nINPUT ( libscripted.so.2 )\n",
         );
         write(
             "usr/lib/x86_64-linux-gnu/perl/5.34/CORE/perl.h",
@@ -1800,6 +1889,9 @@ mod tests {
             "/usr/lib64/openmpi/lib/crt1.o",
             "/usr/lib/x86_64-linux-gnu/perl/5.34/CORE/perl.h",
             "/usr/lib/x86_64-linux-gnu/perl/5.34/CORE/libperl.so",
+            // A link name alone marks a directory outside the plugin ones.
+            "/usr/lib64/linkonly/liblinkonly.so",
+            "/usr/lib64/scripted/libscripted.so",
         ] {
             assert!(!mirrored(dropped), "{dropped} mirrored");
             assert!(
@@ -1812,12 +1904,19 @@ mod tests {
             "/usr/lib64/openmpi/lib/libopen-pal.so",
             "/usr/lib/x86_64-linux-gnu/perl/5.34/CORE/config.sh",
             "/usr/lib/x86_64-linux-gnu/libperl.so.5.34",
+            "/usr/lib64/linkonly/liblinkonly.so.1",
+            "/usr/lib64/scripted/libscripted.so.2",
         ] {
             assert!(linked(kept), "{kept} not linked to the host");
         }
-        // A plugin directory below a curated one is bound whole, and so is
-        // one of `lib*.so` symlinks: `ld` loads `liblto_plugin.so`.
-        for whole in ["/usr/lib64/openmpi/lib/openmpi", "/usr/lib64/bfd-plugins"] {
+        // A plugin directory below a curated one is bound whole, and so are
+        // the plugin directories of `lib*.so` symlinks: `ld` loads
+        // `liblto_plugin.so`, GTK `libcanberra-gtk-module.so`.
+        for whole in [
+            "/usr/lib64/openmpi/lib/openmpi",
+            "/usr/lib64/bfd-plugins",
+            "/usr/lib64/gtk-3.0",
+        ] {
             assert!(
                 binds.contains(&(
                     host.0.join(whole.trim_start_matches('/')),
@@ -1828,6 +1927,108 @@ mod tests {
         }
         // Nothing in a subdirectory moves out of its loader's reach.
         assert!(moved.is_empty(), "{moved:?}");
+    }
+
+    /// A plugin directory curated for a header keeps its `lib*.so`
+    /// symlinks where its program loads them.
+    #[test]
+    fn a_curated_plugin_directory_keeps_its_plugins() {
+        let host = subtree_fake_host("subtree-plugin-header");
+        fs::write(host.0.join("usr/lib64/bfd-plugins/plugin-api.h"), b"").unwrap();
+        let skeleton = temp_dir("subtree-plugin-header-skeleton");
+        let (args, _) = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        assert!(
+            !ro_binds(&args)
+                .iter()
+                .any(|(_, to)| to == Path::new("/usr/lib64/bfd-plugins")),
+            "bfd-plugins bound whole beside a header: {args:?}"
+        );
+        let mirror = skeleton.0.join("usr/lib64/bfd-plugins");
+        assert!(
+            fs::symlink_metadata(mirror.join("liblto_plugin.so")).is_ok(),
+            "the plugin symlink was dropped"
+        );
+        assert!(fs::symlink_metadata(mirror.join("plugin-api.h")).is_err());
+    }
+
+    /// A kept plugin link must load successfully in the sandbox, not
+    /// merely exist as a possibly dangling symlink in the skeleton.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Controlled fixture compiler and no-store sandbox.
+    fn a_curated_plugin_link_loads_in_the_sandbox() {
+        use std::process::Command;
+        if !crate::kernel::sandbox::linux_ready("a_curated_plugin_link_loads_in_the_sandbox") {
+            return;
+        }
+        let host = temp_dir("plugin-load");
+        let plugins = host.0.join("usr/lib64/bfd-plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let source = host.0.join("plugin.c");
+        fs::write(&source, "int tog_plugin_probe(void) { return 42; }\n").unwrap();
+        let compiled = Command::new("/usr/bin/cc")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", &host.0)
+            .args(["-shared", "-fPIC"])
+            .arg(&source)
+            .arg("-o")
+            .arg(plugins.join("libprobe.so.1"))
+            .output()
+            .unwrap();
+        assert!(compiled.status.success(), "{compiled:?}");
+        std::os::unix::fs::symlink("libprobe.so.1", plugins.join("libprobe.so")).unwrap();
+        fs::write(
+            plugins.join("plugin-api.h"),
+            "int tog_plugin_probe(void);\n",
+        )
+        .unwrap();
+        let skeleton = temp_dir("plugin-load-skeleton");
+        let (args, _) = runtime_only_args(&host.0, &skeleton.0).unwrap();
+        let mirror = skeleton.0.join("usr/lib64/bfd-plugins");
+        assert!(fs::symlink_metadata(mirror.join("plugin-api.h")).is_err());
+        assert!(!ro_binds(&args)
+            .iter()
+            .any(|(_, to)| { to == Path::new("/usr/lib64/bfd-plugins") }));
+        let loaded = Command::new("bwrap")
+            .env_clear()
+            .args(["--die-with-parent", "--unshare-all", "--new-session"])
+            .args(crate::kernel::sandbox::system_root_args(Path::new("/")).unwrap())
+            .arg("--ro-bind")
+            .arg(host.0.join("usr/lib64"))
+            .arg(host_files_path(Path::new("/usr/lib64")))
+            .arg("--ro-bind")
+            .arg(&mirror)
+            .arg("/plugins")
+            .args(["--proc", "/proc", "--dev", "/dev", "--", "/usr/bin/python3", "-c"])
+            .arg("import ctypes; assert ctypes.CDLL('/plugins/libprobe.so').tog_plugin_probe() == 42")
+            .output()
+            .unwrap();
+        assert!(loaded.status.success(), "{loaded:?}");
+    }
+
+    /// The host prefix is outside the sandbox path. A scratch ancestor
+    /// named lib/plugins must not exempt ordinary link names or change
+    /// which inputs the shared classifier fingerprints.
+    #[test]
+    fn scratch_ancestors_do_not_make_library_entries_plugins() {
+        let host = subtree_fake_host("plugin-looking-prefix");
+        let before = host_build_inputs_at(&host.0).unwrap();
+        let nested = host.0.join("lib/plugins/host");
+        fs::create_dir_all(&nested).unwrap();
+        fs::rename(host.0.join("usr"), nested.join("usr")).unwrap();
+        assert_eq!(host_build_inputs_at(&nested).unwrap(), before);
+        let skeleton = temp_dir("plugin-looking-prefix-skeleton");
+        let (args, _) = runtime_only_args(&nested, &skeleton.0).unwrap();
+        for dropped in [
+            "usr/lib64/linkonly/liblinkonly.so",
+            "usr/lib64/scripted/libscripted.so",
+        ] {
+            assert!(fs::symlink_metadata(skeleton.0.join(dropped)).is_err());
+        }
+        assert!(ro_binds(&args)
+            .iter()
+            .any(|(_, to)| { to == Path::new("/usr/lib64/bfd-plugins") }));
     }
 
     /// A development file appearing in a curated subdirectory, a dev
@@ -1856,11 +2057,18 @@ mod tests {
             "a multiarch subtree header did not count"
         );
         fs::write(host.0.join("usr/lib64/bfd-plugins/plugin-api.h"), b"").unwrap();
+        let after_header = fingerprint();
         assert_ne!(
-            fingerprint(),
-            after_multiarch,
+            after_header, after_multiarch,
             "a header in a whole subdirectory did not count"
         );
+        // A link name appearing in a whole directory curates it; in a
+        // plugin directory it is one more plugin, bound whole as before.
+        fs::create_dir_all(host.0.join("usr/lib64/newlib")).unwrap();
+        fs::write(host.0.join("usr/lib64/newlib/libnew.so.1"), b"\x7fELF").unwrap();
+        let before_link = fingerprint();
+        link("libnew.so.1", "usr/lib64/newlib/libnew.so");
+        assert_ne!(fingerprint(), before_link, "a lone link name did not count");
     }
 
     /// A library subdirectory tog cannot list may hold development files
