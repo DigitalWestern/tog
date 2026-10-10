@@ -35,7 +35,8 @@ None open.
 
 ## Open work, each its own pull request
 
-- **#654: dev fixture root spellings.** Refuse linked roots with a trailing slash or final dot by normalizing components without resolving symlinks.
+- **#655: hand-hashed Python adoption.** Test the documented conversion to a compiled lock and signed receipt, then consider an explicit adoption command.
+- **#656: harness HOME containment.** Add alternate-spelling coverage and define physical containment with the existing offline exceptions in the next shared-harness change.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
