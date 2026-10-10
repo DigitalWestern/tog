@@ -43,12 +43,16 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
     Bubblewrap,
+    /// Rootless podman (`super::container`), where bubblewrap cannot make
+    /// a user namespace.
+    Podman,
 }
 
 impl Engine {
     pub fn name(self) -> &'static str {
         match self {
             Engine::Bubblewrap => "bubblewrap",
+            Engine::Podman => "podman",
         }
     }
 }
@@ -97,25 +101,51 @@ pub fn probe_tiers(activity: &StoreActivity) -> io::Result<(Vec<TierOffer>, Vec<
     if let Some(tiers) = TIERS_FOR_TEST.with(|tiers| tiers.borrow().clone()) {
         return Ok(tiers);
     }
-    tiers_from(sandbox::bwrap_preflight_with_activity(Some(activity)).map(|_| ()))
+    tiers_from(
+        sandbox::bwrap_preflight_with_activity(Some(activity)).map(|_| ()),
+        || super::container::preflight(activity).map(|_| ()),
+    )
 }
 
-/// The offers and gaps the bubblewrap preflight's result makes. An
-/// interrupt is no verdict: it stops the command (exit 130), so it is
-/// passed through rather than reported as a missing bubblewrap (#289).
-fn tiers_from(preflight: io::Result<()>) -> io::Result<(Vec<TierOffer>, Vec<Missing>)> {
+/// The offers and gaps the preflights make: bubblewrap first, and the
+/// container engine only where bubblewrap is unusable, so a host with the
+/// native sandbox never pays for a podman probe. An interrupt is no
+/// verdict: it stops the command (exit 130), so it is passed through
+/// rather than reported as a missing engine (#289).
+fn tiers_from(
+    bwrap: io::Result<()>,
+    podman: impl FnOnce() -> io::Result<()>,
+) -> io::Result<(Vec<TierOffer>, Vec<Missing>)> {
     let mut offers = Vec::new();
     let mut missing = Vec::new();
-    match preflight {
-        Ok(()) => offers.push(TierOffer {
-            engine: Engine::Bubblewrap,
-            fenced: true,
-        }),
-        Err(error) if crate::kernel::supervise::stop_signal(&error).is_some() => return Err(error),
+    let interrupted = |error: &io::Error| crate::kernel::supervise::stop_signal(error).is_some();
+    match bwrap {
+        Ok(()) => {
+            offers.push(TierOffer {
+                engine: Engine::Bubblewrap,
+                fenced: true,
+            });
+            return Ok((offers, missing));
+        }
+        Err(error) if interrupted(&error) => return Err(error),
         Err(error) => missing.push(Missing {
             capability: "bubblewrap",
             reason: error.to_string(),
             fix: "install bubblewrap and allow it unprivileged user namespaces".to_string(),
+        }),
+    }
+    match podman() {
+        Ok(()) => offers.push(TierOffer {
+            engine: Engine::Podman,
+            fenced: true,
+        }),
+        Err(error) if interrupted(&error) => return Err(error),
+        Err(error) => missing.push(Missing {
+            capability: "container engine",
+            reason: error.to_string(),
+            fix: "install podman, with subordinate IDs for this user in /etc/subuid and \
+                  /etc/subgid and cgroup v2"
+                .to_string(),
         }),
     }
     Ok((offers, missing))
@@ -163,8 +193,8 @@ pub fn choose_tier(
         ));
     }
     message.push_str(
-        ". This build of tog has no other isolation backend (no container engine or \
-         isolation helper support), so enable one of the above and run the command again",
+        ". This build of tog has no isolation helper (tog-isolate), so enable one of the \
+         above and run the command again (`tog doctor --isolation` shows each)",
     );
     Err(io::Error::new(io::ErrorKind::Unsupported, message))
 }
@@ -941,43 +971,97 @@ pub fn confined_run(
     store.require_activity(activity, "confined resolution")?;
     let (offers, missing) = probe_tiers(activity)?;
     let tier = choose_tier(&offers, &missing, run.unconfined_denied, run.tool, run.why)?;
-    let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
     let mounts = Mounts::check(store, activity, run)?;
-    let args = proxy_args(run, &mounts, bwrap_disables_userns(bwrap, activity))?;
-    let env = relay::encode_env(&door_env(run, &mounts.scratch)?);
-    let (reader, writer) = pipe()?;
-    let (env_reader, env_writer) = pipe()?;
-    let log = std::thread::spawn(move || read_log(reader));
-    // A thread, because an environment larger than the pipe's buffer
-    // would otherwise block before bubblewrap starts reading it.
-    let sent = std::thread::spawn(move || fs::File::from(env_writer).write_all(&env));
-    let mut command = sandbox::bwrap_command(bwrap)?;
-    command.args(&args);
-    // The relay's exec log at 3, the tool's environment at 4.
-    sandbox::pass_fds(
-        &mut command,
-        vec![
-            (writer.as_raw_fd(), relay::EXEC_LOG_FD),
-            (env_reader.as_raw_fd(), relay::ENV_FD),
-        ],
-    );
-    let result = start_confined(&mut command, activity, run.stdout);
-    drop(command);
-    drop(writer);
-    drop(env_reader);
-    // The relay reads the whole environment before it starts the tool, so
-    // a write that failed means the tool never ran: the relay reported it.
-    let _ = sent.join();
-    let log = log
-        .join()
-        .map_err(|_| io::Error::other("the exec log reader panicked"))?;
-    let (status, stderr, stdout) = result?;
-    let records = relay::parse_log(&log?)?;
-    let mut outcome = outcome(tier, status, &stderr, stdout, records)?;
-    if run.stdout == Stdout::Capture {
-        outcome.stderr = stderr;
+    let execute = || -> io::Result<ConfinedOutcome> {
+        let (mut command, removal) = match tier.engine {
+            Engine::Bubblewrap => {
+                let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
+                let args = proxy_args(run, &mounts, bwrap_disables_userns(bwrap, activity))?;
+                let mut command = sandbox::bwrap_command(bwrap)?;
+                command.args(&args);
+                (command, None)
+            }
+            Engine::Podman => {
+                let podman = super::container::preflight(activity)?;
+                let name = super::container::name();
+                let args = super::container::podman_args(run, &mounts, &name)?;
+                let config = super::container::EngineConfig::new(run.snapshot.stage())?;
+                let mut command = config.command(podman)?;
+                command.args(&args);
+                let removal = super::container::Removal::new(podman, name, config);
+                (command, Some(removal))
+            }
+        };
+        let env = relay::encode_env(&door_env(run, &mounts.scratch)?);
+        let (reader, writer) = pipe()?;
+        let (env_reader, env_writer) = pipe()?;
+        let (log_send, log) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = log_send.send(read_log(reader));
+        });
+        // A thread, because an environment larger than the pipe's buffer
+        // would otherwise block before bubblewrap starts reading it.
+        let (sent_send, sent) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent_send.send(fs::File::from(env_writer).write_all(&env));
+        });
+        // The relay's exec log at 3, the tool's environment at 4.
+        sandbox::pass_fds(
+            &mut command,
+            vec![
+                (writer.as_raw_fd(), relay::EXEC_LOG_FD),
+                (env_reader.as_raw_fd(), relay::ENV_FD),
+            ],
+        );
+        #[cfg(test)]
+        super::container::BEFORE_RUN_FOR_TEST.with(|slot| {
+            if let Some(marker) = slot.borrow_mut().take() {
+                fs::write(marker.join("before-create"), "paused").unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+                while !marker.join("resume-before-create").exists() {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        });
+        let result = start_confined(&mut command, activity, run.stdout);
+        // The container is gone before anything it wrote is read, whatever
+        // became of the podman client.
+        let cleanup = removal.map(|removal| removal.finish()).transpose();
+        drop(command);
+        drop(writer);
+        drop(env_reader);
+        // A failed cleanup must return before joining descriptors the surviving
+        // container might still hold. No output is consumed on this path.
+        cleanup?;
+        // The relay reads the whole environment before it starts the tool, so
+        // a write that failed means the tool never ran: the relay reported it.
+        let drain_timeout = std::time::Duration::from_secs(10);
+        let _ = sent.recv_timeout(drain_timeout).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the stopped resolution container retained its environment descriptor",
+            )
+        })?;
+        let log = log.recv_timeout(drain_timeout).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the stopped resolution container retained its exec log descriptor",
+            )
+        })?;
+        let (status, stderr, stdout) = result?;
+        let records = relay::parse_log(&log?)?;
+        let mut outcome = outcome(tier, status, &stderr, stdout, records)?;
+        if run.stdout == Stdout::Capture {
+            outcome.stderr = stderr;
+        }
+        Ok(outcome)
+    };
+    if tier.engine == Engine::Podman {
+        crate::kernel::supervise::during_cleanup(execute)
+    } else {
+        execute()
     }
-    Ok(outcome)
 }
 
 /// Whether the installed bubblewrap has `--disable-userns` (0.8 and
@@ -1045,9 +1129,18 @@ fn outcome(
             stdout,
             stderr: Vec::new(),
         }),
-        _ if stderr.starts_with(b"bwrap:") => Err(io::Error::new(
+        _ if tier.engine == Engine::Bubblewrap && stderr.starts_with(b"bwrap:") => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                sandbox::explained_bwrap_stderr(&String::from_utf8_lossy(stderr)),
+            ))
+        }
+        _ if tier.engine == Engine::Podman && stderr.starts_with(b"Error:") => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            sandbox::explained_bwrap_stderr(&String::from_utf8_lossy(stderr)),
+            format!(
+                "podman could not start the resolution container: {}",
+                String::from_utf8_lossy(stderr).trim()
+            ),
         )),
         _ => Err(io::Error::other(format!(
             "the resolution relay ended ({status}) without reporting the tool's status and \
@@ -1057,14 +1150,14 @@ fn outcome(
 }
 
 /// The checked, canonical mounts of one run.
-struct Mounts {
-    read_roots: Vec<PathBuf>,
-    cache_roots: Vec<PathBuf>,
-    proxy_socket: PathBuf,
-    ca_file: Option<PathBuf>,
-    executable: PathBuf,
-    scratch: PathBuf,
-    cwd: PathBuf,
+pub(super) struct Mounts {
+    pub(super) read_roots: Vec<PathBuf>,
+    pub(super) cache_roots: Vec<PathBuf>,
+    pub(super) proxy_socket: PathBuf,
+    pub(super) ca_file: Option<PathBuf>,
+    pub(super) executable: PathBuf,
+    pub(super) scratch: PathBuf,
+    pub(super) cwd: PathBuf,
 }
 
 impl Mounts {
@@ -1468,21 +1561,62 @@ mod tests {
                 status: std::process::ExitStatus::from_raw(libc::SIGINT),
             },
         );
-        let error = tiers_from(Err(interrupt)).unwrap_err();
+        let unavailable = || io::Error::new(io::ErrorKind::Unsupported, "no bwrap");
+        let no_podman = || {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "podman not found",
+            ))
+        };
+        let error = tiers_from(Err(interrupt), no_podman).unwrap_err();
         assert_eq!(
             crate::kernel::supervise::stop_signal(&error),
             Some(libc::SIGINT)
         );
         assert!(!error.to_string().contains("install bubblewrap"), "{error}");
 
-        let unavailable = io::Error::new(io::ErrorKind::Unsupported, "no bwrap");
-        let (offers, missing) = tiers_from(Err(unavailable)).unwrap();
+        let (offers, missing) = tiers_from(Err(unavailable()), no_podman).unwrap();
         assert!(offers.is_empty());
-        assert_eq!(missing.len(), 1);
+        assert_eq!(missing.len(), 2);
         assert_eq!(missing[0].reason, "no bwrap");
-        let (offers, missing) = tiers_from(Ok(())).unwrap();
+        assert_eq!(missing[1].capability, "container engine");
+        assert_eq!(missing[1].reason, "podman not found");
+        let (offers, missing) = tiers_from(Ok(()), || panic!("probed podman")).unwrap();
         assert_eq!(offers, vec![offer(true)]);
         assert!(missing.is_empty());
+    }
+
+    /// Without bubblewrap, a working podman is the fenced tier; an
+    /// interrupt during its probe is the interrupt.
+    #[test]
+    fn podman_is_the_fenced_tier_where_bubblewrap_is_missing() {
+        use std::os::unix::process::ExitStatusExt;
+        let unavailable = || Err(io::Error::new(io::ErrorKind::Unsupported, "no bwrap"));
+        let (offers, missing) = tiers_from(unavailable(), || Ok(())).unwrap();
+        assert_eq!(
+            offers,
+            vec![TierOffer {
+                engine: Engine::Podman,
+                fenced: true
+            }]
+        );
+        assert_eq!(missing.len(), 1);
+        let tier = choose_tier(&offers, &missing, true, "Bundler", "evaluates").unwrap();
+        assert_eq!(tier.isolation(), "confined");
+        let error = tiers_from(unavailable(), || {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                crate::kernel::supervise::Interrupted {
+                    signal: libc::SIGTERM,
+                    status: std::process::ExitStatus::from_raw(libc::SIGTERM),
+                },
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(
+            crate::kernel::supervise::stop_signal(&error),
+            Some(libc::SIGTERM)
+        );
     }
 
     #[test]
@@ -1495,7 +1629,7 @@ mod tests {
             "Bundler evaluates the Gemfile",
             "bubblewrap: setting up uid map: Permission denied",
             "fix: install bubblewrap",
-            "no other isolation backend",
+            "no isolation helper",
         ] {
             assert!(message.contains(needle), "{needle}: {message}");
         }

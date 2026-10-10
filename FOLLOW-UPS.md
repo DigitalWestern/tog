@@ -25,10 +25,11 @@ each, in this order:
 1. **#206 (PR 8): Ruby and Elixir.** Bundler and Hex mirrors. Edits
    already resolve without installing (#211).
 2. **#207 (PR 9): .NET.** The `nuget.config` mirror.
-3. **#201 (PR 3b): the container backend and `tog-isolate`.** Moved after
-   the doors: Go shipped confined without it, so no door waits on it. It
-   must land before #208, because removing `Legacy` leaves a host without
-   the native sandbox with no way to resolve.
+3. **#201 (PR 3b): the container backend and `tog-isolate`.** The podman
+   backend and `tog doctor --isolation` are built (#201's PR). Left:
+   docker (it cannot pass the relay's descriptors into a container) and
+   the setuid `tog-isolate` helper, which needs a root install to build
+   and test.
 4. **#208 (PR 10): remove `Legacy`.**
 
 The macOS door (Seatbelt rules, the Mach allow-list from one run of
@@ -100,3 +101,8 @@ None open.
 - **#637: configurable Ruby and Elixir manifest inputs.** Design narrower explicit declarations with conservative coverage as the default.
 - **#638: authenticated Hex cache.** Keep private homes until a data-only persistent cache has reviewed integrity and tenant boundaries.
 - **#639: resolution publication concurrency.** Add deterministic full planner-to-closure race tests for Ruby and Elixir.
+
+- #640: Define independent .NET lock semantic verification for executable MSBuild projects.
+- #641: Design policy-owned NuGet feeds, credentials, signatures and cache boundaries.
+- #642: Design declared MSBuild resolution inputs with conservative fallback.
+- #643: Cover unsupported future-tailor attest guards with focused unit tests.

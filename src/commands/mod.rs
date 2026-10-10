@@ -221,6 +221,10 @@ pub fn relay(invocation: cli::RelayInvocation) -> i32 {
         invocation.env_fd,
         &invocation.argv,
     )
+    .map(|args| relay::RelayArgs {
+        deny_userns: invocation.deny_userns,
+        ..args
+    })
     .and_then(relay::run);
     match result {
         Ok(code) => code,
@@ -299,7 +303,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         StorePath => return store::path(),
         Completions { shell } => return completions::run(shell),
         audit @ Audit { .. } => return audit::run(audit),
-        Doctor { json } => return doctor::run(json),
+        Doctor { json, isolation } => return doctor::run(json, isolation),
         Keygen { ref path } => return keygen::run(path),
         attest @ Attest { .. } => return attest::run(attest),
         Ls {

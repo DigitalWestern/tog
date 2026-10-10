@@ -1059,6 +1059,87 @@ fn platform_checks(platform: Platform, project: Option<&ProjectRoot>, checks: &m
     c_toolchain_check(platform, checks);
 }
 
+/// `tog doctor --isolation`: the engines that can isolate a lock-changing
+/// tool, strongest first, and whether any can. The container engine is
+/// probed through the store lease, so a store that cannot be opened or is
+/// busy leaves that row unknown (a warning). An interrupt during a probe is
+/// returned.
+pub fn isolation_doctor(store: DoctorStore) -> io::Result<Vec<Check>> {
+    let mut checks = Vec::new();
+    if Platform::host().ok() != Some(Platform::X86_64UnknownLinuxGnu) {
+        // macOS has one engine, Seatbelt: the ordinary sandbox row.
+        let platform = Platform::host()?;
+        checks.push(match sandbox::probe(platform) {
+            Ok(detail) => check("sandbox", Level::Ok, detail),
+            Err(error) => check("sandbox", Level::Fail, error.to_string()),
+        });
+        return Ok(checks);
+    }
+    let interrupted = |error: &io::Error| crate::kernel::supervise::stop_signal(error).is_some();
+    let activity = match store {
+        Ok((_, Some(activity))) => Some(activity),
+        _ => None,
+    };
+    let bwrap = match sandbox::bwrap_preflight_with_activity(activity) {
+        Ok(path) => Ok(format!("bubblewrap at {}", path.display())),
+        Err(error) if interrupted(&error) => return Err(error),
+        Err(error) => Err(error.to_string()),
+    };
+    let podman = match activity {
+        Some(activity) => match crate::kernel::resolve::container::preflight(activity) {
+            Ok(path) => Some(Ok(format!("rootless podman at {}", path.display()))),
+            Err(error) if interrupted(&error) => return Err(error),
+            Err(error) => Some(Err(error.to_string())),
+        },
+        None => None,
+    };
+    let any = bwrap.is_ok() || matches!(podman, Some(Ok(_)));
+    let missing = if any { Level::Warn } else { Level::Fail };
+    checks.push(match bwrap {
+        Ok(detail) => check(
+            "bubblewrap",
+            Level::Ok,
+            format!("{detail}; resolvers run here"),
+        ),
+        Err(reason) => check(
+            "bubblewrap",
+            missing,
+            format!("{reason}; fix: install bubblewrap and allow it unprivileged user namespaces"),
+        ),
+    });
+    checks.push(match podman {
+        Some(Ok(detail)) if checks[0].level == Level::Ok => check(
+            "container",
+            Level::Ok,
+            format!("{detail}; used only where bubblewrap cannot run"),
+        ),
+        Some(Ok(detail)) => check(
+            "container",
+            Level::Ok,
+            format!("{detail}; resolvers run here"),
+        ),
+        Some(Err(reason)) => check(
+            "container",
+            missing,
+            format!(
+                "{reason}; fix: install podman, with subordinate IDs for this user in \
+                 /etc/subuid and /etc/subgid, on cgroup v2"
+            ),
+        ),
+        None => check(
+            "container",
+            Level::Warn,
+            "not checked: the podman probe needs the store, which is unavailable or busy",
+        ),
+    });
+    checks.push(check(
+        "isolation-helper",
+        if any { Level::Ok } else { Level::Fail },
+        "tog-isolate is not part of this build of tog; bubblewrap or podman isolates instead",
+    ));
+    Ok(checks)
+}
+
 /// Which policy sources are in force, in the order they are consulted.
 fn policy_check(project: Option<&ProjectRoot>, checks: &mut Vec<Check>) {
     let strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");

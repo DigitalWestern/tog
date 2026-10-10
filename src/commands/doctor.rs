@@ -9,7 +9,7 @@ use std::io;
 
 // Reviewed site (tests/architecture.rs): operation boundary: command entry point.
 #[allow(clippy::disallowed_methods)]
-pub fn run(json: bool) -> io::Result<i32> {
+pub fn run(json: bool, isolation: bool) -> io::Result<i32> {
     // The store is judged once, here, and the answer travels with its
     // lease: `inspect::doctor` reads a store only through the pair, so it
     // never reads one this command did not open and lease, and a store
@@ -33,8 +33,13 @@ pub fn run(json: bool) -> io::Result<i32> {
     // one row that talks to the network, and it lives here rather than in
     // `inspect::doctor`, which stays offline for the callers that need it
     // to be.
-    let mut checks = vec![selfupdate::doctor_check()];
-    checks.extend(inspect::doctor(&project_dir(), store));
+    let checks = if isolation {
+        inspect::isolation_doctor(store)?
+    } else {
+        let mut checks = vec![selfupdate::doctor_check()];
+        checks.extend(inspect::doctor(&project_dir(), store));
+        checks
+    };
     print!("{}", inspect::render_doctor(&checks, json)?);
     if checks
         .iter()

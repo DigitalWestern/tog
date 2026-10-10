@@ -3759,6 +3759,53 @@ restore onto the door:
   vulnerability base (the recording kept neither body): a missing lock,
   an unchanged lock attested, a drifted csproj refused.
 
+**PR 3b as built (Linux, 2026-10-09, #201).** The container backend,
+podman only. Decisions:
+
+- **The root.** No image is pulled or built: the container's root is a
+  directory in the run's stage holding the host's loader links (from
+  `sandbox::system_root_args`, so it is checked the same way), mounted
+  as an overlay (`--rootfs <dir>:O`, never written) and read-only. The
+  system runtime, `/etc` entries, store objects, snapshot, scratch, proxy
+  socket and relay are the bwrap run's mounts, as `--mount` binds. That
+  is the "system-runtime subset": the host's own `/usr`, which is what
+  bubblewrap shows too, so there is no image digest to pin.
+- **The fence.** `--network none`, `--userns keep-id`, `--cap-drop all`,
+  `no-new-privileges`, `--read-only`, `--pids-limit 4096`,
+  `--unsetenv-all`, `--log-driver=none`, `label=disable` (SELinux would
+  refuse the snapshot under the developer's home; bubblewrap is unlabeled
+  too). The relay is pid 1 and gets `--preserve-fds 2` for its exec log
+  and environment. A container cannot forbid a user namespace the way
+  `--disable-userns` does, so the relay takes `--deny-userns`: its filter
+  answers `unshare`/`clone` with `CLONE_NEWUSER` with `EPERM` and
+  `clone3` with `ENOSYS` (libc falls back to `clone`), as podman's and
+  docker's own default profiles do without `CAP_SYS_ADMIN`.
+- **Engine trust.** A per-run effective `containers.conf` excludes ambient
+  mounts, devices and hooks. A minimal captured engine environment excludes
+  remote/loader/configuration overrides, and storage uses built-in defaults.
+  Private PID/IPC/UTS/cgroup namespaces, `--privileged=false` and local
+  rootless execution are required. The relay refuses to run unless PID 1.
+- **Teardown.** Signal proxying is disabled so cancellation terminates the
+  client and reaches checked `podman rm --force --time 0 --ignore` outside
+  the supervisor. Removal is bounded to ten seconds. A failed removal
+  refuses outputs before descriptor joins. Descriptor draining is also
+  bounded. Drop is only a fallback for early errors. SIGKILL of Tog itself
+  or a machine crash needs operator recovery until a reviewed recovery
+  mechanism exists.
+- **The tier.** Podman is probed only when bubblewrap's preflight fails,
+  by running the actual relay, both descriptors and a harmless shell
+  environment check under the same fence, once per process.
+- **Not built.** Docker has no `--preserve-fds`, so the relay's
+  descriptors cannot reach it. `tog-isolate` is setuid root and needs an
+  install under `/etc` and `/run` to test. `tog doctor --isolation` says
+  the helper is not in this build.
+- **Tests.** `door.rs` `podman_door_publishes_a_fetched_output_as_confined`,
+  `podman_door_kills_a_surviving_descendant` (the survivor test) and
+  `podman_door_denies_user_namespaces_and_the_network`, which force the
+  podman tier and skip unless podman works (`TOG_PODMAN_TESTS` makes the
+  skip a failure). The concurrent-session test belongs to `tog-isolate`'s
+  UID allocation and waits with it.
+
 **PR 10: remove `Legacy`.** Delete the mode. The company template denies
 `unconfined-resolution` and `unrecorded-resolution`, lists
 `resolution-build` and `stale-resolution` as deliberately not denied with

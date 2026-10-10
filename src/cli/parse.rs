@@ -139,7 +139,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         "status" => parse_json_only(rest, "status")?.map(|json| Command::Status { json }),
         "audit" => parse_audit(rest)?,
         "ls" => parse_ls(rest)?,
-        "doctor" => parse_json_only(rest, "doctor")?.map(|json| Command::Doctor { json }),
+        "doctor" => parse_doctor(rest)?,
         "keygen" => parse_keygen(rest)?,
         "attest" => super::attest::parse_attest(rest)?,
         "gc" => parse_gc(rest)?,
@@ -598,6 +598,19 @@ fn parse_json_only(args: &[String], name: &'static str) -> Result<Option<bool>, 
         }
     }
     Ok(Some(json))
+}
+
+fn parse_doctor(args: &[String]) -> Result<Option<Command>, UsageError> {
+    let (mut json, mut isolation) = (false, false);
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--isolation" => isolation = true,
+            "-h" | "--help" => return Ok(None),
+            other => return Err(reject("doctor", other)),
+        }
+    }
+    Ok(Some(Command::Doctor { json, isolation }))
 }
 
 fn parse_audit(args: &[String]) -> Result<Option<Command>, UsageError> {
@@ -1385,13 +1398,14 @@ pub(super) const GLOBAL_FLAGS: &[&str] = &[
     "--version",
 ];
 
-/// `__resolution-relay [--exec-log-fd <n>] [--env-fd <n>] <socket> <address> -- <tool>...`.
+/// `__resolution-relay [--exec-log-fd <n>] [--env-fd <n>] [--deny-userns] <socket> <address> -- <tool>...`.
 /// Everything after `--` is the tool's, untouched.
 fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
     let usage = || {
         UsageError::new(
             format!(
-                "usage: tog {RELAY_VERB} [--exec-log-fd <n>] [--env-fd <n>] <socket> <address> -- <tool>..."
+                "usage: tog {RELAY_VERB} [--exec-log-fd <n>] [--env-fd <n>] [--deny-userns] <socket> \
+                 <address> -- <tool>..."
             ),
             None,
         )
@@ -1399,6 +1413,7 @@ fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
     let split = args.iter().position(|arg| arg == "--").ok_or_else(usage)?;
     let (own, tool) = (&args[..split], &args[split + 1..]);
     let (mut exec_log_fd, mut env_fd, mut positional) = (None, None, own);
+    let mut deny_userns = false;
     loop {
         match positional {
             [flag, fd, rest @ ..] if flag == "--exec-log-fd" && exec_log_fd.is_none() => {
@@ -1407,6 +1422,10 @@ fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
             }
             [flag, fd, rest @ ..] if flag == "--env-fd" && env_fd.is_none() => {
                 env_fd = Some(fd.parse::<i32>().map_err(|_| usage())?);
+                positional = rest;
+            }
+            [flag, rest @ ..] if flag == "--deny-userns" && !deny_userns => {
+                deny_userns = true;
                 positional = rest;
             }
             _ => break,
@@ -1418,6 +1437,7 @@ fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
             listen: listen.clone(),
             exec_log_fd,
             env_fd,
+            deny_userns,
             argv: tool.to_vec(),
         }),
         _ => Err(usage()),
@@ -2098,7 +2118,17 @@ mod tests {
             .contains("tog audit [--policy <file>] [--signed | --allow-unsigned] [--json]"));
         assert_eq!(
             command(&["doctor", "--json"]),
-            Command::Doctor { json: true }
+            Command::Doctor {
+                json: true,
+                isolation: false
+            }
+        );
+        assert_eq!(
+            command(&["doctor", "--isolation"]),
+            Command::Doctor {
+                json: false,
+                isolation: true
+            }
         );
         assert_eq!(
             command(&["ls"]),
@@ -3088,9 +3118,21 @@ mod tests {
                 listen: "127.0.0.1:8119".into(),
                 exec_log_fd: Some(3),
                 env_fd: Some(4),
+                deny_userns: false,
                 argv: vec!["/store/npm".into(), "--frozen".into()],
             }
         );
+        let Ok(Parsed::Relay(relay)) = parse(&args(&[
+            "__resolution-relay",
+            "--deny-userns",
+            "/s",
+            "127.0.0.1:1",
+            "--",
+            "tool",
+        ])) else {
+            panic!("--deny-userns did not parse");
+        };
+        assert!(relay.deny_userns);
         for bad in [
             &["__resolution-relay"][..],
             &["__resolution-relay", "/s", "127.0.0.1:1"],

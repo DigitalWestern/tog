@@ -176,6 +176,8 @@ pub enum Command {
     },
     Doctor {
         json: bool,
+        /// `--isolation`: only the resolution door's isolation engines.
+        isolation: bool,
     },
     /// `keygen <path>`: write a new closure-signing key file and print its
     /// public key in policy syntax.
@@ -209,7 +211,7 @@ impl Command {
             Command::Status { json: true }
                 | Command::Audit { json: true, .. }
                 | Command::Ls { json: true, .. }
-                | Command::Doctor { json: true }
+                | Command::Doctor { json: true, .. }
                 | Command::Plan { json: true }
         )
     }
@@ -337,6 +339,7 @@ pub struct RelayInvocation {
     pub listen: String,
     pub exec_log_fd: Option<i32>,
     pub env_fd: Option<i32>,
+    pub deny_userns: bool,
     pub argv: Vec<String>,
 }
 
