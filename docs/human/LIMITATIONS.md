@@ -91,8 +91,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   The machine policy is read by path. `status`, `doctor` and the environment `run`
   and `env` build open the project once and read it through that descriptor. `audit` uses the same held project for policy, closures,
   detection, freshness, and resolution evidence. `gc --register` still opens it by path.
-- **CLI exit status is 0 / 1 / 2** (success / command failed / usage error); `run`, `x` and
-  `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
+- **CLI exit statuses distinguish classified failures.** See the
+  [CLI status table](CLI.md#conventions) for ordinary errors, usage errors,
+  refusals (3), stale locks (4), unsupported requests (5) and signals.
+  Completed `audit`, `status` and `doctor` reports retain their verdict codes.
+  `run`, `x` and `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
   own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the
   global options (`-C`, `-q`, `-v`, `--no-color`) while they precede the tool's first
   non-option word. `run` and `build` never take one, so they need no `--` for those.
@@ -245,8 +248,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Python or Node environment holding it, are committed under `host-fallback/1` identities
   that name what fell back (the sdist; `pkg:` entries for the environment). Every Linux
   Python environment with such an sdist and every Linux Node environment carries
-  `build_view = "runtime-only/2"`, as does every Linux gems object (`/2` since the view
-  curated library subdirectories, #331), so each rebuilds once after either change.
+  `build_view = "runtime-only/3"`, as does every Linux gems object. `/3` invalidates
+  older objects that could link a lone `lib*.so` name outside the plugin directories
+  (#559). The next sync rebuilds these objects once under the tighter view.
   One gap: when a build-requirement sdist falls back, its build environment is committed
   under a host-fallback id, and the wheel built in that environment names that realized id
   in its own `build_env` input. The parent environment is planned before any build runs, so
@@ -335,7 +339,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
   **Resolving can build a source distribution that has no wheel** (its build backend runs,
   confined, through the resolution door): it is recorded as `resolution-build`, which a
-  policy can deny to refuse it. sdist build-requirement resolution never builds.
+  policy can deny to refuse it. This also covers metadata preparation by
+  the project's own backend because it can request third-party source builds.
+  sdist build-requirement resolution never builds.
 - **Lock markers are read as PEP 508 and `packaging` 25 read them, with these
   refusals.** Each is a marker tog will not guess at, so a lock that uses one fails
   to import, naming it:

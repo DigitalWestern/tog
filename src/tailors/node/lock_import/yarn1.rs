@@ -779,11 +779,14 @@ fn yarn_unused_entry(
     for (index, entry) in entries.iter().enumerate() {
         if !reached.contains(&format!("yarn:{index}")) {
             let format = &crate::tailors::node::freshness::YARN;
-            return Err(err(format!(
+            return Err(crate::kernel::error::stale(
+                io::ErrorKind::InvalidData,
+                format!(
                 "yarn.lock locks {}, which no package.json depends on; regenerate the lock ({})",
                 entry.selectors[0],
                 format.regenerate()
-            )));
+            ),
+            ));
         }
     }
     Ok(())

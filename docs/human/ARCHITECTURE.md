@@ -165,7 +165,7 @@ Rules the Linux port settled, which apply to any future platform:
   mounts rather than one per library file. Ruby gems with native
   extensions, Python sdists that compile Rust or native code, and npm
   install scripts build under `RuntimeOnly` first, so an object committed
-  under the `runtime-only/2` view does not depend on which `-dev` packages
+  under the `runtime-only/3` view does not depend on which `-dev` packages
   the building host has installed. The retry against the whole host, its
   `host-build-inputs` record and the `host-fallback/1` identity are shared
   (`kernel/hostfallback.rs`).
@@ -310,11 +310,11 @@ direct URL as `unattested-index`. The default index is forced to PyPI on
 every invocation, so a project's `[[tool.uv.index]]` default never
 replaces it. Every run starts with `--no-build` (the probe): no
 third-party code runs in it. When uv refuses because something must be
-built, the project's own code has its metadata built first, with its
-backend from wheels only, and anything else is `resolution-build`,
-refused when policy denies it and otherwise recorded before the run is
-repeated with builds allowed. uv's cache is created for one door
-operation and removed after it. A compiled lock is headed by `tog` in
+built or its metadata prepared, `resolution-build` permission is required
+before any backend runs, including the project's own. The permission also
+covers dynamic and transitive build requirements. A denial stops the
+operation. An allowed rerun records the exception in its receipt. uv's cache is private to each attempt. An allowed retry starts with an
+empty cache, so its receipt records every contributing fetch and exception. A compiled lock is headed by `tog` in
 place of uv's command line (`--custom-compile-command`), so the same
 resolution writes the same bytes on every machine. Python's resolution
 outputs are `pyproject.toml`, `uv.lock`, `requirements.in`,
@@ -517,9 +517,11 @@ The census, by door kind:
 `tog x` resolves a registry tool into `~/.tog/x` through a door of its
 own kind, confined the same way.
 
-Not covered, by design: `tog build` and `tog run` run project code in the
-build sandbox, which has no network and records no ledger, and an install
-script runs there too. They are builds, not resolutions.
+`tog build` and installation builds run project code in the build sandbox,
+which denies network access and records no resolution ledger. `tog run`
+uses the projected runtime and dependencies but executes on the host,
+without a sandbox or network restriction. Run untrusted tests only in a
+separate disposable job that holds no signing key or other secrets.
 
 ## Toolchain lock
 
@@ -682,11 +684,18 @@ Sync records recoverable verification gaps in each closure and continues;
 `.tog/policy.toml` denies named kinds (`install-script-failed`,
 `git-dependency`, ...). User and project policies are unioned; deny entries
 are only added. `TOG_STRICT=1` or `tog --strict` denies every
-exception. Each command loads the chain once and holds it as a
-`policy::PolicyScope` while it runs: a second operation in the same process
-loads its own, dropping a scope restores the one before it, and a read
-outside every scope sees the default policy plus the requested strictness,
-never a policy pinned by whichever command read first. Object-affecting exceptions are written into store metadata and
+exception. Each operation loads the chain and holds it as a
+`policy::PolicyScope` while it runs. A nested sync loads its own settings.
+Scopes belong to their creating thread and cannot be moved or shared with
+other threads. Dropping a scope restores the enclosing scope on that thread,
+and a read outside every scope on that thread sees the default policy plus
+the requested strictness. Workers receive an explicit policy snapshot.
+An early read never pins the policy for a later operation. Each dispatch
+holds its own thread-bound `--strict` guard, so a later dispatch and nested
+dispatch can choose their own flag. This supports synchronous scopes.
+Interleaved tasks on one thread and automatic worker inheritance need
+explicit operation Context settings. Attribution still serializes owners
+through its process-global frame stack. Object-affecting exceptions are written into store metadata and
 rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
@@ -1049,7 +1058,8 @@ These keep the layout organized. The first is enforced by
    request are built with `kernel::error` (`refused`, `stale`, or the
    `Unsupported` kind), which `main` turns into exit statuses 3, 4 and 5
    (`docs/human/CLI.md`). Adding words to an error goes through
-   `error::context`, which keeps the class;
+   `error::context`, which retains the typed cause, class, store recovery
+   command and interruption record;
    `io::Error::new(e.kind(), format!(..))` keeps only the text.
 
 ## Layout

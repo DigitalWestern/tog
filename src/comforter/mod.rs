@@ -26,32 +26,45 @@ use std::path::{Path, PathBuf};
 
 type Key = Option<std::sync::Arc<SigningKey>>;
 
-/// The closure-signing keys of the operations in progress, innermost last:
-/// `None` where an operation found no `TOG_SIGNING_KEY`. Each entry is
-/// owned by one [`SigningScope`]. Every closure an operation writes is
-/// signed with its one key or none: there is no per-write choice.
-static SCOPES: std::sync::Mutex<Vec<(u64, Key)>> = std::sync::Mutex::new(Vec::new());
+// Each thread owns its ambient signing stack. Worker sessions that sign
+// must receive an explicit key snapshot, never another thread's scope.
+thread_local! {
+    static SCOPES: std::cell::RefCell<Vec<(u64, Key)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 static NEXT_SCOPE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn with_scopes<R>(f: impl FnOnce(&mut Vec<(u64, Key)>) -> R) -> R {
-    f(&mut SCOPES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()))
+    SCOPES.with(|scopes| f(&mut scopes.borrow_mut()))
 }
 
 /// The signing key one operation loaded, in force until this is dropped.
-/// Dropping it removes only its own entry.
+/// Dropping it removes only its own entry on the creating thread. Workers
+/// receive an explicit key snapshot instead of borrowing or moving this guard.
+///
+/// ```compile_fail
+/// let guard = tog::comforter::init_signing().unwrap();
+/// std::thread::spawn(move || drop(guard));
+/// ```
+///
+/// ```compile_fail
+/// let guard = tog::comforter::init_signing().unwrap();
+/// std::thread::scope(|scope| { scope.spawn(|| println!("{guard:?}")); });
+/// ```
 #[must_use = "the signing key is in force only while its scope is held"]
 #[derive(Debug)]
 pub struct SigningScope {
     id: u64,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl SigningScope {
     fn install(key: Key) -> Self {
         let id = NEXT_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         with_scopes(|scopes| scopes.push((id, key)));
-        Self { id }
+        Self {
+            id,
+            _thread_bound: std::marker::PhantomData,
+        }
     }
 }
 
@@ -83,17 +96,15 @@ pub fn init_signing() -> io::Result<SigningScope> {
     Ok(SigningScope::install(key))
 }
 
-/// The innermost operation's signing key, or `None` when it has none (or
+/// The current thread's innermost operation signing key, or `None` when it has none (or
 /// no operation loaded one, in which case closures are written unsigned
 /// and `tog audit` reports them outdated).
 pub fn signing_key() -> Key {
     with_scopes(|scopes| scopes.last().and_then(|(_, key)| key.clone()))
 }
 
-/// Put `key` in force for a test until the scope drops. The one test that
-/// sets a key holds `attribution_test_lock` across the set, the write, and
-/// the drop; every other closure-writing test holds it too, so none can
-/// observe the test key.
+/// Put `key` in force on this thread until the scope drops. Closure-writing
+/// tests still serialize their process-global attribution frames.
 #[cfg(test)]
 pub(crate) fn signing_key_for_test(key: Key) -> SigningScope {
     SigningScope::install(key)
@@ -521,10 +532,8 @@ pub(crate) fn clear_cache_roots_for_test() {
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
     let path = project_dir.join(closure_relative(ecosystem));
     let text = fs::read_to_string(&path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("read {}: {e}; run `tog` first", path.display()),
-        )
+        let message = format!("read {}: {e}; run `tog` first", path.display());
+        crate::kernel::error::describe(e, message)
     })?;
     closure_body(&path, &text, ecosystem)
 }
@@ -558,10 +567,8 @@ pub fn read_closure_if_present(
     let relative = closure_relative(ecosystem);
     let path = project.path().join(&relative);
     let Some(bytes) = project.read_file(&relative).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("read {}: {e}; run `tog` first", path.display()),
-        )
+        let message = format!("read {}: {e}; run `tog` first", path.display());
+        crate::kernel::error::describe(e, message)
     })?
     else {
         return Ok(None);
@@ -1614,6 +1621,81 @@ mod tests {
     }
 
     #[test]
+    fn signing_scopes_cannot_replace_another_threads_key() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::named("signing-thread-scopes");
+        let first_path = temp.0.join("first.key");
+        let second_path = temp.0.join("second.key");
+        crate::kernel::signing::generate(&first_path).unwrap();
+        crate::kernel::signing::generate(&second_path).unwrap();
+        let first = std::sync::Arc::new(SigningKey::load(&first_path).unwrap());
+        let second = std::sync::Arc::new(SigningKey::load(&second_path).unwrap());
+        let _owner = signing_key_for_test(Some(first.clone()));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let unscoped = signing_key().is_none();
+            let _other = signing_key_for_test(Some(second.clone()));
+            let own_key = signing_key().unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let worker_key = std::sync::Arc::ptr_eq(&own_key, &second);
+            drop(_other);
+            let _unsigned = signing_key_for_test(None);
+            let worker_unsigned = signing_key().is_none();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            (unscoped, worker_key, worker_unsigned)
+        });
+        ready_rx.recv().unwrap();
+        let selected = signing_key();
+        release_tx.send(()).unwrap();
+        ready_rx.recv().unwrap();
+        let during_unsigned = signing_key();
+        release_tx.send(()).unwrap();
+        let (unscoped, worker_key, worker_unsigned) = worker.join().unwrap();
+        assert!(unscoped, "a thread without a scope inherited a signing key");
+        assert!(worker_key);
+        assert!(worker_unsigned);
+        assert!(during_unsigned.is_some_and(|loaded| std::sync::Arc::ptr_eq(&loaded, &first)));
+        let selected = selected.expect("another operation must not make publication unsigned");
+        let mut envelope = serde_json::json!({"body": {"owner": "first"}});
+        selected.sign(&mut envelope).unwrap();
+        assert_eq!(
+            crate::kernel::signing::verify(&envelope),
+            crate::kernel::signing::Verification::Valid(first.public_key())
+        );
+        assert!(signing_key().is_some_and(|key| std::sync::Arc::ptr_eq(&key, &first)));
+    }
+
+    #[test]
+    fn signing_scopes_restore_after_unsigned_inner_error_and_unwind() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::named("signing-scope-cleanup");
+        let path = temp.0.join("key");
+        crate::kernel::signing::generate(&path).unwrap();
+        let key = std::sync::Arc::new(SigningKey::load(&path).unwrap());
+        let _outer = signing_key_for_test(Some(key.clone()));
+        {
+            let _unsigned = signing_key_for_test(None);
+            assert!(signing_key().is_none());
+        }
+        assert!(signing_key().is_some_and(|loaded| std::sync::Arc::ptr_eq(&loaded, &key)));
+        let fail = || -> io::Result<()> {
+            let _unsigned = signing_key_for_test(None);
+            Err(io::Error::other("early operation failure"))
+        };
+        assert!(fail().is_err());
+        assert!(signing_key().is_some_and(|loaded| std::sync::Arc::ptr_eq(&loaded, &key)));
+        assert!(std::panic::catch_unwind(|| {
+            let _unsigned = signing_key_for_test(None);
+            panic!("operation unwind");
+        })
+        .is_err());
+        assert!(signing_key().is_some_and(|loaded| std::sync::Arc::ptr_eq(&loaded, &key)));
+    }
+
+    #[test]
     fn each_signing_scope_is_in_force_only_while_held() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let temp = TempDir::named("signing-scopes");
@@ -2068,6 +2150,36 @@ mod closure_object_tests {
                 && error.to_string().ends_with("; run `tog` first"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_symlinked_closure_retains_the_held_read_refusal() {
+        let temp = TempDir::named("closure-refusal-class");
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let relative = Path::new(".tog/closures/node.json");
+        fs::create_dir_all(temp.0.join(".tog/closures")).unwrap();
+        let outside = temp.0.join("outside.json");
+        fs::write(&outside, b"original").unwrap();
+        std::os::unix::fs::symlink(&outside, temp.0.join(relative)).unwrap();
+        let direct = project.read_file(relative).unwrap_err();
+        let wrapped = read_closure_if_present(&project, "node").unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&direct),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        assert_eq!(
+            crate::kernel::error::class_of(&wrapped),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        assert_eq!(wrapped.kind(), direct.kind());
+        assert_eq!(
+            wrapped.to_string(),
+            format!(
+                "read {}: {direct}; run `tog` first",
+                temp.0.join(relative).display()
+            )
+        );
+        assert_eq!(fs::read(outside).unwrap(), b"original");
     }
 
     #[test]

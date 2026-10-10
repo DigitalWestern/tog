@@ -91,7 +91,7 @@ fn refuse_with(
     detail: &str,
 ) -> io::Result<()> {
     match crate::kernel::policy::denied(policy, kind) {
-        true => Err(io::Error::new(
+        true => Err(crate::kernel::error::refused(
             io::ErrorKind::PermissionDenied,
             crate::kernel::policy::refusal(policy, kind, subject, detail),
         )),
@@ -397,6 +397,10 @@ mod tests {
             panic!("a denied fallback did not stop the sync: {outcome:?}");
         };
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
         let message = error.to_string();
         assert!(message.contains("zlib.h not found"), "{message}");
         assert!(

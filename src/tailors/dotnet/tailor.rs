@@ -45,7 +45,7 @@ fn realize_and_project(
     let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain, &checked)?;
     // The resolution files this plan was built from, so the resolution
     // join binds a record to this generation of the csproj and its lock.
-    let basis = super::resolve::resolution_basis(project)?;
+    let basis = &checked.basis;
     let packages =
         dotnet::realize_packages(store, activity, platform, &plan, &sdk, toolchain, &checked)?;
     dotnet::project_dotnet_env(
@@ -55,7 +55,7 @@ fn realize_and_project(
         &packages,
         &plan,
         &lock_sha256,
-        &basis,
+        basis,
         toolchain,
         attribution,
     )?;
@@ -94,7 +94,7 @@ impl Tailor for Dotnet {
         super::resolve::resolution_outputs(project)
     }
 
-    /// `global.json` and the `Directory.Build` files MSBuild imports.
+    /// Every project file visible to executable MSBuild resolution.
     fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
         super::resolve::resolution_inputs(project)
     }

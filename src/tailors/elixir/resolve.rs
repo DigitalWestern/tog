@@ -13,26 +13,13 @@ use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The `config/*.exs` files mix evaluates before it reads the deps: what
-/// a resolution reads beside mix.exs and mix.lock. An umbrella's apps'
-/// manifests are not listed; a record of an umbrella names its root files.
+/// Executable mix manifests can load app manifests, nested configuration,
+/// and arbitrary data. Cover every visible regular project file.
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    let config = Path::new("config");
-    let Some(names) = project.read_input_dir(config)? else {
-        return Ok(Vec::new());
-    };
-    let mut inputs: Vec<PathBuf> = names
-        .into_iter()
-        .filter(|name| name.to_string_lossy().ends_with(".exs"))
-        .map(|name| config.join(name))
-        .filter(|path| project.is_input_file(path))
-        .collect();
-    inputs.sort();
-    Ok(inputs)
+    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &OUTPUTS)
 }
 
 /// mix.exs, mix.lock and the config files, by digest: a closure's
@@ -60,12 +47,13 @@ pub fn generate_lock(
         return Err(err("mix.exs not found"));
     }
     ui::note("no mix.lock; resolving with the store mix...");
+    let basis = resolution_basis(project)?;
     let args = ["mix", "deps.get"];
     let spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
         project,
         elixir_tool(selected)?,
-        &args,
+        &args[1..],
     )?;
     run_mix_checked(
         door,
@@ -74,7 +62,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             online: true,
-            hex_home: None,
+            inputs: Some(&basis),
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -93,11 +81,12 @@ pub(crate) fn update(
     selected: &Selected,
     args: &[&str],
 ) -> io::Result<()> {
+    let basis = resolution_basis(project)?;
     let spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
         project,
         elixir_tool(selected)?,
-        args,
+        &args[1..],
     )?;
     run_mix_checked(
         door,
@@ -106,7 +95,7 @@ pub(crate) fn update(
             lock_root: project.path(),
             args,
             online: true,
-            hex_home: None,
+            inputs: Some(&basis),
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
@@ -118,16 +107,16 @@ pub(crate) fn update(
 
 /// The consistency gate: `mix deps.get --check-locked`, exit status only
 /// (it evaluates mix.exs, delegated trust and never artifact authority).
-/// It needs the Hex registry, so it reaches the mirror, with a persistent
-/// planner `HEX_HOME` to keep the registry cache warm. Nothing in the
+/// It needs the Hex registry, so it reaches the mirror. Its Hex home is
+/// private scratch: project code must never seed configuration or code for
+/// another run. Registry reuse belongs to the proxy cache. Nothing in the
 /// project may change.
 fn check_locked(
     door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     beam_obj: &Path,
+    basis: &crate::comforter::join::Digests,
 ) -> io::Result<()> {
-    let planner_home = door.store().root.join("planner-hexhome");
-    fs::create_dir_all(&planner_home)?;
     let out = run_mix(
         door,
         MixRun {
@@ -135,7 +124,7 @@ fn check_locked(
             lock_root: project.path(),
             args: &["mix", "deps.get", "--check-locked"],
             online: true,
-            hex_home: Some(planner_home.canonicalize()?),
+            inputs: Some(basis),
             files: Vec::new(),
             publish: MixPublish::Detached,
         },
@@ -157,6 +146,7 @@ fn parse_lock(
     project: &ProjectRoot,
     beam_obj: &Path,
     lock: &str,
+    basis: &crate::comforter::join::Digests,
 ) -> io::Result<Vec<HexDep>> {
     let helper = format!("{SCRATCH}/helper.exs");
     let lock_copy = format!("{SCRATCH}/mix.lock");
@@ -167,7 +157,7 @@ fn parse_lock(
             lock_root: project.path(),
             args: &["elixir", &helper, "lock", &lock_copy],
             online: false,
-            hex_home: None,
+            inputs: Some(basis),
             files: vec![
                 (PathBuf::from("helper.exs"), HELPER.as_bytes().to_vec()),
                 (PathBuf::from("mix.lock"), lock.as_bytes().to_vec()),
@@ -200,12 +190,23 @@ pub fn plan_elixir(
     beam_obj: &Path,
     selected: &Selected,
 ) -> io::Result<(ElixirPlan, String, crate::comforter::join::Digests)> {
+    let observed = project.observing_inputs()?;
+    let project = &observed;
+    let basis = resolution_basis(project)?;
     if !project.is_input_file(Path::new("mix.exs")) {
         return Err(err("mix.exs not found"));
     }
     require_lock(project)?;
     let lock = read_mix_lock(project)?;
-    let inputs = check_locked_inputs(project, beam_obj, &lock)?;
+    let bind = |input: String, basis: &crate::comforter::join::Digests| {
+        format!(
+            "canonical-project-v1:{input}:{}",
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(basis).expect("string map")
+            ))
+        )
+    };
+    let inputs = check_locked_inputs(project, beam_obj, &lock)?.map(|input| bind(input, &basis));
     let unchanged = match &inputs {
         Some(inputs) => check_locked_passed(door.store(), project, inputs)?,
         None => false,
@@ -213,17 +214,19 @@ pub fn plan_elixir(
     if unchanged {
         ui::trace("mix.exs and mix.lock unchanged since their last passing check");
     } else {
-        check_locked(door, project, beam_obj)?;
+        check_locked(door, project, beam_obj, &basis)?;
         // Recorded only when the inputs still hash the same after the
         // check, so the record names the bytes the check actually read.
-        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?;
+        let after_basis = resolution_basis(project)?;
+        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?
+            .map(|input| bind(input, &after_basis));
         if let (Some(before), Some(after)) = (&inputs, &after) {
             if before == after {
                 record_check_locked(door.store(), door.lease(), project, before);
             }
         }
     }
-    let mut deps = parse_lock(door, project, beam_obj, &lock)?;
+    let mut deps = parse_lock(door, project, beam_obj, &lock, &basis)?;
     deps.sort_by(|a, b| a.app.cmp(&b.app));
     let plan = ElixirPlan {
         // The toolchain this plan was made under is the selected one, so
@@ -238,7 +241,12 @@ pub fn plan_elixir(
     }
     // The resolution files this plan was built from, so the resolution
     // join binds a record to this generation of mix.exs and its lock.
-    let basis = resolution_basis(project)?;
+    project.verify_observed_inputs()?;
+    if resolution_basis(project)? != basis {
+        return Err(err(
+            "Elixir resolution inputs changed while planning; run `tog` again",
+        ));
+    }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
 }
 
@@ -256,12 +264,13 @@ pub fn attest_project(
         return Err(err("mix.exs not found"));
     }
     require_lock(project)?;
+    let basis = resolution_basis(project)?;
     let args = ["mix", "deps.get", "--check-locked"];
     let mut spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
         project,
         elixir_tool(selected)?,
-        &args,
+        &args[1..],
     )?;
     spec.require_unchanged = true;
     spec.publish_receipt = false;
@@ -273,7 +282,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             online: true,
-            hex_home: None,
+            inputs: Some(&basis),
             files: Vec::new(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, slot.clone())),
@@ -303,17 +312,87 @@ mod tests {
     use crate::kernel::resolve::DoorKind;
     use crate::kernel::testutil::TempDir;
     use crate::tailors::elixir::registry::REPO_HOST;
+    use std::fs;
+
+    #[test]
+    fn basis_refuses_a_lock_or_manifest_replaced_after_consumption() {
+        let temp = TempDir::named("elixir-basis-race");
+        fs::write(temp.0.join("mix.exs"), "manifest A").unwrap();
+        fs::write(temp.0.join("mix.lock"), "lock A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("mix.lock"), "lock B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+        let observed = held.observing_inputs().unwrap();
+        resolution_basis(&observed).unwrap();
+        fs::write(temp.0.join("mix.exs"), "manifest B").unwrap();
+        assert!(resolution_basis(&observed).is_err());
+    }
+
+    #[test]
+    fn an_included_manifest_change_or_new_file_invalidates_the_basis() {
+        let temp = TempDir::named("elixir-included-input");
+        fs::create_dir_all(temp.0.join("apps/web/mix.exs").parent().unwrap()).unwrap();
+        fs::write(temp.0.join("mix.exs"), "manifest").unwrap();
+        fs::write(temp.0.join("mix.lock"), "lock").unwrap();
+        fs::write(temp.0.join("apps/web/mix.exs"), "included manifest A").unwrap();
+        let held = ProjectRoot::open(&temp.0).unwrap();
+        let basis = resolution_basis(&held).unwrap();
+        assert!(basis.contains_key("apps/web/mix.exs"));
+        fs::write(temp.0.join("apps/web/mix.exs"), "included manifest B").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Elixir, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "elixir", &files, &basis).is_err()
+        );
+        let basis = resolution_basis(&held).unwrap();
+        fs::write(temp.0.join("new-data.txt"), "new input").unwrap();
+        let files = crate::tailors::resolution_files(&super::super::tailor::Elixir, &held)
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::comforter::join::check_basis_for_test(&held, "elixir", &files, &basis).is_err()
+        );
+    }
 
     /// A harness whose upstream answers repo.hex.pm from the recorded Hex
     /// rows, and whose proxy every door in this thread uses while it
     /// lives. builds.hex.pm is not served: no route permits it.
-    fn hex_harness(label: &str) -> Option<&'static Harness> {
+    fn hex_harness(label: &str, corrupt: bool) -> Option<&'static Harness> {
         let relay = relay(label)?;
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
         SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
         let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
         reach.request_timeout = std::time::Duration::from_secs(20);
         let rows = stored_rows("elixir", label);
+        if corrupt {
+            use std::io::{Read, Write};
+            let body_path = rows.0.join("repo.hex.pm/packages/jason.body");
+            let body = fs::read(&body_path).unwrap();
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(body.as_slice())
+                .read_to_end(&mut decoded)
+                .unwrap();
+            *decoded.last_mut().unwrap() ^= 1;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&decoded).unwrap();
+            let corrupt = encoder.finish().unwrap();
+            fs::write(body_path, &corrupt).unwrap();
+            let index_path = rows.0.join("index.json");
+            let mut index: Vec<serde_json::Value> =
+                serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+            for row in &mut index {
+                if row["url"] == "https://repo.hex.pm/packages/jason" {
+                    row["sha256"] = hex::encode(Sha256::digest(&corrupt)).into();
+                    row["size"] = corrupt.len().into();
+                }
+            }
+            fs::write(index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+        }
+
         let harness: &'static Harness = Box::leak(Box::new(Harness::serving(
             label,
             reach,
@@ -374,9 +453,10 @@ mod tests {
     #[test]
     #[ignore = "realizes the store BEAM over the network"]
     fn mix_resolves_through_the_hex_mirror() {
+        let _env = policy::test_env_lock();
         let _serial = policy::attribution_test_lock();
         let label = "mix_resolves_through_the_hex_mirror";
-        let Some(harness) = hex_harness(label) else {
+        let Some(harness) = hex_harness(label, false) else {
             return;
         };
         let selected = super::super::shipped_selection().unwrap();
@@ -390,7 +470,13 @@ mod tests {
         let temp = TempDir::named("elixir-mirror");
         let dir = temp.0.join("project");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("mix.exs"), manifest("{:jason, \"1.4.5\"}")).unwrap();
+        fs::write(
+            dir.join("mix.exs"),
+            manifest(
+                "(if File.dir?(\"feature\"), do: {:telemetry, \"1.4.2\"}, else: {:jason, \"1.4.5\"})",
+            ),
+        )
+        .unwrap();
         let dir = dir.canonicalize().unwrap();
         let held = ProjectRoot::open(&dir).unwrap();
 
@@ -405,16 +491,65 @@ mod tests {
             "{lock}"
         );
         assert!(dir.join(".tog/resolution/elixir.json").is_file());
+
+        let direct = temp.0.join("direct");
+        let direct_home = temp.0.join("direct-home");
+        fs::create_dir_all(&direct).unwrap();
+        fs::create_dir_all(&direct_home).unwrap();
+        fs::copy(dir.join("mix.exs"), direct.join("mix.exs")).unwrap();
+        let ca = temp.0.join("fixture-ca.pem");
+        fs::write(&ca, harness.upstream_ca_pem()).unwrap();
+        let forwarder =
+            crate::kernel::resolve::testing::blind_forwarder(harness.upstream.address());
+        let direct_result = std::process::Command::new(beam.join("elixir/bin/mix"))
+            .args(["deps.get"])
+            .current_dir(&direct)
+            .env_clear()
+            .envs(super::super::forced_env(
+                &beam,
+                &direct_home.join("deps"),
+                &direct_home,
+            ))
+            .env_remove("HEX_OFFLINE")
+            .env("https_proxy", format!("http://{forwarder}"))
+            .env("HEX_CACERTS_PATH", &ca)
+            .env("HOME", &direct_home)
+            .env("PATH", super::super::beam_path(&beam))
+            .output()
+            .unwrap();
+        assert!(
+            direct_result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&direct_result.stderr)
+        );
+        assert_eq!(fs::read(direct.join("mix.lock")).unwrap(), lock.as_bytes());
+
         assert!(
             !dir.join("deps").exists(),
             "deps were fetched into the project"
         );
 
+        // A prior project's writable Hex home must never enter this run.
+        let shared = harness.store.root.join("planner-hexhome");
+        fs::create_dir_all(&shared).unwrap();
+        let marker = dir.join("cross-project-code-ran");
+        fs::write(
+            shared.join("hex.config"),
+            format!(
+                "File.write!({:?}, \"injected\"); []",
+                marker.to_str().unwrap()
+            ),
+        )
+        .unwrap();
         let ((planned, ledgers), recorded) = through_door(harness, DoorKind::Planner, |door| {
             let planned = plan_elixir(door, &held, &beam, &selected);
             (planned, door.take_kept_ledgers())
         });
         let (plan, _, basis) = planned.unwrap();
+        assert!(
+            !marker.exists(),
+            "a previous project injected Hex config code"
+        );
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(plan.deps.len(), 1, "{:?}", plan.deps);
         assert_eq!(plan.deps[0].version, "1.4.5");
@@ -439,6 +574,49 @@ mod tests {
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(record.outputs.len(), 2, "{:?}", record.outputs);
 
+        // Empty directory presence and host permissions must never change
+        // executable-manifest semantics in the canonical project view.
+        fs::create_dir(dir.join("feature")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.join("mix.exs"), fs::Permissions::from_mode(0o700)).unwrap();
+        let (replanned, _) = through_door(harness, DoorKind::Planner, |door| {
+            plan_elixir(door, &held, &beam, &selected)
+        });
+        assert_eq!(replanned.unwrap().0.deps[0].package, "jason");
+        let (reattested, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &beam, &selected)
+        });
+        reattested.unwrap();
+        assert!(dir.join("feature").is_dir());
+        assert_eq!(
+            fs::metadata(dir.join("mix.exs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        let (updated, recorded) = through_door(harness, DoorKind::Edit, |door| {
+            update(
+                door,
+                &held,
+                &beam,
+                &selected,
+                &["mix", "deps.update", "jason"],
+            )
+        });
+        updated.unwrap();
+        assert!(recorded.is_empty(), "{recorded:?}");
+        assert_eq!(fs::read(dir.join("mix.lock")).unwrap(), lock.as_bytes());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(".tog/resolution/elixir.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            receipt["command"],
+            serde_json::json!(["mix", "deps.update", "jason"])
+        );
+
         fs::write(
             dir.join("mix.exs"),
             manifest("{:jason, \"1.4.5\"}, {:telemetry, \"1.4.2\"}"),
@@ -451,6 +629,37 @@ mod tests {
         let why = drifted.unwrap_err().to_string();
         assert!(why.contains("not attested"), "{why}");
         assert_eq!(fs::read(dir.join("mix.lock")).unwrap(), before);
+        done();
+    }
+
+    #[test]
+    #[ignore = "realizes the store BEAM over the network"]
+    fn mix_refuses_a_corrupted_registry_signature() {
+        let _env = policy::test_env_lock();
+        let _serial = policy::attribution_test_lock();
+        let Some(harness) = hex_harness("hex-corrupt-signature", true) else {
+            return;
+        };
+        let selected = super::super::shipped_selection().unwrap();
+        let beam = super::super::realize_runtime(
+            &harness.store,
+            &harness.activity,
+            Platform::host().unwrap(),
+            &selected,
+        )
+        .unwrap();
+        let temp = TempDir::named("hex-corrupt-project");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("mix.exs"), manifest("{:jason, \"1.4.5\"}")).unwrap();
+        let held = ProjectRoot::open(&dir).unwrap();
+        let (result, _) = through_door(harness, DoorKind::MissingLock, |door| {
+            generate_lock(door, &held, &beam, &selected)
+        });
+        let why = result.unwrap_err().to_string();
+        assert!(why.to_ascii_lowercase().contains("signature"), "{why}");
+        assert!(!dir.join("mix.lock").exists());
+        assert!(!dir.join(".tog/resolution/elixir.json").exists());
         done();
     }
 }

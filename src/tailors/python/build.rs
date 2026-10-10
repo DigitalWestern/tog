@@ -1001,20 +1001,6 @@ pub fn build_sdist_wheel(
     build_sdist_wheel_at_depth(door, pkg, selected, None, None, 0).map(|wheel| wheel.path)
 }
 
-/// Public runtime-aware entry point for callers that are building one sdist
-/// outside a complete environment realization (for example, an integration
-/// test). Normal project sync supplies this automatically from its Plan.
-pub fn build_sdist_wheel_with_runtime_plan(
-    door: &mut ResolutionDoor<'_>,
-    pkg: &LockedPackage,
-    selected: &Selected,
-    runtime_plan: &Plan,
-) -> io::Result<PathBuf> {
-    crate::tailors::install_kinds();
-    build_sdist_wheel_at_depth(door, pkg, selected, None, Some(runtime_plan), 0)
-        .map(|wheel| wheel.path)
-}
-
 /// Turn a git dependency into an ordinary sdist package: realize the commit,
 /// pack the (sub)directory deterministically, and put it in the artifact cache
 /// so `download_verified_held` finds it without touching the network.
@@ -1499,6 +1485,9 @@ pub fn ensure_build_environment(
 }
 
 #[cfg(test)]
+mod isolation_tests;
+
+#[cfg(test)]
 mod tests {
     /// tokenizers 0.13.3's real error sat above rustc's command line and
     /// pip's traceback, so the 40-line tail showed only warnings. The
@@ -1678,8 +1667,8 @@ mod tests {
                 .insert("build_env".into(), "store-independent".into());
             assert_eq!(
                 fixed.object_id(),
-                // build_view runtime-only/2 since #331.
-                "321a28af3fe8b27ac858314a1367413fe91c5c2a-locked-rust-1.0"
+                // build_view runtime-only/3 since #559.
+                "33b4643d390374473631d870ffced8da7f7192f9-locked-rust-1.0"
             );
         }
         let today = pinned(shipped_rust.version("rustc").unwrap());
@@ -1991,8 +1980,8 @@ mod tests {
             (
                 Platform::X86_64UnknownLinuxGnu,
                 Some("native-libs-object"),
-                // build_view runtime-only/2 since #331.
-                "c897995821cc1696a67d8723e06bc4ec75f133e7-example-1.0",
+                // build_view runtime-only/3 since #559.
+                "879c801b7f12cd3dd30127d641ddf04cb2324c50-example-1.0",
             ),
             (
                 Platform::Aarch64AppleDarwin,

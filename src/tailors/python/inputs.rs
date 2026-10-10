@@ -526,6 +526,7 @@ pub fn locked_requirements(
         "uv pip compile failed",
     )?;
     drop(missing_lock);
+    project.regenerated_input(lock_path);
     // The stamp is the only file tog writes here, and it goes through the
     // held project descriptor, so a `.tog` swapped for a symlink is refused
     // rather than followed. `requirements.lock.txt` beside it is the door's

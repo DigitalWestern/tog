@@ -53,10 +53,8 @@ pub mod boundary {
     pub use crate::kernel::resolve::confine::SocketScan;
     // tests/linux_python.rs
     pub use crate::tailors::python::ensure_uv_for;
-    // tests/build_isolation.rs, tests/sandbox_deny.rs
-    pub use crate::tailors::python::build::{
-        build_sdist_wheel, build_sdist_wheel_with_runtime_plan,
-    };
+    // tests/sandbox_deny.rs
+    pub use crate::tailors::python::build::build_sdist_wheel;
     // tests/toolchain_lock.rs
     pub use crate::kernel::provider::rust::rust_object_id;
     // tests/kernel_smoke.rs, tests/git_deps.rs
