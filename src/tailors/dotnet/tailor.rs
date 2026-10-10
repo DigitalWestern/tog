@@ -94,7 +94,7 @@ impl Tailor for Dotnet {
         super::resolve::resolution_outputs(project)
     }
 
-    /// `global.json` and the `Directory.Build` files MSBuild imports.
+    /// Every project file visible to executable MSBuild resolution.
     fn resolution_inputs(&self, project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
         super::resolve::resolution_inputs(project)
     }

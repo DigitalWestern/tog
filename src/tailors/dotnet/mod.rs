@@ -399,9 +399,8 @@ pub const BUILD_VERBS: &[&str] = &[
 
 /// `tog run`'s guard is advisory: wrappers can bypass it. During
 /// realization and build, tog never evaluates project code outside the
-/// build sandbox. Missing-lock lock generation is the explicit host-side
-/// exception: config and environment are pinned, but project MSBuild code
-/// runs on the host.
+/// build sandbox. Missing-lock generation and attestation evaluate MSBuild
+/// in the confined resolution sandbox through the NuGet mirror.
 pub fn refused_run_command(cmd: &[String]) -> Option<String> {
     if cmd.first().map(String::as_str) != Some("dotnet") {
         return None;

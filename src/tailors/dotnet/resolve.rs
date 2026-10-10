@@ -17,19 +17,19 @@ pub(crate) fn resolution_outputs(project: &ProjectRoot) -> io::Result<Vec<PathBu
     Ok(vec![find_project(project)?, PathBuf::from(LOCK_FILE)])
 }
 
-/// The files MSBuild reads beside the csproj during restore: `global.json`
-/// (the SDK it selects) and the `Directory.Build` files it imports on its
-/// own, each when the project has one.
+/// MSBuild property functions and imported targets can read arbitrary project
+/// data. Bind every regular file visible to its snapshot until precise input
+/// declarations have a reviewed design.
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    Ok([
-        "global.json",
-        "Directory.Build.props",
-        "Directory.Build.targets",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .filter(|path| project.is_input_file(path))
-    .collect())
+    let outputs = resolution_outputs(project)?;
+    let outputs: Vec<_> = outputs
+        .iter()
+        .map(|p| {
+            p.to_str()
+                .ok_or_else(|| err(".NET resolution output path is not UTF-8"))
+        })
+        .collect::<io::Result<_>>()?;
+    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &outputs)
 }
 
 /// Every resolution file of `project` that exists, by digest: a closure's
@@ -54,6 +54,7 @@ pub fn generate_lock(
     selected: &Selected,
 ) -> io::Result<()> {
     preflight(project, selected.version("dotnet-sdk")?)?;
+    let basis = resolution_basis(project)?;
     ui::note("no packages.lock.json; resolving with the store SDK...");
     let args = ["--use-lock-file"];
     let spec = crate::tailors::record_spec(
@@ -69,6 +70,7 @@ pub fn generate_lock(
             lock_root: project.path(),
             args: &args,
             outputs: resolution_outputs(project)?,
+            inputs: Some(&basis),
             receipt: Some(record::producer(spec, Default::default())),
         },
     )?;
@@ -92,6 +94,7 @@ pub fn attest_project(
     selected: &Selected,
 ) -> io::Result<(record::ResolutionRecord, Vec<u8>)> {
     preflight(project, selected.version("dotnet-sdk")?)?;
+    let basis = resolution_basis(project)?;
     require_lock(project)?;
     let args = ["--locked-mode"];
     let mut spec = crate::tailors::record_spec(
@@ -110,6 +113,7 @@ pub fn attest_project(
             lock_root: project.path(),
             args: &args,
             outputs: resolution_outputs(project)?,
+            inputs: Some(&basis),
             receipt: Some(record::producer(spec, slot.clone())),
         },
     )?;
@@ -151,6 +155,34 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use std::fs;
     use std::io::Write as _;
+
+    #[test]
+    fn msbuild_data_and_nested_imports_are_resolution_inputs() {
+        let temp = TempDir::named("dotnet-inputs");
+        for directory in ["config/nested", "obj", "bin", ".git", ".tog"] {
+            fs::create_dir_all(temp.0.join(directory)).unwrap();
+        }
+        fs::write(temp.0.join("app.csproj"), csproj("")).unwrap();
+        fs::write(temp.0.join("config/nested/version.txt"), "1.0.0").unwrap();
+        for file in [
+            "obj/ignored",
+            "bin/ignored",
+            ".git/config",
+            ".tog/closure.json",
+        ] {
+            fs::write(temp.0.join(file), "excluded").unwrap();
+        }
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        assert_eq!(
+            resolution_inputs(&project).unwrap(),
+            vec![PathBuf::from("config/nested/version.txt")]
+        );
+        let before = resolution_basis(&project).unwrap();
+        fs::write(temp.0.join("config/nested/version.txt"), "2.0.0").unwrap();
+        assert_ne!(resolution_basis(&project).unwrap(), before);
+        std::os::unix::fs::symlink("config", temp.0.join("linked")).unwrap();
+        assert!(resolution_inputs(&project).is_err());
+    }
 
     /// An unsigned package with one netstandard2.0 asset, so the fixture
     /// restore has a real `.nupkg` to install (the recorded rows kept

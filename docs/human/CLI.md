@@ -1155,7 +1155,13 @@ rubygems.org. Elixir's is `mix deps.get --check-locked`, with Hex pointed
 at the session's mirror of repo.hex.pm (`HEX_MIRROR`). Both run confined,
 like the others, and their fetches are in the record's ledger. .NET's is
 `dotnet restore --locked-mode` with a tog-written `nuget.config` whose one
-source is the session's NuGet mirror.
+source is the session's NuGet mirror. Missing-lock restore and attestation
+require the resolution sandbox. MSBuild can read arbitrary project data, so
+.NET records every regular file visible in the resolver view, except `obj/`,
+`bin/`, `.git/` and `.tog/`. Changes or added files invalidate that evidence.
+Symlinks in this input set are refused. As with Ruby and Elixir, the staged
+resolver view uses file mode 0644 and directory mode 0755, and omits empty
+directories. The checkout's permissions and empty directories are preserved.
 
 Hashes alone prove package bytes, not how the dependency set was resolved.
 To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`
